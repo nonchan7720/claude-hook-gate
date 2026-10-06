@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.1.0...v0.2.0) (2026-10-06)
+
+
+### Code Refactoring
+
+* port scripts to TypeScript ([#1](https://github.com/nonchan7720/claude-hook-gate/issues/1)) ([df07224](https://github.com/nonchan7720/claude-hook-gate/commit/df0722467904068777ecd62280134c5af5ad9510))
+
+
+### Continuous Integration
+
+* add Biome lint/typecheck workflow ([#4](https://github.com/nonchan7720/claude-hook-gate/issues/4)) ([64e9f46](https://github.com/nonchan7720/claude-hook-gate/commit/64e9f466193cb39dd2f6f3e71d1b4619ecde3394))
+
+
+### Miscellaneous Chores
+
+* list refactor, docs, build and ci changes in the changelog ([#7](https://github.com/nonchan7720/claude-hook-gate/issues/7)) ([cf57826](https://github.com/nonchan7720/claude-hook-gate/commit/cf57826eb39415a6cff751f5a2bfba337f55b087))
+
 ## 0.1.0 (2026-10-06)
 
 
