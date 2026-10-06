@@ -5,9 +5,7 @@
   "description": "各プロジェクトの .claude/gate.yaml のスキーマ。二相構造: rules は PostToolUse で動き、変更ファイルの glob にマッチしたパッケージ単位の lint/test を実行する（ブロックしない）。consistency_checks は Stop/SubagentStop で動き、rules フェーズで実際にマッチした rule が run_checks で名前を参照したものだけを実行する、パッケージを跨いだ整合性検証（失敗すると停止をブロックする）。",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "rules"
-  ],
+  "required": ["rules"],
   "properties": {
     "policy": {
       "$ref": "#/definitions/policySetting",
@@ -36,10 +34,7 @@
     "consistencyCheck": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "name",
-        "run"
-      ],
+      "required": ["name", "run"],
       "properties": {
         "name": {
           "type": "string",
@@ -78,10 +73,7 @@
     "rule": {
       "type": "object",
       "additionalProperties": false,
-      "required": [
-        "match",
-        "run"
-      ],
+      "required": ["match", "run"],
       "properties": {
         "match": {
           "description": "変更ファイルのパスに対する glob パターン（プロジェクトルートからの相対パス基準）。* は / を跨がない、** は跨ぐ、{a,b} でブレース展開可能。文字列1つ、または複数パターンのリストを指定できる。",
@@ -113,10 +105,7 @@
               "const": true
             },
             {
-              "enum": [
-                "file",
-                "pattern_root"
-              ]
+              "enum": ["file", "pattern_root"]
             }
           ]
         },
@@ -185,9 +174,7 @@
       "type": "object",
       "description": "中のコマンドを並行実行するブロック。全コマンドの完了を待ってから run の次の要素へ進む。1つでも失敗すればルールの失敗となる。parallel の中に parallel はネストできない。",
       "additionalProperties": false,
-      "required": [
-        "parallel"
-      ],
+      "required": ["parallel"],
       "properties": {
         "parallel": {
           "type": "array",
@@ -208,9 +195,7 @@
         {
           "type": "object",
           "additionalProperties": false,
-          "required": [
-            "cmd"
-          ],
+          "required": ["cmd"],
           "properties": {
             "cmd": {
               "type": "string",
