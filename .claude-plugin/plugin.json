@@ -1,0 +1,22 @@
+{
+  "name": "feedback-gate",
+  "version": "0.1.0",
+  "description": "Claude Code hooks that inject feedback rules, enforce them on tool calls and at stop time, and run per-project quality gates defined in .claude/gate.yaml",
+  "author": {
+    "name": "nonchan7720"
+  },
+  "userConfig": {
+    "agentLaunchGuard": {
+      "type": "boolean",
+      "title": "Agent launch guard",
+      "description": "Ask for confirmation, showing the full prompt, before launching code-implementer or sending a message to any agent other than git-operator.",
+      "default": false
+    },
+    "rulesFile": {
+      "type": "string",
+      "title": "Rules file",
+      "description": "Path to a Markdown file injected into every prompt in place of the bundled rules/feedback_rules.md. If the file does not exist, the bundled file is used. A leading ~ is expanded to your home directory.",
+      "default": "~/.claude/feedback-gate/feedback_rules.md"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "claude-hook-gate",
+  "owner": {
+    "name": "nonchan7720"
+  },
+  "plugins": [
+    {
+      "name": "feedback-gate",
+      "source": "./"
+    }
+  ]
+}
