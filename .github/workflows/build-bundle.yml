@@ -1,0 +1,43 @@
+name: Build bundle
+
+# hooks/register.js（src/ を依存ごとまとめた配布用バンドル）を PR の head ブランチへコミットする。
+# プラグインは hooks/register.js を直接読むので、PR にはバンドルが入っている必要がある（初回は新規ファイルとして追加される）。
+# バンドルは CI が生成してコミットするもので、貢献者がコミットする必要はない（手元で動かすときは `bun run build`）。
+on:
+  pull_request:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-bundle-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # フォークからの PR は書き込み権限が無いので対象外。
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          # push に使うトークン。差し替えるときはこの 1 行だけ変える（例: GitHub App のトークン）。
+          # GITHUB_TOKEN で push したコミットは他のワークフロー（CI）を自動では起動しない。
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Commit the bundle when it changed
+        run: |
+          if [ -z "$(git status --porcelain -- hooks/register.js)" ]; then
+            echo "bundle is up to date"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          git add hooks/register.js
+          git commit -m "chore: build bundle"
+          git push
