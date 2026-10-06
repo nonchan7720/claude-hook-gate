@@ -1,4 +1,4 @@
-import { test, expect, mock } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 type Call = { argv: readonly string[]; init?: { stdin?: string; env?: Record<string, string>; timeoutMs?: number } }
 type Ran = { exitCode?: number; stdout?: string; stderr?: string }
@@ -6,7 +6,7 @@ type Ran = { exitCode?: number; stdout?: string; stderr?: string }
 // スクリプトはプラグイン同梱（${$.plugin.root}/scripts/）。root の実値はテスト環境依存なので、
 // process.run の argv では `<root>/scripts/` を HOOKS に正規化して扱う。
 const HOOKS = 'SCRIPTS'
-const normalize = (argv: readonly string[]) => argv.map(a => a.replace(/^.*\/scripts\//, `${HOOKS}/`))
+const normalize = (argv: readonly string[]) => argv.map((a) => a.replace(/^.*\/scripts\//, `${HOOKS}/`))
 
 // 'process.run' の下に置くダミー。argv を連結した文字列で結果を引く。
 const setup = (on: any, results: Record<string, Ran> = {}, files: Record<string, string> = {}, exists: boolean | ((path: string) => boolean) = true) => {
@@ -138,7 +138,7 @@ test('PostToolUse: record-changes.sh → stop-test-gate.sh rules の順で呼び
     tool_response: {},
     tool_use_id: 't1',
   })
-  expect(calls.map(c => c.argv.slice(1).join(' '))).toEqual([`${HOOKS}/record-changes.sh`, `${HOOKS}/stop-test-gate.sh rules`])
+  expect(calls.map((c) => c.argv.slice(1).join(' '))).toEqual([`${HOOKS}/record-changes.sh`, `${HOOKS}/stop-test-gate.sh rules`])
   expect(calls[1]!.init?.timeoutMs).toBe(600000)
   expect(r.block).toBe('lint failed')
 })
@@ -208,7 +208,7 @@ test(
     const beneath = countBeneath(on)
     await $.tool.call({ tool: 'Agent', subagent_type: 'code-implementer', prompt: 'p' })
     await $.tool.call({ tool: 'SendMessage', to: 'x', message: 'm' })
-    expect(calls.map(c => c.argv.join(' '))).toEqual([`bash ${HOOKS}/agent-launch-guard.sh`, `bash ${HOOKS}/agent-launch-guard.sh`])
+    expect(calls.map((c) => c.argv.join(' '))).toEqual([`bash ${HOOKS}/agent-launch-guard.sh`, `bash ${HOOKS}/agent-launch-guard.sh`])
     const stdin = JSON.parse(calls[0]!.init!.stdin!)
     expect(stdin.hook_event_name).toBe('PreToolUse')
     expect(stdin.tool_name).toBe('Agent')
@@ -217,19 +217,15 @@ test(
   },
 )
 
-test(
-  'PreToolUse: agentLaunchGuard が true でも agent-launch-guard.sh が何も返さなければ後続へ流す',
-  { options: { agentLaunchGuard: true } },
-  async ($, on) => {
-    setup(on)
-    const beneath = countBeneath(on)
-    await $.tool.call({ tool: 'Agent', subagent_type: 'general-purpose', prompt: 'p' })
-    expect(beneath.length).toBe(1)
-  },
-)
+test('PreToolUse: agentLaunchGuard が true でも agent-launch-guard.sh が何も返さなければ後続へ流す', { options: { agentLaunchGuard: true } }, async ($, on) => {
+  setup(on)
+  const beneath = countBeneath(on)
+  await $.tool.call({ tool: 'Agent', subagent_type: 'general-purpose', prompt: 'p' })
+  expect(beneath.length).toBe(1)
+})
 
 test('PreToolUse: agentLaunchGuard が true でも Bash は feedback-guard.py だけを呼ぶ', { options: { agentLaunchGuard: true } }, async ($, on) => {
   const calls = setup(on)
   await $.tool.call({ tool: 'Bash', command: 'ls' })
-  expect(calls.map(c => c.argv.join(' '))).toEqual([`python3 ${HOOKS}/feedback-guard.py`])
+  expect(calls.map((c) => c.argv.join(' '))).toEqual([`python3 ${HOOKS}/feedback-guard.py`])
 })

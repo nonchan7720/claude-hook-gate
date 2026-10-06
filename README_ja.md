@@ -71,6 +71,18 @@ flowchart LR
 
 状態ファイル（変更ファイル、試行回数、コマンドのログ）はプロジェクトの `.claude/.gate-status/` 配下に書かれます（`gate.yaml` は従来どおり `.claude/` 直下）。プロジェクトの `.gitignore` に `.claude/.gate-status/` を足してください。旧版が `.claude/` 直下（および `.claude/hooks/logs/`）に残した状態ファイルは、セッション開始時に自動で削除されます。
 
+## 開発
+
+[Bun](https://bun.sh) が必要です。
+
+```
+bun install          # 開発用の依存を入れる
+bun run lint         # Biome（lint とフォーマットの検査）。`bun run format` で自動修正
+bun run typecheck    # tsc --noEmit
+```
+
+CI（`.github/workflows/ci.yml`）は、プルリクエストごとに `bun run lint` と `bun run typecheck` を実行します。
+
 ## リリース
 
 バージョンは [release-please](https://github.com/googleapis/release-please) で管理します。コミットメッセージ（と PR タイトル）は [Conventional Commits](https://www.conventionalcommits.org/ja/)（`feat:`、`fix:`、`refactor:`、`chore:` など）で書いてください。`main` への push ごとに「Release Please」ワークフローがリリース PR を作成・更新し、`package.json`、`.claude-plugin/plugin.json`、`.claude-plugin/marketplace.json` のバージョンを上げて `CHANGELOG.md` を更新します。それをマージするとリリースのタグが付きます。ワークフローは既定の `GITHUB_TOKEN`（PAT は使いません）を使うため、リリース PR では CI が自動では起動しません。必須ステータスチェックを設定している場合は、再実行するか空コミットを手で push してください。

@@ -71,6 +71,18 @@ Answer `y` to add the marketplace, then choose the scope.
 
 State files (changed files, attempt counters, command logs) are written under the project's `.claude/.gate-status/` directory (`gate.yaml` stays directly under `.claude/`). Add `.claude/.gate-status/` to the project's `.gitignore`. State files left by older versions directly under `.claude/` (and `.claude/hooks/logs/`) are removed automatically at session start.
 
+## Development
+
+Requires [Bun](https://bun.sh).
+
+```
+bun install          # install dev dependencies
+bun run lint         # Biome (lint + format check); `bun run format` fixes
+bun run typecheck    # tsc --noEmit
+```
+
+CI (`.github/workflows/ci.yml`) runs `bun run lint` and `bun run typecheck` on every pull request.
+
 ## Releases
 
 Versions are managed by [release-please](https://github.com/googleapis/release-please). Write commit messages (and PR titles) as [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `chore:`, ...): on every push to `main` the "Release Please" workflow opens or updates a release PR that bumps the version in `package.json`, `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` and updates `CHANGELOG.md`; merging it tags the release. The workflow uses the default `GITHUB_TOKEN` (no personal access token), so the release PR does not trigger CI on its own. If you have required status checks, re-run them or push an empty commit by hand.

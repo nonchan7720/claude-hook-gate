@@ -135,8 +135,8 @@ export const register: Register = (on, options) => {
   })
 
   on('classic.PreToolUse', async ($, e, next) => {
-    const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(e.tool)
-    if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(e.tool)) return next(e)
+    const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(String(e.tool))
+    if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(String(e.tool))) return next(e)
     const { tool, tool_use_id, agentId, ...toolInput } = e as Record<string, unknown>
     const stdin = {
       session_id: await $.session.id(),
@@ -147,16 +147,14 @@ export const register: Register = (on, options) => {
       tool_use_id,
     }
     // settings では `|| true` 付きなので、deny 以外（exit 2 以外）は無視していた。
-    const scripts: Script[] = guardsAgents
-      ? [{ interp: 'bash', file: 'agent-launch-guard.sh' }]
-      : [{ interp: 'python3', file: 'feedback-guard.py' }]
+    const scripts: Script[] = guardsAgents ? [{ interp: 'bash', file: 'agent-launch-guard.sh' }] : [{ interp: 'python3', file: 'feedback-guard.py' }]
     const mine = await runScripts($, 'PreToolUse', stdin, scripts)
     if (decided(mine)) return mine as any
     return withNext(next, e, mine)
   })
 
   on('classic.PostToolUse', async ($, e, next) => {
-    if (!/^(Write|Edit|MultiEdit)$/.test(e.tool_name)) return next(e)
+    if (!/^(Write|Edit|MultiEdit)$/.test(String(e.tool_name))) return next(e)
     const mine = await runScripts($, 'PostToolUse', e, [
       { interp: 'bash', file: 'record-changes.sh' },
       { interp: 'bash', file: 'stop-test-gate.sh', args: ['rules'], long: true },
