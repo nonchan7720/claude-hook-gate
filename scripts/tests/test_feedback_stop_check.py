@@ -55,14 +55,14 @@ class FeedbackStopCheckTest(unittest.TestCase):
         shutil.rmtree(self.project_dir, ignore_errors=True)
 
     def _write_memo(self, *rel_paths):
-        claude_dir = os.path.join(self.project_dir, ".claude")
+        claude_dir = os.path.join(self.project_dir, ".claude", ".gate-status")
         os.makedirs(claude_dir, exist_ok=True)
         with open(os.path.join(claude_dir, "changed_files.sess1.txt"), "w") as fh:
             for p in rel_paths:
                 fh.write(p + "\n")
 
     def _write_agent_memo(self, session_id, agent_id, *rel_paths):
-        claude_dir = os.path.join(self.project_dir, ".claude")
+        claude_dir = os.path.join(self.project_dir, ".claude", ".gate-status")
         os.makedirs(claude_dir, exist_ok=True)
         with open(os.path.join(claude_dir, f"changed_files.{session_id}--{agent_id}.txt"), "w") as fh:
             for p in rel_paths:
@@ -100,10 +100,10 @@ class FeedbackStopCheckTest(unittest.TestCase):
         r = run_stop_check({"agent_id": "agent1"}, self.feedback_dir, self.project_dir)
         self.assertEqual(r.returncode, 2)
         agent_attempts = os.path.join(
-            self.project_dir, ".claude", "feedback_gate_attempts.sess1--agent1.txt"
+            self.project_dir, ".claude", ".gate-status", "feedback_gate_attempts.sess1--agent1.txt"
         )
         plain_attempts = os.path.join(
-            self.project_dir, ".claude", "feedback_gate_attempts.sess1.txt"
+            self.project_dir, ".claude", ".gate-status", "feedback_gate_attempts.sess1.txt"
         )
         self.assertTrue(os.path.exists(agent_attempts))
         self.assertFalse(os.path.exists(plain_attempts))
@@ -114,7 +114,7 @@ class FeedbackStopCheckTest(unittest.TestCase):
         r = run_stop_check({}, self.feedback_dir, self.project_dir)
         self.assertEqual(r.returncode, 2)
         plain_attempts = os.path.join(
-            self.project_dir, ".claude", "feedback_gate_attempts.sess1.txt"
+            self.project_dir, ".claude", ".gate-status", "feedback_gate_attempts.sess1.txt"
         )
         self.assertTrue(os.path.exists(plain_attempts))
 

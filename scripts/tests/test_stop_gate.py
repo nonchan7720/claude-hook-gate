@@ -105,7 +105,7 @@ def write_gate_yaml(project_dir, gate_dict):
 
 
 def write_changed_files(project_dir, session_id, *rel_paths):
-    claude_dir = os.path.join(project_dir, ".claude")
+    claude_dir = os.path.join(project_dir, ".claude", ".gate-status")
     os.makedirs(claude_dir, exist_ok=True)
     with open(os.path.join(claude_dir, f"changed_files.{session_id}.txt"), "w") as fh:
         for p in rel_paths:
@@ -113,21 +113,21 @@ def write_changed_files(project_dir, session_id, *rel_paths):
 
 
 def attempts_count(project_dir, session_id):
-    path = os.path.join(project_dir, ".claude", f"gate_attempts.{session_id}.txt")
+    path = os.path.join(project_dir, ".claude", ".gate-status", f"gate_attempts.{session_id}.txt")
     with open(path) as fh:
         return fh.read().strip()
 
 
 def changed_path(project_dir, session_id):
-    return os.path.join(project_dir, ".claude", f"changed_files.{session_id}.txt")
+    return os.path.join(project_dir, ".claude", ".gate-status", f"changed_files.{session_id}.txt")
 
 
 def sidecar_path(project_dir, session_id):
-    return os.path.join(project_dir, ".claude", f"gate_passed.{session_id}.txt")
+    return os.path.join(project_dir, ".claude", ".gate-status", f"gate_passed.{session_id}.txt")
 
 
 def pending_path(project_dir, session_id):
-    return os.path.join(project_dir, ".claude", f"gate_pending_checks.{session_id}.json")
+    return os.path.join(project_dir, ".claude", ".gate-status", f"gate_pending_checks.{session_id}.json")
 
 
 def read_pending(project_dir, session_id):
@@ -136,7 +136,7 @@ def read_pending(project_dir, session_id):
 
 
 def write_pending(project_dir, session_id, data):
-    claude_dir = os.path.join(project_dir, ".claude")
+    claude_dir = os.path.join(project_dir, ".claude", ".gate-status")
     os.makedirs(claude_dir, exist_ok=True)
     with open(pending_path(project_dir, session_id), "w") as fh:
         json.dump(data, fh)
@@ -875,7 +875,7 @@ class RecordChangesShTest(unittest.TestCase):
         )
 
     def _memo_path(self, project_dir, state_id):
-        return os.path.join(project_dir, ".claude", f"changed_files.{state_id}.txt")
+        return os.path.join(project_dir, ".claude", ".gate-status", f"changed_files.{state_id}.txt")
 
     def test_agent_id_present_uses_suffixed_memo(self):
         with tempfile.TemporaryDirectory() as proj:
@@ -942,7 +942,7 @@ def run_reset_gate(project_dir, session_id="sess1", source="startup", use_jq=Tru
 
 
 def make_reset_gate_state_files(project_dir, session_id):
-    claude_dir = os.path.join(project_dir, ".claude")
+    claude_dir = os.path.join(project_dir, ".claude", ".gate-status")
     os.makedirs(claude_dir, exist_ok=True)
     changed = os.path.join(claude_dir, f"changed_files.{session_id}.txt")
     attempts = os.path.join(claude_dir, f"gate_attempts.{session_id}.txt")
@@ -1080,8 +1080,70 @@ class ResetGateSourceTest(unittest.TestCase):
                 self.assertFalse(os.path.exists(f))
 
 
-def make_feedback_attempts_file(project_dir, session_id):
+LEGACY_STATE_NAMES = (
+    "changed_files.{sid}.txt", "gate_attempts.{sid}.txt", "gate_passed.{sid}.txt",
+    "gate_pending_checks.{sid}.json", "gate_trace.{sid}.jsonl", "gate_deferred.{sid}.json",
+    "gate_push_verified.{sid}.txt", "feedback_gate_attempts.{sid}.txt",
+)
+
+
+def make_legacy_state_files(project_dir, session_id):
+    """移行前の置き場所（.claude/ 直下と .claude/hooks/logs/<state_id>/）に残った状態ファイル。"""
     claude_dir = os.path.join(project_dir, ".claude")
+    os.makedirs(claude_dir, exist_ok=True)
+    paths = []
+    for name in LEGACY_STATE_NAMES:
+        p = os.path.join(claude_dir, name.format(sid=session_id))
+        with open(p, "w") as fh: fh.write("x\n")
+        paths.append(p)
+    log_dir = os.path.join(claude_dir, "hooks", "logs", session_id)
+    os.makedirs(log_dir, exist_ok=True)
+    log = os.path.join(log_dir, "cmd.1.log")
+    with open(log, "w") as fh: fh.write("x\n")
+    paths.append(log)
+    return paths
+
+
+class ResetGateLegacyPathTest(unittest.TestCase):
+    """移行前の旧パスに残った状態ファイルも reset-gate.sh が同じ条件で掃除する。"""
+
+    def test_deletes_legacy_state_on_startup(self):
+        with tempfile.TemporaryDirectory() as proj:
+            files = make_legacy_state_files(proj, "sess1")
+            files += make_legacy_state_files(proj, "sess1--agent1")
+            r = run_reset_gate(proj, session_id="sess1", source="startup")
+            self.assertEqual(r.returncode, 0)
+            for f in files:
+                self.assertFalse(os.path.exists(f), f)
+
+    def test_keeps_legacy_state_on_resume(self):
+        with tempfile.TemporaryDirectory() as proj:
+            files = make_legacy_state_files(proj, "sess1")
+            r = run_reset_gate(proj, session_id="sess1", source="resume")
+            self.assertEqual(r.returncode, 0)
+            for f in files:
+                self.assertTrue(os.path.exists(f), f)
+
+    def test_prunes_stale_legacy_state_regardless_of_source(self):
+        with tempfile.TemporaryDirectory() as proj:
+            stale = make_legacy_state_files(proj, "sess-stale")
+            for f in stale:
+                os.utime(f, (1000, 1000))
+            os.utime(os.path.dirname(stale[-1]), (1000, 1000))
+            r = run_reset_gate(proj, session_id="sess-current", source="resume")
+            self.assertEqual(r.returncode, 0)
+            for f in stale:
+                self.assertFalse(os.path.exists(f), f)
+
+    def test_does_not_touch_gate_yaml(self):
+        with tempfile.TemporaryDirectory() as proj:
+            write_gate_yaml(proj, {"rules": []})
+            run_reset_gate(proj, session_id="sess1", source="startup")
+            self.assertTrue(os.path.exists(os.path.join(proj, ".claude", "gate.yaml")))
+
+
+def make_feedback_attempts_file(project_dir, session_id):
+    claude_dir = os.path.join(project_dir, ".claude", ".gate-status")
     os.makedirs(claude_dir, exist_ok=True)
     path = os.path.join(claude_dir, f"feedback_gate_attempts.{session_id}.txt")
     with open(path, "w") as fh:
@@ -1239,7 +1301,7 @@ class ChecksPhaseNoopWhenEmptyTest(unittest.TestCase):
             mod = load_stop_gate(proj, "sess1", phase="checks")
             self.assertEqual(mod.main(), 0)
             self.assertFalse(os.path.exists(
-                os.path.join(proj, ".claude", "gate_attempts.sess1.txt")))
+                os.path.join(proj, ".claude", ".gate-status", "gate_attempts.sess1.txt")))
 
     def test_empty_pending_object_is_removed_and_is_a_noop(self):
         with tempfile.TemporaryDirectory() as proj:
@@ -1333,7 +1395,7 @@ class PendingCleanupTest(unittest.TestCase):
             write_changed_files(proj, "sess1", "a.py")
             write_pending(proj, "sess1", {proj: {"chk": ["x.py"]}})
             mod = load_stop_gate(proj, "sess1")
-            with open(os.path.join(proj, ".claude", "gate_attempts.sess1.txt"), "w") as fh:
+            with open(os.path.join(proj, ".claude", ".gate-status", "gate_attempts.sess1.txt"), "w") as fh:
                 fh.write("3")
             mod.cleanup(only=(mod.COUNT, mod.PENDING))
             self.assertFalse(os.path.exists(mod.COUNT))
@@ -1391,7 +1453,7 @@ class ChecksPhaseMaxAttemptsRequeuesToChangedTest(unittest.TestCase):
             self.assertIn("reset-gate.sh", r.stdout)
 
             self.assertFalse(os.path.exists(
-                os.path.join(proj, ".claude", "gate_attempts.sess1.txt")))
+                os.path.join(proj, ".claude", ".gate-status", "gate_attempts.sess1.txt")))
             self.assertFalse(os.path.exists(pending_path(proj, "sess1")))
             self.assertFalse(os.path.exists(sidecar_path(proj, "sess1")))
             with open(changed_path(proj, "sess1")) as fh:
@@ -1501,7 +1563,7 @@ class ChecksPhaseFailureStdoutTest(unittest.TestCase):
 
 # ---- worktree グルーピング（サブエージェント委譲時の gate 素通り対策、rules フェーズ） ----
 def _changed_lines(project_dir, state_id):
-    path = os.path.join(project_dir, ".claude", f"changed_files.{state_id}.txt")
+    path = os.path.join(project_dir, ".claude", ".gate-status", f"changed_files.{state_id}.txt")
     with open(path) as fh:
         return [l.strip() for l in fh if l.strip()]
 
@@ -1638,9 +1700,9 @@ class AgentIdStateFileTest(unittest.TestCase):
             r = run_stop_gate(proj, "sess1", stop_hook_active=False, agent_id="agent1", phase="checks")
             self.assertEqual(r.returncode, 2)
             self.assertTrue(os.path.exists(
-                os.path.join(proj, ".claude", "gate_attempts.sess1--agent1.txt")))
+                os.path.join(proj, ".claude", ".gate-status", "gate_attempts.sess1--agent1.txt")))
             self.assertFalse(os.path.exists(
-                os.path.join(proj, ".claude", "gate_attempts.sess1.txt")))
+                os.path.join(proj, ".claude", ".gate-status", "gate_attempts.sess1.txt")))
 
     def test_main_session_rules_phase_ignores_other_agent_memo(self):
         with tempfile.TemporaryDirectory() as proj:
@@ -1736,7 +1798,7 @@ def write_policy(project_dir, rel=".claude/policies/gate.dw"):
 
 
 def trace_path(project_dir, state_id):
-    return os.path.join(project_dir, ".claude", f"gate_trace.{state_id}.jsonl")
+    return os.path.join(project_dir, ".claude", ".gate-status", f"gate_trace.{state_id}.jsonl")
 
 
 def read_trace_records(project_dir, state_id):
@@ -1756,7 +1818,7 @@ def write_trace_records(project_dir, state_id, records):
 
 
 def deferred_path(project_dir, state_id):
-    return os.path.join(project_dir, ".claude", f"gate_deferred.{state_id}.json")
+    return os.path.join(project_dir, ".claude", ".gate-status", f"gate_deferred.{state_id}.json")
 
 
 def read_deferred(project_dir, state_id):

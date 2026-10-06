@@ -711,7 +711,7 @@ class EvalStopCheckTest(unittest.TestCase):
 class GetChangedFilesTest(unittest.TestCase):
     def test_prefers_changed_files_memo(self):
         with tempfile.TemporaryDirectory() as tmp:
-            claude_dir = os.path.join(tmp, ".claude")
+            claude_dir = os.path.join(tmp, ".claude", ".gate-status")
             os.makedirs(claude_dir)
             memo = os.path.join(claude_dir, "changed_files.sess1.txt")
             with open(memo, "w") as fh:
@@ -738,7 +738,7 @@ class GetChangedFilesTest(unittest.TestCase):
 
     def test_agent_id_reads_only_agent_suffixed_memo(self):
         with tempfile.TemporaryDirectory() as tmp:
-            claude_dir = os.path.join(tmp, ".claude")
+            claude_dir = os.path.join(tmp, ".claude", ".gate-status")
             os.makedirs(claude_dir)
             with open(os.path.join(claude_dir, "changed_files.sess1.txt"), "w") as fh:
                 fh.write("main_only.go\n")
@@ -775,7 +775,7 @@ class GetChangedFilesTest(unittest.TestCase):
 
     def test_main_call_merges_plain_and_agent_suffixed_memos(self):
         with tempfile.TemporaryDirectory() as tmp:
-            claude_dir = os.path.join(tmp, ".claude")
+            claude_dir = os.path.join(tmp, ".claude", ".gate-status")
             os.makedirs(claude_dir)
             with open(os.path.join(claude_dir, "changed_files.sess1.txt"), "w") as fh:
                 fh.write("main.go\n")
@@ -788,7 +788,7 @@ class GetChangedFilesTest(unittest.TestCase):
 
     def test_main_call_with_only_agent_suffixed_memos_does_not_fall_back_to_git(self):
         with tempfile.TemporaryDirectory() as tmp:
-            claude_dir = os.path.join(tmp, ".claude")
+            claude_dir = os.path.join(tmp, ".claude", ".gate-status")
             os.makedirs(claude_dir)
             with open(os.path.join(claude_dir, "changed_files.sess1--agentA.txt"), "w") as fh:
                 fh.write("agentA.go\n")
