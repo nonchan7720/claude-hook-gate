@@ -1,0 +1,25 @@
+// gate hook (stop-gate.py) の既定 dogwood ポリシー。
+// gate.yaml に policy: を書かなければこのファイルが適用される。差し替えたいときは
+// policy: に自前の .dw を指し、判定自体を止めたいときは policy: false を書く。
+// 入力は context.input の name（コマンドの識別名）と cmd（コマンド文字列）だけ。
+//
+// 窓は response / error（実際に実行した記録）に張ること。request（判定した記録）に
+// 張ると deny 自体が窓を延ばし続けて永久に deny になる。
+//
+// 2m / 10m / 3回 は編集のリズムに合わせて調整する。窓を長く取りすぎると（1h など）
+// セッションのほぼ全域で検査が止まり、ゲートとして機能しなくなる。
+@id("gate_rate_limit_and_backoff")
+permit (
+    principal,
+    action == Gate::Action::"Run",
+    resource
+)
+// 同じ name は2分に1回まで（連続編集の間引き）
+unless temporal { formerly within 2m Gate::Action::"Run"::response{ input.name: context.input.name } }
+unless temporal { formerly within 2m Gate::Action::"Run"::error{ input.name: context.input.name } }
+// 直近10分に3回以上失敗しているなら止める
+unless temporal {
+    3 <= count for (t: Timepoint). where (
+        formerly within 10m (Gate::Action::"Run"::error{ input.name: context.input.name } && tp(t))
+    )
+};

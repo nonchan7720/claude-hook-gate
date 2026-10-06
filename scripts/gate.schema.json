@@ -1,0 +1,238 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/schemas/claude-action.schema.json",
+  "title": "Claude Code test-gate action config",
+  "description": "各プロジェクトの .claude/gate.yaml のスキーマ。二相構造: rules は PostToolUse で動き、変更ファイルの glob にマッチしたパッケージ単位の lint/test を実行する（ブロックしない）。consistency_checks は Stop/SubagentStop で動き、rules フェーズで実際にマッチした rule が run_checks で名前を参照したものだけを実行する、パッケージを跨いだ整合性検証（失敗すると停止をブロックする）。",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "rules"
+  ],
+  "properties": {
+    "policy": {
+      "$ref": "#/definitions/policySetting",
+      "description": "dogwood のポリシーファイル（.dw）のパス。rules[].run / consistency_checks[].run の各コマンドは、実行前にこのポリシーで許可判定される（deny なら実行せず控えに積み、後で allow が出た回にまとめて消化する）。省略時は同梱の既定ポリシー（scripts/dogwood/gate.default.dw）が適用される。false を指定するとポリシー判定を行わず従来どおり毎回実行する。root_dir（PROJECT_DIR または worktree ルート）からの相対パス。絶対パスと ~ 展開も可。"
+    },
+    "policy_schema": {
+      "$ref": "#/definitions/policyPath",
+      "description": "policy の検証に使う Cedar スキーマ（.cedarschema）のパス。省略時は scripts/dogwood/gate.cedarschema（同梱の既定スキーマ）が使われる。root_dir からの相対パス。絶対パスと ~ 展開も可。"
+    },
+    "rules": {
+      "type": "array",
+      "description": "rules フェーズ（PostToolUse）で評価される。上から順に評価され、マッチした全ルールが実行される（早期終了しない）。失敗しても停止はブロックしない。",
+      "items": {
+        "$ref": "#/definitions/rule"
+      }
+    },
+    "consistency_checks": {
+      "type": "array",
+      "description": "checks フェーズ（Stop/SubagentStop）で評価される、名前付きの整合性チェック定義集。match は持たない（match するのは rules 側）。無条件には実行されず、rules フェーズで実際にマッチした rule が run_checks で名前を参照したものだけが予約され、checks フェーズで実行される。PJ全体のビルド・テストなどを書く。複数 pkg のルールから同じ定義を参照でき、重複を避けられる。失敗すると停止をブロックする。",
+      "items": {
+        "$ref": "#/definitions/consistencyCheck"
+      }
+    }
+  },
+  "definitions": {
+    "consistencyCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "run"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "rules[].run_checks から参照するための識別名。consistency_checks 内で一意にすること。",
+          "minLength": 1
+        },
+        "dir": {
+          "type": "string",
+          "description": "run のコマンドを実行する作業ディレクトリ（プロジェクトルートからの相対パス）。省略時はプロジェクトルートで実行される。",
+          "minLength": 1,
+          "not": {
+            "pattern": "(^/|\\.\\.(/|$))"
+          }
+        },
+        "run": {
+          "type": "array",
+          "description": "このチェックが参照されたときに順番に実行するシェルコマンド列。1つでも非0で終了すれば失敗とみなされる。 実行時、そのとき対象になっているファイルのルート相対パスが環境変数 CLAUDE_GATE_FILES で渡る（shlex 引用済み・重複排除・昇順の空白区切り。例: rubocop $CLAUDE_GATE_FILES。空白を含むパスがありうるなら eval \"set -- $CLAUDE_GATE_FILES\" で位置パラメータに戻す）。",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/runItem"
+          }
+        },
+        "timeout": {
+          "$ref": "#/definitions/timeoutSeconds"
+        },
+        "policy": {
+          "$ref": "#/definitions/policySetting",
+          "description": "このルール / チェックのコマンドに適用する dogwood ポリシーファイル（.dw）のパス。トップレベルの policy を上書きする。false を指定するとこのルール / チェックだけポリシー判定を行わない。"
+        },
+        "policy_schema": {
+          "$ref": "#/definitions/policyPath",
+          "description": "このルール / チェックの policy 検証に使う Cedar スキーマのパス。トップレベルの policy_schema を上書きする。"
+        }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "match",
+        "run"
+      ],
+      "properties": {
+        "match": {
+          "description": "変更ファイルのパスに対する glob パターン（プロジェクトルートからの相対パス基準）。* は / を跨がない、** は跨ぐ、{a,b} でブレース展開可能。文字列1つ、または複数パターンのリストを指定できる。",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/globPattern"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/definitions/globPattern"
+              }
+            }
+          ]
+        },
+        "dir": {
+          "type": "string",
+          "description": "run のコマンドを実行する作業ディレクトリ（プロジェクトルートからの相対パス）。省略時はプロジェクトルートで実行される。per_file_dir が設定されている場合はこの値は無視される。",
+          "minLength": 1,
+          "not": {
+            "pattern": "(^/|\\.\\.(/|$))"
+          }
+        },
+        "per_file_dir": {
+          "description": "dir の値を無視し、match にマッチした各ファイルからルートを決めて、ルートごとに run を実行する（ルート単位で重複排除、実行順はルート名の昇順）。true / \"file\"（true は \"file\" の別名）: マッチしたファイル自身のディレクトリ（os.path.dirname）をルートにする。ディレクトリ＝パッケージという構成（Go の1ディレクトリ1パッケージなど）向け。\"pattern_root\": match の最初の ** セグメントの直前までに対応する実パス部分をルートにする（package.json / pyproject.toml のあるパッケージルートでネストしたファイルもまとめて実行したい、pnpm workspace 等の構成向け）。省略時は false 扱い（従来通り dir を使う）。",
+          "anyOf": [
+            {
+              "const": true
+            },
+            {
+              "enum": [
+                "file",
+                "pattern_root"
+              ]
+            }
+          ]
+        },
+        "run": {
+          "type": "array",
+          "description": "マッチしたときに順番に実行するシェルコマンド列。1つでも非0で終了すれば、このルールは失敗とみなされる。 実行時、そのとき対象になっているファイルのルート相対パスが環境変数 CLAUDE_GATE_FILES で渡る（shlex 引用済み・重複排除・昇順の空白区切り。例: rubocop $CLAUDE_GATE_FILES。空白を含むパスがありうるなら eval \"set -- $CLAUDE_GATE_FILES\" で位置パラメータに戻す）。",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/runItem"
+          }
+        },
+        "run_checks": {
+          "type": "array",
+          "description": "このルールが rules フェーズでマッチしたとき、checks フェーズ（Stop/SubagentStop）へ予約する consistency_checks の名前一覧。実行タイミングは rules フェーズ自身ではなく、後続の checks フェーズ。複数ルールから同じ名前を参照しても、1回のチェック実行につき1回だけ実行される。run_checks を持たないルールのマッチファイルは rules フェーズ通過時点で追跡対象から外れ、以後の別ファイルの変更で壊れても検出されない。パッケージを跨いで壊れうるルールには必ず指定すること。",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "timeout": {
+          "$ref": "#/definitions/timeoutSeconds"
+        },
+        "policy": {
+          "$ref": "#/definitions/policySetting",
+          "description": "このルール / チェックのコマンドに適用する dogwood ポリシーファイル（.dw）のパス。トップレベルの policy を上書きする。false を指定するとこのルール / チェックだけポリシー判定を行わない。"
+        },
+        "policy_schema": {
+          "$ref": "#/definitions/policyPath",
+          "description": "このルール / チェックの policy 検証に使う Cedar スキーマのパス。トップレベルの policy_schema を上書きする。"
+        }
+      }
+    },
+    "globPattern": {
+      "type": "string",
+      "minLength": 1
+    },
+    "policyPath": {
+      "type": "string",
+      "description": "root_dir（PROJECT_DIR または worktree ルート）からの相対パス。絶対パスと ~ 展開も受け付ける。指定されたファイルが存在しない場合はポリシー判定を行わず、従来どおりコマンドを実行する。",
+      "minLength": 1
+    },
+    "policySetting": {
+      "description": "ポリシーファイルのパス、または false（ポリシー判定を無効化して従来どおり毎回実行する）。未設定なら同梱の既定ポリシーが適用される。",
+      "oneOf": [
+        {
+          "$ref": "#/definitions/policyPath"
+        },
+        {
+          "const": false
+        }
+      ]
+    },
+    "runItem": {
+      "description": "run の要素。単一コマンド（文字列 or {cmd, timeout}）、または {parallel: [...]} の並行実行ブロック。",
+      "oneOf": [
+        {
+          "$ref": "#/definitions/command"
+        },
+        {
+          "$ref": "#/definitions/parallelGroup"
+        }
+      ]
+    },
+    "parallelGroup": {
+      "type": "object",
+      "description": "中のコマンドを並行実行するブロック。全コマンドの完了を待ってから run の次の要素へ進む。1つでも失敗すればルールの失敗となる。parallel の中に parallel はネストできない。",
+      "additionalProperties": false,
+      "required": [
+        "parallel"
+      ],
+      "properties": {
+        "parallel": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/command"
+          }
+        }
+      }
+    },
+    "command": {
+      "description": "実行するシェルコマンド。文字列、またはコマンドごとに name / timeout を指定できるオブジェクト形式。",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "cmd"
+          ],
+          "properties": {
+            "cmd": {
+              "type": "string",
+              "description": "実行するシェルコマンド。",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "description": "このコマンドの識別名。ログファイル名に cmd の代わりに使われる（logs/{session_id}/{name}.{pid}.log）。省略時は cmd から生成される。",
+              "minLength": 1
+            },
+            "timeout": {
+              "$ref": "#/definitions/timeoutSeconds"
+            }
+          }
+        }
+      ]
+    },
+    "timeoutSeconds": {
+      "type": "integer",
+      "description": "コマンドに適用するタイムアウト秒数。コマンド個別の timeout > rule / consistency_check の timeout > デフォルト 300 秒の優先順で解決される。超過するとプロセスグループごと強制終了され、失敗として扱われる。",
+      "minimum": 1
+    }
+  }
+}

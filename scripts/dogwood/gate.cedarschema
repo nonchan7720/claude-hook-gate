@@ -1,0 +1,10 @@
+namespace Gate {
+  type RunInput = { name: String, cmd: String };
+  entity Agent;
+  entity Project;
+  action "Run" appliesTo {
+    principal: [Agent],
+    resource: [Project],
+    context: { input: RunInput }
+  };
+}
