@@ -25,3 +25,9 @@ jobs:
         run: bun run lint
       - name: Type check (tsc --noEmit)
         run: bun run typecheck
+      - name: Test
+        run: bun run test
+      # 配布用バンドルが作れること、バンドルが相対パスと claude-code 以外を import していないことを確かめる
+      # （検査は scripts/build.ts の中にある）。
+      - name: Build bundle
+        run: bun run build

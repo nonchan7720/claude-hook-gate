@@ -1,4 +1,4 @@
-// gate hook (stop-gate.py) の既定 dogwood ポリシー。
+// gate hook (src/gate.ts) の既定 dogwood ポリシー。
 // gate.yaml に policy: を書かなければこのファイルが適用される。差し替えたいときは
 // policy: に自前の .dw を指し、判定自体を止めたいときは policy: false を書く。
 // 入力は context.input の name（コマンドの識別名）と cmd（コマンド文字列）だけ。

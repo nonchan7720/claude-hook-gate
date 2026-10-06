@@ -46,8 +46,8 @@ count: 1
 
 ### enforce（count に応じた強制力）
 
-hook（`scripts/feedback-guard.py` / `scripts/feedback-stop-check.py`）が実際にルールを
-検知・強制できる場合は、frontmatter に `enforce:` を追記できる。`scripts/feedback_rules.py`
+hook（`src/feedback-guard.ts` / `src/feedback-stop-check.ts`）が実際にルールを
+検知・強制できる場合は、frontmatter に `enforce:` を追記できる。`src/feedback-rules.ts`
 がこれを読み、PreToolUse（Bash / Edit・Write・MultiEdit）と Stop で評価する。
 
 ```yaml
@@ -79,8 +79,8 @@ enforce:
     message: '...'
 ```
 
-glob は `*` が `/` を跨がない、`**` が跨ぐ、`{a,b}` 展開に対応する（`scripts/stop-gate.py`
-の `glob_to_regex` と同じ挙動）。
+glob は `*` が `/` を跨がない、`**` が跨ぐ、`{a,b}` 展開に対応する（`src/glob.ts`
+の `globToRegex` と同じ挙動）。
 
 `severity` を省略した場合、`count` から自動決定される（`event` が `stop_check` かどうかで
 count 3・4 の扱いが変わる）。
