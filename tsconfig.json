@@ -14,7 +14,6 @@
     "verbatimModuleSyntax": true,
     "isolatedModules": true,
     "types": ["node", "bun"],
-    "baseUrl": ".",
     "paths": {
       "claude-code": ["./types/claude-code.d.ts"]
     }

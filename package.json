@@ -9,9 +9,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.0.0",
-    "@types/bun": "^1.2.0",
-    "@types/node": "^22.0.0",
-    "typescript": "^5.8.0"
+    "@biomejs/biome": "2.5.14",
+    "@types/bun": "1.4.2",
+    "@types/node": "26.6.3",
+    "typescript": "7.0.2"
   }
 }
