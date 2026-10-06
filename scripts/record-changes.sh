@@ -28,7 +28,7 @@ fi
 [ -n "$SESSION_ID" ] || SESSION_ID="unknown"
 STATE_ID="$SESSION_ID"
 [ -n "$AGENT_ID" ] && STATE_ID="${SESSION_ID}--${AGENT_ID}"
-MEMO_FILE="${PROJECT_DIR}/.claude/changed_files.${STATE_ID}.txt"
+MEMO_FILE="${PROJECT_DIR}/.claude/.gate-status/changed_files.${STATE_ID}.txt"
 
 if [ -n "$FILE_PATH" ]; then
   mkdir -p "$(dirname "$MEMO_FILE")"

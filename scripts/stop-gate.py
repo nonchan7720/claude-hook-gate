@@ -96,7 +96,7 @@ run_checks を持たないルールで通ったファイルは、それ以上待
 #              scripts/dogwood/gate.cedarschema。ポリシーに渡る入力は name と cmd の2つだけ
 #              （name は {cmd, name} の name、省略時は cmd から生成した識別名）。
 #
-# ポリシー判定の実行履歴は ${PROJECT_DIR}/.claude/gate_trace.{state_id}.jsonl に、
+# ポリシー判定の実行履歴は ${PROJECT_DIR}/.claude/.gate-status/gate_trace.{state_id}.jsonl に、
 # スキップしたコマンドの控えは同じ場所の gate_deferred.{state_id}.json に溜まる。控えは
 # rules フェーズで allow されたコマンドが1つでも実行された回に、ポリシー判定をバイパス
 # して消化される（判定をかけると失敗が続いている間は永久に消化されないため）。ただし
@@ -105,10 +105,10 @@ run_checks を持たないルールで通ったファイルは、それ以上待
 # 再度 deny されて積み直された分を含む）は次回以降に持ち越される。checks フェーズ
 # （Stop / SubagentStop）では、その回が始まる前から
 # あった控えを全件消化し、失敗した分は控えに戻して停止をブロックする。各プロジェクトの .gitignore には
-# .claude/gate_trace.*.jsonl と .claude/gate_deferred.*.json を足すこと。
+# .claude/.gate-status/ を足すこと。
 #
 # 各コマンドの stdout/stderr は実行中も含めて
-# ${PROJECT_DIR}/.claude/hooks/logs/{state_id}/{name もしくは cmd}.{pid}.log に
+# ${PROJECT_DIR}/.claude/.gate-status/logs/{state_id}/{name もしくは cmd}.{pid}.log に
 # リアルタイムで書き出される（tee 相当）。長時間コマンドは tail -f で進捗を追える。
 # フック起動時に自動削除: 現セッションのログは1時間（LOG_MAX_AGE）超で、
 # 過去セッションのログは最終書き込みから5分（LOG_STALE_GRACE）超で消える。
@@ -177,13 +177,14 @@ STOP_HOOK_ACTIVE = (os.environ.get("CLAUDE_STOP_HOOK_ACTIVE") or "").strip().low
 CLAUDE_DIR  = os.path.join(PROJECT_DIR, ".claude")
 ACTION      = os.path.join(CLAUDE_DIR, "gate.yaml")
 GATE_YML    = os.path.join(CLAUDE_DIR, "gate.yml")  # 拡張子 typo 検知用
-CHANGED     = os.path.join(CLAUDE_DIR, f"changed_files.{STATE_ID}.txt")
-COUNT       = os.path.join(CLAUDE_DIR, f"gate_attempts.{STATE_ID}.txt")
-SIDECAR     = os.path.join(CLAUDE_DIR, f"gate_passed.{STATE_ID}.txt")  # rule通過・checks確認待ち
-PENDING     = os.path.join(CLAUDE_DIR, f"gate_pending_checks.{STATE_ID}.json")  # checksフェーズへの予約
-TRACE       = os.path.join(CLAUDE_DIR, f"gate_trace.{STATE_ID}.jsonl")   # ポリシー判定に食わせる実行履歴
-DEFERRED    = os.path.join(CLAUDE_DIR, f"gate_deferred.{STATE_ID}.json") # ポリシーでスキップした分の控え
-LOG_ROOT    = os.path.join(CLAUDE_DIR, "hooks", "logs")
+STATE_DIR   = os.path.join(CLAUDE_DIR, ".gate-status")  # 状態ファイルとログの置き場所（gate.yaml は動かさない）
+CHANGED     = os.path.join(STATE_DIR, f"changed_files.{STATE_ID}.txt")
+COUNT       = os.path.join(STATE_DIR, f"gate_attempts.{STATE_ID}.txt")
+SIDECAR     = os.path.join(STATE_DIR, f"gate_passed.{STATE_ID}.txt")  # rule通過・checks確認待ち
+PENDING     = os.path.join(STATE_DIR, f"gate_pending_checks.{STATE_ID}.json")  # checksフェーズへの予約
+TRACE       = os.path.join(STATE_DIR, f"gate_trace.{STATE_ID}.jsonl")   # ポリシー判定に食わせる実行履歴
+DEFERRED    = os.path.join(STATE_DIR, f"gate_deferred.{STATE_ID}.json") # ポリシーでスキップした分の控え
+LOG_ROOT    = os.path.join(STATE_DIR, "logs")
 LOG_DIR     = os.path.join(LOG_ROOT, STATE_ID)
 MAX_ATTEMPTS = 5
 DEFAULT_TIMEOUT = 300   # 秒。rule / consistency_check の timeout: で上書き可
@@ -976,6 +977,7 @@ def write_changed_flat(path, keys, raw_by_key):
         try: os.remove(path)
         except FileNotFoundError: pass
         return
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as fh:
         for k in keys:
             fh.write(raw_by_key[k] + "\n")
@@ -1139,6 +1141,7 @@ def save_pending(data):
         try: os.remove(PENDING)
         except FileNotFoundError: pass
         return
+    os.makedirs(STATE_DIR, exist_ok=True)
     with open(PENDING, "w") as fh:
         json.dump(data, fh, ensure_ascii=False)
 
@@ -1394,6 +1397,7 @@ def run_checks_phase():
         # = 新しいユーザーターン起点の Stop なので、リトライ回数を数え直す。
         attempts = 0
     attempts += 1
+    os.makedirs(STATE_DIR, exist_ok=True)
     with open(COUNT, "w") as fh: fh.write(str(attempts))
 
     if attempts >= MAX_ATTEMPTS:

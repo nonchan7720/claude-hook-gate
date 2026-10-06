@@ -631,9 +631,10 @@ def get_changed_files(project_dir, session_id, agent_id=None):
     changed_files.<session>--*.txt を全部読んで順序を保ってマージ・重複排除する。メモが
     1つも無いときだけ project_dir で git フォールバックする（従来どおりの挙動）。"""
     claude_dir = os.path.join(project_dir, ".claude")
+    state_dir = os.path.join(claude_dir, ".gate-status")
 
     if agent_id:
-        memo = os.path.join(claude_dir, f"changed_files.{session_id}--{agent_id}.txt")
+        memo = os.path.join(state_dir, f"changed_files.{session_id}--{agent_id}.txt")
         lines = _read_lines(memo)
         if lines is not None:
             return lines
@@ -642,7 +643,7 @@ def get_changed_files(project_dir, session_id, agent_id=None):
             return [os.path.join(worktree, f) for f in _git_fallback_files(worktree)]
         return _git_fallback_files(project_dir)
 
-    memo = os.path.join(claude_dir, f"changed_files.{session_id}.txt")
+    memo = os.path.join(state_dir, f"changed_files.{session_id}.txt")
     seen = set()
     merged = []
     found_any = False
@@ -653,7 +654,7 @@ def get_changed_files(project_dir, session_id, agent_id=None):
             if l not in seen:
                 seen.add(l)
                 merged.append(l)
-    agent_memo_pattern = os.path.join(claude_dir, f"changed_files.{session_id}--*.txt")
+    agent_memo_pattern = os.path.join(state_dir, f"changed_files.{session_id}--*.txt")
     for path in sorted(glob.glob(agent_memo_pattern)):
         found_any = True
         for l in _read_lines(path) or []:

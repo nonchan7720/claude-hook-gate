@@ -2,7 +2,7 @@
 """Stop hook (global): feedback ルールの stop_check enforce を評価する。
 
 変更ファイルの一覧は record-changes.sh が書く
-${CLAUDE_PROJECT_DIR}/.claude/changed_files.${SESSION_ID}[--${AGENT_ID}].txt を優先して読む
+${CLAUDE_PROJECT_DIR}/.claude/.gate-status/changed_files.${SESSION_ID}[--${AGENT_ID}].txt を優先して読む
 （gate.yaml を持つプロジェクトでしか作られないため、無ければ
 feedback_rules.get_changed_files() が git diff / git status でフォールバックする）。
 payload に agent_id があれば SubagentStop（サブエージェントの Stop）とみなし、
@@ -30,7 +30,7 @@ MAX_ATTEMPTS = 3
 
 def attempts_path(project_dir, session_id, agent_id=None):
     state_id = f"{session_id}--{agent_id}" if agent_id else session_id
-    return os.path.join(project_dir, ".claude", f"feedback_gate_attempts.{state_id}.txt")
+    return os.path.join(project_dir, ".claude", ".gate-status", f"feedback_gate_attempts.{state_id}.txt")
 
 
 def clear_attempts(path):

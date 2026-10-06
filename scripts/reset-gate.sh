@@ -13,6 +13,7 @@
 JSON_INPUT=$(cat)
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
 CLAUDE_DIR="${PROJECT_DIR}/.claude"
+STATE_DIR="${CLAUDE_DIR}/.gate-status"
 
 if command -v jq >/dev/null 2>&1; then
   SESSION_ID=$(printf '%s' "$JSON_INPUT" | jq -r '.session_id // empty')
@@ -33,35 +34,51 @@ case "$SOURCE" in
   startup|clear)
     # SubagentStop 経由の状態ファイル（changed_files.<session>--<agent>.txt 等）も対象。
     # payload の session_id はメインのセッションIDのみなので、--* を別途 glob で拾う。
-    rm -f "${CLAUDE_DIR}/changed_files.${SESSION_ID}.txt" \
-          "${CLAUDE_DIR}/gate_attempts.${SESSION_ID}.txt" \
-          "${CLAUDE_DIR}/gate_passed.${SESSION_ID}.txt" \
-          "${CLAUDE_DIR}/gate_push_verified.${SESSION_ID}.txt" \
-          "${CLAUDE_DIR}/gate_pending_checks.${SESSION_ID}.json" \
-          "${CLAUDE_DIR}/gate_trace.${SESSION_ID}.jsonl" \
-          "${CLAUDE_DIR}/gate_deferred.${SESSION_ID}.json" \
-          "${CLAUDE_DIR}/feedback_gate_attempts.${SESSION_ID}.txt" \
-          "${CLAUDE_DIR}/changed_files.${SESSION_ID}"--*.txt \
-          "${CLAUDE_DIR}/gate_attempts.${SESSION_ID}"--*.txt \
-          "${CLAUDE_DIR}/gate_passed.${SESSION_ID}"--*.txt \
-          "${CLAUDE_DIR}/gate_push_verified.${SESSION_ID}"--*.txt \
-          "${CLAUDE_DIR}/gate_pending_checks.${SESSION_ID}"--*.json \
-          "${CLAUDE_DIR}/gate_trace.${SESSION_ID}"--*.jsonl \
-          "${CLAUDE_DIR}/gate_deferred.${SESSION_ID}"--*.json \
-          "${CLAUDE_DIR}/feedback_gate_attempts.${SESSION_ID}"--*.txt
+    # 置き場所は .claude/.gate-status/。移行前の旧パス（.claude/ 直下と .claude/hooks/logs/）の
+    # 残骸も同じ条件で消す。
+    for DIR in "$STATE_DIR" "$CLAUDE_DIR"; do
+      rm -f "${DIR}/changed_files.${SESSION_ID}.txt" \
+            "${DIR}/gate_attempts.${SESSION_ID}.txt" \
+            "${DIR}/gate_passed.${SESSION_ID}.txt" \
+            "${DIR}/gate_push_verified.${SESSION_ID}.txt" \
+            "${DIR}/gate_pending_checks.${SESSION_ID}.json" \
+            "${DIR}/gate_trace.${SESSION_ID}.jsonl" \
+            "${DIR}/gate_deferred.${SESSION_ID}.json" \
+            "${DIR}/feedback_gate_attempts.${SESSION_ID}.txt" \
+            "${DIR}/changed_files.${SESSION_ID}"--*.txt \
+            "${DIR}/gate_attempts.${SESSION_ID}"--*.txt \
+            "${DIR}/gate_passed.${SESSION_ID}"--*.txt \
+            "${DIR}/gate_push_verified.${SESSION_ID}"--*.txt \
+            "${DIR}/gate_pending_checks.${SESSION_ID}"--*.json \
+            "${DIR}/gate_trace.${SESSION_ID}"--*.jsonl \
+            "${DIR}/gate_deferred.${SESSION_ID}"--*.json \
+            "${DIR}/feedback_gate_attempts.${SESSION_ID}"--*.txt
+    done
+    for LOG_ROOT in "${STATE_DIR}/logs" "${CLAUDE_DIR}/hooks/logs"; do
+      rm -rf "${LOG_ROOT}/${SESSION_ID}" "${LOG_ROOT}/${SESSION_ID}"--* 2>/dev/null
+    done
     ;;
   *)
     : # resume / compact / 未知の source では削除しない
     ;;
 esac
 
-if [ -d "$CLAUDE_DIR" ]; then
-  find "$CLAUDE_DIR" -maxdepth 1 \
+for DIR in "$STATE_DIR" "$CLAUDE_DIR"; do
+  [ -d "$DIR" ] || continue
+  find "$DIR" -maxdepth 1 \
     \( -name 'changed_files.*.txt' -o -name 'gate_attempts.*.txt' -o -name 'gate_passed.*.txt' \
        -o -name 'gate_push_verified.*.txt' \
        -o -name 'gate_pending_checks.*.json' -o -name 'feedback_gate_attempts.*.txt' \
        -o -name 'gate_trace.*.jsonl' -o -name 'gate_deferred.*.json' \) \
     -mmin +1440 -delete 2>/dev/null
-fi
+done
+
+# ログ（新: .gate-status/logs/<state_id>/、旧: hooks/logs/<state_id>/）も 24h 超は掃除する。
+for LOG_ROOT in "${STATE_DIR}/logs" "${CLAUDE_DIR}/hooks/logs"; do
+  [ -d "$LOG_ROOT" ] || continue
+  find "$LOG_ROOT" -mindepth 1 -maxdepth 1 -type d -mmin +1440 -exec rm -rf {} + 2>/dev/null
+done
+# 旧パスのログ置き場が空になったら片付ける。
+rmdir "${CLAUDE_DIR}/hooks/logs" "${CLAUDE_DIR}/hooks" 2>/dev/null
 
 exit 0
