@@ -5,7 +5,6 @@
       "release-type": "node",
       "package-name": "claude-hook-gate",
       "include-component-in-tag": false,
-      "release-as": "0.1.0",
       "extra-files": [
         {
           "type": "json",
