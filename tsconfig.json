@@ -19,6 +19,6 @@
       "claude-code": ["./types/claude-code.d.ts"]
     }
   },
-  "include": ["hooks", "types"],
+  "include": ["src", "hooks", "tests", "types"],
   "exclude": ["hooks/register.test.ts", "node_modules"]
 }

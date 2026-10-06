@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": []
+  },
+  "include": ["src", "hooks", "types"],
+  "exclude": ["hooks/register.test.ts", "node_modules"]
+}
