@@ -224,10 +224,10 @@ describe('reset-gate policy state (trace / deferred)', () => {
 })
 
 describe('reset-gate status summary', () => {
-  const summary = (proj: string) => path.join(proj, '.claude', '.gate-status', 'summary.txt')
-  const put = (proj: string) => {
-    fs.mkdirSync(path.dirname(summary(proj)), { recursive: true })
-    fs.writeFileSync(summary(proj), '[gate] 完了: ✓ 1 (0.1s)')
+  const summary = (proj: string, sessionId = 'sess1') => path.join(proj, '.claude', '.gate-status', `summary.${sessionId}.txt`)
+  const put = (proj: string, sessionId = 'sess1') => {
+    fs.mkdirSync(path.dirname(summary(proj, sessionId)), { recursive: true })
+    fs.writeFileSync(summary(proj, sessionId), '[gate] 完了: ✓ 1 (0.1s)')
   }
 
   test('the kept gate summary is deleted on startup / clear and kept on resume', () =>
@@ -240,5 +240,24 @@ describe('reset-gate status summary', () => {
       put(proj)
       await run(proj, 'sess1', 'clear')
       expect(exists(summary(proj))).toBe(false)
+    }))
+
+  test('another session summary is left alone', () =>
+    withTmp(async (proj) => {
+      put(proj, 'sess1')
+      put(proj, 'sess2')
+      await run(proj, 'sess1', 'startup')
+      expect(exists(summary(proj, 'sess1'))).toBe(false)
+      expect(exists(summary(proj, 'sess2'))).toBe(true)
+    }))
+
+  test('prunes a stale summary of another session regardless of source', () =>
+    withTmp(async (proj) => {
+      put(proj, 'sess-stale')
+      put(proj, 'sess-live')
+      age(summary(proj, 'sess-stale'))
+      await run(proj, 'sess-current', 'resume')
+      expect(exists(summary(proj, 'sess-stale'))).toBe(false)
+      expect(exists(summary(proj, 'sess-live'))).toBe(true)
     }))
 })
