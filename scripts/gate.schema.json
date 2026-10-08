@@ -15,6 +15,11 @@
       "$ref": "#/definitions/policyPath",
       "description": "policy の検証に使う Cedar スキーマ（.cedarschema）のパス。省略時は scripts/dogwood/gate.cedarschema（同梱の既定スキーマ）が使われる。root_dir からの相対パス。絶対パスと ~ 展開も可。"
     },
+    "report_success": {
+      "type": "boolean",
+      "default": true,
+      "description": "checks フェーズ（Stop/SubagentStop）で実際に 1 件以上のコマンドが実行され、すべて成功したとき、停止を 1 回だけブロックして結果の要約を reason としてエージェントに返す（エージェントが完了報告して止まれるように）。false で無効化。stop_hook_active が true のとき、何も実行されなかったときは報告しない。報告でブロックした直後の Stop では gate のコマンドを実行せず通す。省略時は true。"
+    },
     "rules": {
       "type": "array",
       "description": "rules フェーズ（PostToolUse）で評価される。上から順に評価され、マッチした全ルールが実行される（早期終了しない）。失敗しても停止はブロックしない。",
@@ -209,6 +214,11 @@
             },
             "timeout": {
               "$ref": "#/definitions/timeoutSeconds"
+            },
+            "share": {
+              "type": "boolean",
+              "default": true,
+              "description": "false にすると、他のエージェントが同じキー（root・cwd・cmd・コマンドに渡す環境変数が一致）の実行を進行中でも、その完了を待たず必ず自分で実行する。既定（true）では、進行中の実行があれば新たに起動せず完了を待って同じ結果（成否・出力）を受け取る。完了済みの結果は再利用されない。"
             }
           }
         }
