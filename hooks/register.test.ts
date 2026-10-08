@@ -188,10 +188,11 @@ const beneathBand = (on: any) => {
 test('ui.render AbovePrompt: 実行中の項目がある間は複数行の木を返す', async ($, on) => {
   const started = 1_700_000_000_000 - 3000
   setup(on, {
-    '/proj/.claude/.gate-status/running/a1.json': JSON.stringify([
+    '/proj/.claude/.gate-status/running/sess-1.a1.json': JSON.stringify([
       { name: 'typecheck', cmd: 'bun run typecheck', started, result: 'ok', ended: started + 700 },
       { name: 'test', cmd: 'bun run test', started },
     ]),
+    '/proj/.claude/.gate-status/running/sess-9.b1.json': JSON.stringify([{ name: 'other', cmd: 'pnpm test', started }]),
   })
   beneathBand(on)
   const tree = await $.ui.render(BAND)
@@ -208,9 +209,9 @@ test('ui.render AbovePrompt: 全部終わっているか何も無ければエン
   setup(on, files)
   const engineBand = beneathBand(on)
   expect(await $.ui.render(BAND)).toEqual(engineBand)
-  files['/proj/.claude/.gate-status/running/a1.json'] = JSON.stringify([{ name: 'lint', cmd: 'x', started, result: 'ok', ended: started + 100 }])
+  files['/proj/.claude/.gate-status/running/sess-1.a1.json'] = JSON.stringify([{ name: 'lint', cmd: 'x', started, result: 'ok', ended: started + 100 }])
   expect(await $.ui.render(BAND)).toEqual(engineBand)
-  files['/proj/.claude/.gate-status/running/a1.json'] = JSON.stringify([{ name: 'test', cmd: 'x', started }])
+  files['/proj/.claude/.gate-status/running/sess-1.a1.json'] = JSON.stringify([{ name: 'test', cmd: 'x', started }])
   expect(await $.ui.render({ ...BAND, props: { hasSurvey: true, isWorking: false } })).toEqual(engineBand)
 })
 

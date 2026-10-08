@@ -1,12 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  clearSummary,
   finishedSummary,
   listRunning,
+  loadSummary,
   mergeRunning,
   publishRunning,
   type RunningEntry,
   runningBand,
   runningLines,
+  saveSummary,
   withdrawRunning,
 } from '../src/running-registry.ts'
 import { makeIo, withTmp } from './helpers/node-io.ts'
@@ -17,29 +20,52 @@ describe('running registry', () => {
   test('entries of every owner are merged in start order', () =>
     withTmp(async (proj) => {
       const io = makeIo({ projectDir: proj, now: () => T0 + 10_000 })
-      await publishRunning(io, 'b', [{ name: 'late', cmd: 'x', started: T0 + 5000 }])
-      await publishRunning(io, 'a', [
+      await publishRunning(io, 's.b', [{ name: 'late', cmd: 'x', started: T0 + 5000 }])
+      await publishRunning(io, 's.a', [
         { name: 'first', cmd: 'x', started: T0 },
         { name: 'second', cmd: 'x', started: T0 + 1000, result: 'ok' },
       ])
-      expect((await listRunning(io)).map((e) => e.name)).toEqual(['first', 'second', 'late'])
+      expect((await listRunning(io, 's')).map((e) => e.name)).toEqual(['first', 'second', 'late'])
     }))
 
   test('withdrawing one owner keeps the others', () =>
     withTmp(async (proj) => {
       const io = makeIo({ projectDir: proj, now: () => T0 })
-      await publishRunning(io, 'a', [{ name: 'a', cmd: 'x', started: T0 }])
-      await publishRunning(io, 'b', [{ name: 'b', cmd: 'x', started: T0 }])
-      await withdrawRunning(io, 'a')
-      expect((await listRunning(io)).map((e) => e.name)).toEqual(['b'])
+      await publishRunning(io, 's.a', [{ name: 'a', cmd: 'x', started: T0 }])
+      await publishRunning(io, 's.b', [{ name: 'b', cmd: 'x', started: T0 }])
+      await withdrawRunning(io, 's.a')
+      expect((await listRunning(io, 's')).map((e) => e.name)).toEqual(['b'])
     }))
 
   test('entries left behind by a dead process are ignored once they are old enough', () =>
     withTmp(async (proj) => {
       const old = makeIo({ projectDir: proj, now: () => T0 })
-      await publishRunning(old, 'dead', [{ name: 'dead', cmd: 'x', started: T0 }])
+      await publishRunning(old, 's.dead', [{ name: 'dead', cmd: 'x', started: T0 }])
       const later = makeIo({ projectDir: proj, now: () => T0 + 3_600_000 })
-      expect(await listRunning(later)).toEqual([])
+      expect(await listRunning(later, 's')).toEqual([])
+    }))
+
+  test('only the own session (main and its subagents) is listed, not another session or a mere id prefix match', () =>
+    withTmp(async (proj) => {
+      const io = makeIo({ projectDir: proj, now: () => T0 })
+      await publishRunning(io, 'sess.x1', [{ name: 'main', cmd: 'x', started: T0 }])
+      await publishRunning(io, 'sess--agent.x2', [{ name: 'sub', cmd: 'x', started: T0 + 1 }])
+      await publishRunning(io, 'other.x3', [{ name: 'other', cmd: 'x', started: T0 }])
+      await publishRunning(io, 'sess2.x4', [{ name: 'prefix', cmd: 'x', started: T0 }])
+      await publishRunning(io, 'sess2--agent.x5', [{ name: 'prefix-sub', cmd: 'x', started: T0 }])
+      expect((await listRunning(io, 'sess')).map((e) => e.name)).toEqual(['main', 'sub'])
+      expect((await listRunning(io, 'sess2')).map((e) => e.name)).toEqual(['prefix', 'prefix-sub'])
+    }))
+
+  test('the finished summary is kept per session', () =>
+    withTmp(async (proj) => {
+      const io = makeIo({ projectDir: proj })
+      await saveSummary(io, 'sess-a', 'A')
+      await saveSummary(io, 'sess-b', 'B')
+      expect(await loadSummary(io, 'sess-a')).toBe('A')
+      await clearSummary(io, 'sess-a')
+      expect(await loadSummary(io, 'sess-a')).toBeUndefined()
+      expect(await loadSummary(io, 'sess-b')).toBe('B')
     }))
 
   test('mergeRunning skips broken files', () => {
