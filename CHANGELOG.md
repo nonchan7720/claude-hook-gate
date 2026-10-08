@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.2.0...v0.3.0) (2026-10-08)
+
+
+### Features
+
+* show gate and feedback progress in the UI ([#9](https://github.com/nonchan7720/claude-hook-gate/issues/9)) ([cb71a3b](https://github.com/nonchan7720/claude-hook-gate/commit/cb71a3b3e3c74f3f70a98b1d204529b29930cee7))
+
 ## [0.2.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.1.0...v0.2.0) (2026-10-06)
 
 
