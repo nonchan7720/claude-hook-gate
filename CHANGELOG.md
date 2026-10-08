@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.3.0...v0.3.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* show only the own session in the gate band ([#11](https://github.com/nonchan7720/claude-hook-gate/issues/11)) ([4b38a62](https://github.com/nonchan7720/claude-hook-gate/commit/4b38a622de36f78d74575604a8fc423be334cb39))
+
 ## [0.3.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.2.0...v0.3.0) (2026-10-08)
 
 

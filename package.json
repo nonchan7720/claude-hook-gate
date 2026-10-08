@@ -1,6 +1,6 @@
 {
   "name": "claude-hook-gate",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "feedback-gate: Claude Code function hooks for feedback rules and per-project quality gates",
   "license": "MIT",
