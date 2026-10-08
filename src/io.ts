@@ -58,9 +58,18 @@ export interface Io {
   run(argv: readonly string[], options?: RunOptions): Promise<RunResult>
   /** エポックからのミリ秒。 */
   now(): Promise<number>
+  /** プロンプト下のステータス行に、処理中だけの 1 行を出す。undefined で消す。表示手段が無い環境では何もしない。hook の終わりに消される。 */
+  progress?(text: string | undefined): void
+  /** プロンプト下のステータス行に、終わった結果の 1 行を残す。hook が終わっても消えない。undefined で消す。 */
+  result?(text: string | undefined): void
+  /** プロンプトの上の帯（実行中の一覧）を描き直させる。 */
+  redraw?(): void
+  /** ms ごとに fn を呼ぶ。戻り値で止める。経過時間表示の再描画に使う。 */
+  every?(ms: number, fn: () => void): () => void
 }
 
 /** Hook スクリプト相当の結果（classic コマンド hook の終了コード・stdout・stderr）。 */
-export type ScriptResult = { exitCode: number; stdout: string; stderr: string }
+/** reportConsumed: gate が成功報告の印を消費し、検証を走らせずに Stop を通した（成功報告の直後の Stop だった）。 */
+export type ScriptResult = { exitCode: number; stdout: string; stderr: string; reportConsumed?: boolean }
 
 export const ok = (stdout = '', stderr = ''): ScriptResult => ({ exitCode: 0, stdout, stderr })

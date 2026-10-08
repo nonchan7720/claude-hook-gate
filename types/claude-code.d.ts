@@ -38,6 +38,8 @@ declare module 'claude-code' {
     isStderrTruncated?: boolean
   }
 
+  export type Timer = { cancel(): void }
+
   /** エンジンインターフェース（`$`）のうち、このプラグインが使う名詞とメソッド。 */
   export interface Engine {
     plugin: { root: string }
@@ -47,7 +49,12 @@ declare module 'claude-code' {
       cwd(): Promise<string>
     }
     env: { get(name: string): Promise<string | undefined> }
-    clock: { now(): Promise<number> }
+    clock: { now(): Promise<number>; every(ms: number, fn: () => void): Timer }
+    ui: {
+      status(text: string | undefined): void
+      /** `ui.render` を描き直させる（毎秒 10 回まで）。 */
+      invalidate(event: 'ui.render'): void
+    }
     fs: {
       read(path: string): Promise<string>
       write(path: string, text: string): Promise<void>
@@ -64,6 +71,29 @@ declare module 'claude-code' {
   export type HookResult = Readonly<Record<string, unknown>>
   export type Next = (e: HookEvent) => Promise<HookResult>
   export type Hook = ($: Engine, e: HookEvent, next: Next) => Promise<HookResult> | HookResult
-  export type On = (event: string, hook: Hook) => unknown
+
+  /** `ui.render` が返す、素のデータの木（Box / Text と文字列だけを使う）。 */
+  export type RenderElement = {
+    type: 'Box' | 'Text'
+    props?: Record<string, string | number | boolean>
+    children?: Array<RenderElement | string>
+  }
+  /** `ui.render` の AbovePrompt（プロンプトの上の帯）の入力。 */
+  export type AbovePromptInput = {
+    surface: string
+    component: 'AbovePrompt'
+    requestId: string
+    props: {
+      /** アンケートが帯を使っている間 true。このときは帯を譲る。 */
+      hasSurvey: boolean
+      isWorking: boolean
+    }
+  }
+  export type RenderHook = ($: Engine, e: AbovePromptInput, next: (e: AbovePromptInput) => Promise<RenderElement>) => Promise<RenderElement> | RenderElement
+
+  export interface On {
+    (event: 'ui.render', matcher: { component: 'AbovePrompt' }, hook: RenderHook): unknown
+    (event: string, hook: Hook): unknown
+  }
   export type Register = (on: On, options: PluginOptions) => unknown
 }

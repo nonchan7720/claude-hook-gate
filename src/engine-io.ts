@@ -81,5 +81,12 @@ export async function createIo($: Engine): Promise<Io> {
     },
     run,
     now: () => $.clock.now(),
+    progress: (text) => $.ui.status(text),
+    result: (text) => $.ui.status(text),
+    redraw: () => $.ui.invalidate('ui.render'),
+    every: (ms, fn) => {
+      const timer = $.clock.every(ms, fn)
+      return () => timer.cancel()
+    },
   }
 }
