@@ -7081,11 +7081,12 @@ function mergeRunning(texts, now) {
   groups.sort((a, b) => a[0].started - b[0].started);
   return groups.flat();
 }
-async function listRunning(io) {
+var ownedBySession = (name, sessionId) => name.startsWith(`${sessionId}.`) || name.startsWith(`${sessionId}--`);
+async function listRunning(io, sessionId) {
   const now = await io.now();
   const texts = [];
   for (const f of await io.list(runningDir(io))) {
-    if (f.kind !== "file" || !f.name.endsWith(".json"))
+    if (f.kind !== "file" || !f.name.endsWith(".json") || !ownedBySession(f.name, sessionId))
       continue;
     const text = await io.readFile(join(runningDir(io), f.name));
     if (text !== undefined)
@@ -7144,11 +7145,11 @@ function finishedSummary(entries) {
   const last = Math.max(...entries.map((e) => e.ended ?? e.started));
   return `[gate] 完了: ${counts} (${((last - first) / 1000).toFixed(1)}s)`;
 }
-var summaryFile = (io) => join(gateStatusDir(io), "summary.txt");
-var saveSummary = (io, text) => io.writeFile(summaryFile(io), text);
-var clearSummary = (io) => io.removeFiles([summaryFile(io)]);
-async function loadSummary(io) {
-  const text = await io.readFile(summaryFile(io));
+var summaryFile = (io, sessionId) => join(gateStatusDir(io), `summary.${sessionId}.txt`);
+var saveSummary = (io, sessionId, text) => io.writeFile(summaryFile(io, sessionId), text);
+var clearSummary = (io, sessionId) => io.removeFiles([summaryFile(io, sessionId)]);
+async function loadSummary(io, sessionId) {
+  const text = await io.readFile(summaryFile(io, sessionId));
   return text === undefined || text === "" ? undefined : text;
 }
 
@@ -7779,7 +7780,7 @@ class Gate {
     if (!this.stopTicking)
       this.stopTicking = this.io.every?.(1000, () => this.io.redraw?.());
     this.io.result?.(undefined);
-    await clearSummary(this.io);
+    await clearSummary(this.io, this.sessionId);
     await this.publishAndRedraw();
     return {
       waiting: async () => {
@@ -7793,10 +7794,10 @@ class Gate {
         if (this.running.every((r) => r.result))
           this.stopTicker();
         await this.publishAndRedraw();
-        const summary = finishedSummary(await listRunning(this.io));
+        const summary = finishedSummary(await listRunning(this.io, this.sessionId));
         if (summary !== undefined) {
           this.io.result?.(summary);
-          await saveSummary(this.io, summary);
+          await saveSummary(this.io, this.sessionId, summary);
         }
       }
     };
@@ -8827,7 +8828,8 @@ var STATE_FILES = [
   ["gate_pending_checks", ".json"],
   ["gate_trace", ".jsonl"],
   ["gate_deferred", ".json"],
-  ["feedback_gate_attempts", ".txt"]
+  ["feedback_gate_attempts", ".txt"],
+  ["summary", ".txt"]
 ];
 var DAY_MS = 1440 * 60 * 1000;
 var globMatch = (name, prefix, suffix) => name.length >= prefix.length + suffix.length && name.startsWith(prefix) && name.endsWith(suffix);
@@ -8839,7 +8841,6 @@ async function resetGate(io, payload) {
   const source = jqStr(payload.source);
   const now = await io.now();
   if (source === "startup" || source === "clear") {
-    await clearSummary(io);
     for (const dir of [stateDir, claudeDir]) {
       const names = (await io.list(dir)).map((e) => e.name);
       const doomed = [];
@@ -8904,6 +8905,7 @@ var str = (v) => typeof v === "string" ? v : "";
 async function runSteps($, event, steps) {
   let acc = {};
   const base = await createIo($);
+  const sessionId = await $.session.id();
   let shown = false;
   let pending;
   let cancelDelay;
@@ -8940,7 +8942,7 @@ async function runSteps($, event, steps) {
   } finally {
     cancelDelay?.();
     if (shown)
-      base.progress?.(await loadSummary(base));
+      base.progress?.(await loadSummary(base, sessionId));
   }
   return acc;
 }
@@ -9003,6 +9005,6 @@ export const register = (on, options) => {
     if (e.props.hasSurvey)
       return next(e);
     const io = await createIo($);
-    return runningBand(await listRunning(io), await io.now()) ?? next(e);
+    return runningBand(await listRunning(io, await $.session.id()), await io.now()) ?? next(e);
   });
 };

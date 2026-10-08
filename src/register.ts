@@ -29,6 +29,7 @@ const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 async function runSteps($: Engine, event: string, steps: Step[]): Promise<Outcome> {
   let acc: Outcome = {}
   const base = await createIo($)
+  const sessionId = await $.session.id()
   // 処理中の 1 行（progress）を出した hook だけ、終わりに片付ける（毎回のちらつきを避ける）。gate の結果（result）は
   // 次のコマンドが走り始めるまで残すので、消さずに完了サマリへ戻す。
   // ただし最初の progress から PROGRESS_DELAY_MS 経っても終わっていないときだけ出す（すぐ終わる評価でステータス行を触らない）。
@@ -62,7 +63,7 @@ async function runSteps($: Engine, event: string, steps: Step[]): Promise<Outcom
   } finally {
     cancelDelay?.()
     // 出していたなら、残っている gate の完了サマリがあればそれに戻し、無ければ消す。
-    if (shown) base.progress?.(await loadSummary(base))
+    if (shown) base.progress?.(await loadSummary(base, sessionId))
   }
   return acc
 }
@@ -128,11 +129,11 @@ export const register: Register = (on, options) => {
     return withNext(next, e, mine)
   })
 
-  // gate が実行中のコマンドを、プロンプトの上の帯に複数行で出す。全エージェントの実行が終わるか、
+  // gate が実行中のコマンドを、プロンプトの上の帯に複数行で出す。自セッションの実行が終わるか、
   // アンケートが帯を使っている間は、エンジンの帯に譲る。描き直しは gate が $.ui.invalidate で促す。
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
     const io = await createIo($)
-    return runningBand(await listRunning(io), await io.now()) ?? next(e)
+    return runningBand(await listRunning(io, await $.session.id()), await io.now()) ?? next(e)
   })
 }

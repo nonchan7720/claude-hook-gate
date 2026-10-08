@@ -783,7 +783,7 @@ export class Gate {
     this.running.push(entry)
     if (!this.stopTicking) this.stopTicking = this.io.every?.(1000, () => this.io.redraw?.())
     this.io.result?.(undefined)
-    await clearSummary(this.io)
+    await clearSummary(this.io, this.sessionId)
     await this.publishAndRedraw()
     return {
       waiting: async () => {
@@ -796,10 +796,10 @@ export class Gate {
         entry.waiting = false
         if (this.running.every((r) => r.result)) this.stopTicker()
         await this.publishAndRedraw()
-        const summary = finishedSummary(await listRunning(this.io))
+        const summary = finishedSummary(await listRunning(this.io, this.sessionId))
         if (summary !== undefined) {
           this.io.result?.(summary)
-          await saveSummary(this.io, summary)
+          await saveSummary(this.io, this.sessionId, summary)
         }
       },
     }

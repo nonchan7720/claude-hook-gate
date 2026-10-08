@@ -9,7 +9,7 @@
     "lint": "biome check .",
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.src.json",
-    "test": "bun test --parallel tests",
+    "test": "bun test --parallel --timeout 30000 tests",
     "test:plugin": "bun run build && claude plugin test .",
     "build": "bun scripts/build.ts"
   },

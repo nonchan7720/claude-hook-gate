@@ -1,7 +1,8 @@
-// 全エージェントの「実行中のコマンド」一覧。ステータス行（$.ui.status）は 1 行しか描けないので、
-// 実行中はプロンプトの上の帯（ui.render の AbovePrompt）に複数行で出す。各 Gate は自分の一覧を
-// .gate-status/running/<owner>.json に公開し、帯は全員分をまとめて描く。hook がどのプロセスで
-// 動くかに依存しないよう、共有はファイルで行う。
+// 自セッション（メインとそのサブエージェント）の「実行中のコマンド」一覧。ステータス行（$.ui.status）は
+// 1 行しか描けないので、実行中はプロンプトの上の帯（ui.render の AbovePrompt）に複数行で出す。各 Gate は
+// 自分の一覧を .gate-status/running/<owner>.json に公開し、帯は同じセッションの分をまとめて描く。
+// 同じプロジェクトを開いた別セッションの分は混ぜない。hook がどのプロセスで動くかに依存しないよう、
+// 共有はファイルで行う。
 import type { RenderElement } from 'claude-code'
 import type { Io } from './io.ts'
 import { join } from './path.ts'
@@ -34,7 +35,7 @@ export const publishRunning = (io: Io, owner: string, entries: readonly RunningE
 
 export const withdrawRunning = (io: Io, owner: string): Promise<void> => io.removeFiles([ownerFile(io, owner)])
 
-/** 各 owner のファイルの中身から、全 owner の一覧を開始時刻順（owner 内の順序は保つ）に並べて返す。古すぎる owner と壊れたファイルは無視する。 */
+/** 各 owner のファイルの中身から、渡された全 owner の一覧を開始時刻順（owner 内の順序は保つ）に並べて返す。古すぎる owner と壊れたファイルは無視する。 */
 export function mergeRunning(texts: readonly string[], now: number): RunningEntry[] {
   const groups: RunningEntry[][] = []
   for (const text of texts) {
@@ -52,11 +53,15 @@ export function mergeRunning(texts: readonly string[], now: number): RunningEntr
   return groups.flat()
 }
 
-export async function listRunning(io: Io): Promise<RunningEntry[]> {
+/** owner 名は `<sessionId>.<乱数>` か `<sessionId>--<agentId>.<乱数>`。別の id の接頭辞になっているだけのものは含めない。 */
+const ownedBySession = (name: string, sessionId: string): boolean => name.startsWith(`${sessionId}.`) || name.startsWith(`${sessionId}--`)
+
+/** このセッション（メインとそのサブエージェント）の実行中一覧。 */
+export async function listRunning(io: Io, sessionId: string): Promise<RunningEntry[]> {
   const now = await io.now()
   const texts: string[] = []
   for (const f of await io.list(runningDir(io))) {
-    if (f.kind !== 'file' || !f.name.endsWith('.json')) continue
+    if (f.kind !== 'file' || !f.name.endsWith('.json') || !ownedBySession(f.name, sessionId)) continue
     const text = await io.readFile(join(runningDir(io), f.name))
     if (text !== undefined) texts.push(text)
   }
@@ -116,7 +121,7 @@ export function runningBand(entries: readonly RunningEntry[], now: number): Rend
 }
 
 /**
- * 全員の実行が終わったときの 1 行サマリ（ステータス行用）。チェック名は出さず件数だけにして、長さを一定に保つ。
+ * セッション内の全員の実行が終わったときの 1 行サマリ（ステータス行用）。チェック名は出さず件数だけにして、長さを一定に保つ。
  * 所要秒は最初の開始から最後の完了まで（並列なので各項目の合計ではない）。未完了があるか、何も無ければ undefined。
  */
 export function finishedSummary(entries: readonly RunningEntry[]): string | undefined {
@@ -130,14 +135,14 @@ export function finishedSummary(entries: readonly RunningEntry[]): string | unde
 }
 
 // 完了サマリは gate が終わると一覧（running/）から消えるので、次の gate コマンドが走り始めるまで残すために
-// 全エージェント共通のファイルへ置く。feedback の表示など他の hook がステータス行を使ったあとに戻すのに使う。
-const summaryFile = (io: Io): string => join(gateStatusDir(io), 'summary.txt')
+// セッションごとのファイルへ置く。feedback の表示など他の hook がステータス行を使ったあとに戻すのに使う。
+const summaryFile = (io: Io, sessionId: string): string => join(gateStatusDir(io), `summary.${sessionId}.txt`)
 
-export const saveSummary = (io: Io, text: string): Promise<void> => io.writeFile(summaryFile(io), text)
+export const saveSummary = (io: Io, sessionId: string, text: string): Promise<void> => io.writeFile(summaryFile(io, sessionId), text)
 
-export const clearSummary = (io: Io): Promise<void> => io.removeFiles([summaryFile(io)])
+export const clearSummary = (io: Io, sessionId: string): Promise<void> => io.removeFiles([summaryFile(io, sessionId)])
 
-export async function loadSummary(io: Io): Promise<string | undefined> {
-  const text = await io.readFile(summaryFile(io))
+export async function loadSummary(io: Io, sessionId: string): Promise<string | undefined> {
+  const text = await io.readFile(summaryFile(io, sessionId))
   return text === undefined || text === '' ? undefined : text
 }

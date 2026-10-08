@@ -363,7 +363,7 @@ describe('Stop / SubagentStop / Notification', () => {
     test('draws a column of lines while something is running', () =>
       withMod(async (m, proj) => {
         const started = Date.now()
-        await publishRunning(ownerIo(proj), 'a1', [
+        await publishRunning(ownerIo(proj), 'sess-1.a1', [
           { name: 'typecheck', cmd: 'bun run typecheck', started, result: 'ok', ended: started + 700 },
           { name: 'test', cmd: 'bun run test', started },
         ])
@@ -379,13 +379,23 @@ describe('Stop / SubagentStop / Notification', () => {
       withMod(async (m, proj) => {
         expect(await render(m)).toBe(idle as never)
         const started = Date.now()
-        await publishRunning(ownerIo(proj), 'a1', [{ name: 'lint', cmd: 'x', started, result: 'ok', ended: started + 100 }])
+        await publishRunning(ownerIo(proj), 'sess-1.a1', [{ name: 'lint', cmd: 'x', started, result: 'ok', ended: started + 100 }])
         expect(await render(m)).toBe(idle as never)
+      }))
+
+    test('shows only the own session, including its subagents', () =>
+      withMod(async (m, proj) => {
+        const started = Date.now()
+        await publishRunning(ownerIo(proj), 'sess-9.b1', [{ name: 'other', cmd: 'x', started }])
+        expect(await render(m)).toBe(idle as never)
+        await publishRunning(ownerIo(proj), 'sess-1--agent.c1', [{ name: 'sub', cmd: 'x', started }])
+        const tree = (await render(m)) as unknown as { children: Array<{ children: string[] }> }
+        expect(tree.children.map((c) => c.children[0])).toEqual(['[gate] 実行中:', expect.stringMatching(/^ {2}sub \$ x /)])
       }))
 
     test('yields to a survey', () =>
       withMod(async (m, proj) => {
-        await publishRunning(ownerIo(proj), 'a1', [{ name: 'test', cmd: 'x', started: Date.now() }])
+        await publishRunning(ownerIo(proj), 'sess-1.a1', [{ name: 'test', cmd: 'x', started: Date.now() }])
         expect(await render(m, true)).toBe(idle as never)
       }))
   })
