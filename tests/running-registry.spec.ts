@@ -52,7 +52,7 @@ describe('running registry', () => {
       await publishRunning(io, 'sess--agent.x2', [{ name: 'sub', cmd: 'x', started: T0 + 1 }])
       await publishRunning(io, 'other.x3', [{ name: 'other', cmd: 'x', started: T0 }])
       await publishRunning(io, 'sess2.x4', [{ name: 'prefix', cmd: 'x', started: T0 }])
-      await publishRunning(io, 'sess2--agent.x5', [{ name: 'prefix-sub', cmd: 'x', started: T0 }])
+      await publishRunning(io, 'sess2--agent.x5', [{ name: 'prefix-sub', cmd: 'x', started: T0 + 1 }])
       expect((await listRunning(io, 'sess')).map((e) => e.name)).toEqual(['main', 'sub'])
       expect((await listRunning(io, 'sess2')).map((e) => e.name)).toEqual(['prefix', 'prefix-sub'])
     }))
