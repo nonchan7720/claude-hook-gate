@@ -8,7 +8,9 @@
 //     「予約」として永続化する。
 //   - checks フェーズ（Stop / SubagentStop、phase=checks、デフォルト）: 予約された consistency_checks
 //     だけを実行する。rules は実行しない。失敗なら exit 2 で会話の終了をブロックし、MAX_ATTEMPTS で
-//     打ち切る。
+//     打ち切る。実際に 1 件以上実行してすべて成功したときは、結果の要約を reason にして 1 回だけ
+//     ブロックする（report_success: false で無効。stop_hook_active のときは報告しない）。その直後の
+//     Stop は印（gate_reported）を消して、コマンドを走らせずに通す。
 //
 // 予約が空（何も rules フェーズでマッチしなかった）なら checks フェーズは即 exit 0。run_checks を持たない
 // ルールで通ったファイルは、それ以上待つものが無いので rules フェーズの時点で完了扱いになり、CHANGED
@@ -49,7 +51,9 @@
 //              止めない）、checks フェーズでは停止をブロック。各要素は文字列、{cmd, name, timeout} 形式、
 //              または {parallel: [...]} 形式。timeout はそのコマンドのタイムアウト秒数（省略時 300 秒）。
 //              超過したら強制終了して失敗扱い。rule / consistency_check レベルの timeout: はデフォルト値になる。
-//              name はログファイル名に使う識別名（省略時は cmd から生成）。
+//              name はログファイル名に使う識別名（省略時は cmd から生成）。share: false を書くと、他のエージェントが
+//              同じキー（root・cwd・cmd・渡す環境変数。エージェント識別用の変数は除く）を実行中でも待たずに自分で
+//              実行する（既定は共有: 進行中の実行があれば起動せず完了を待って同じ結果を受け取る。src/shared-run.ts）。
 // CLAUDE_GATE_FILES:
 //              run / consistency_checks の各コマンドには、そのとき対象になっているファイルのルート相対
 //              パスが環境変数 CLAUDE_GATE_FILES で渡る。値は shlex 引用済み・重複排除・昇順で、空白区切りの
@@ -92,6 +96,17 @@ import { parseYaml } from './load-yaml.ts'
 import { basename, dirname, expandUser, isAbsolute, join, normpath, relpath } from './path.ts'
 import { type Dict, isDict, pyRepr, truthy } from './pyutil.ts'
 import { splitRoot as splitRootOf } from './roots.ts'
+import {
+  clearSummary,
+  finishedSummary,
+  gateStatusDir,
+  listRunning,
+  publishRunning,
+  type RunningEntry,
+  saveSummary,
+  withdrawRunning,
+} from './running-registry.ts'
+import { runShared } from './shared-run.ts'
 import { shellQuote, shellSplit } from './shell.ts'
 import { which } from './which.ts'
 
@@ -112,7 +127,7 @@ const UNMATCHED_SHOWN = 5 // どのルールにもマッチしなかったファ
 const MAX_TIMEOUT_MS = 600_000 // $.process.run の上限（10 分）
 
 // ---- 設定の型（YAML はユーザー入力なので、実行時は緩く扱う） ----
-export type RunItem = string | { cmd?: string; name?: string; timeout?: number } | { parallel?: RunItem[] }
+export type RunItem = string | { cmd?: string; name?: string; timeout?: number; share?: boolean } | { parallel?: RunItem[] }
 type Setting = { policy?: unknown; policy_schema?: unknown }
 export type GateRule = Setting & {
   match?: unknown
@@ -123,7 +138,7 @@ export type GateRule = Setting & {
   timeout?: number
 }
 export type GateCheck = Setting & { name: string; dir?: string; run?: RunItem[]; timeout?: number }
-export type GateConfig = Setting & { rules?: GateRule[]; consistency_checks?: GateCheck[] }
+export type GateConfig = Setting & { report_success?: boolean; rules?: GateRule[]; consistency_checks?: GateCheck[] }
 type Key = string // `${root}\0${rel}`
 type Env = Record<string, string>
 type Pending = Record<string, Record<string, string[]>>
@@ -239,6 +254,21 @@ export function parseCmd(item: unknown, defaultTimeout: number): [cmd: string, t
   return [item as string, defaultTimeout, null]
 }
 
+/** run の要素が他のエージェントとの実行共有を許すか。{cmd, share: false} だけが無効化で、既定は共有する。 */
+export const parseShare = (item: unknown): boolean => !(isDict(item) && item.share === false)
+
+/** gate がエージェントを識別するために子プロセスへ付ける環境変数。共有キーからはこれを除く（エージェントごとに必ず異なるため）。 */
+export const agentEnv = (agentId: string): Env => (agentId ? { CLAUDE_AGENT_ID: agentId } : {})
+const AGENT_ENV_KEYS = Object.keys(agentEnv('-'))
+
+/** 実行共有のキー。root・cwd・cmd・コマンドに渡す環境変数（エージェント識別用を除く）がすべて一致するものだけが同じ実行になる。 */
+export function shareKey(root: string, cwd: string, cmd: string, env: Env): string {
+  const shared = Object.entries(env)
+    .filter(([k]) => !AGENT_ENV_KEYS.includes(k))
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+  return JSON.stringify([root, cwd, cmd, shared])
+}
+
 const isParallel = (item: unknown): item is { parallel?: RunItem[] } => isDict(item) && 'parallel' in item
 
 /** run_cmds は1つ失敗しても後続を実行し続ける（&& ではなく ; 相当）ので、表示もそれに合わせる。 */
@@ -297,6 +327,8 @@ function withLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
 let logSeq = 0
 
 type Chunk = { lines: string[]; detail?: string }
+/** コマンドをどのルートで・共有を許して実行するか。 */
+type ExecScope = { root: string; share?: boolean }
 type PolicyResolved = { policy: string; schema: string; isDefault: boolean }
 const UNSET = Symbol('unset')
 
@@ -305,6 +337,8 @@ export class PolicyState {
   executed = false
   /** この回の中で deferCmd() したキー。allow されて undefer された後に別ルールで再度 deny されて積み直された分を消化対象にしない。 */
   deferredThisRun = new Set<string>()
+  /** この回の中で allow されて実行に進んだキー。checks フェーズで同じコマンドの控えを再実行しないために使う。 */
+  allowedThisRun = new Set<string>()
 }
 
 export class Gate {
@@ -323,6 +357,7 @@ export class Gate {
   readonly count: string
   readonly sidecar: string
   readonly pending: string
+  readonly reported: string
   readonly trace: string
   readonly deferred: string
   readonly logRoot: string
@@ -337,6 +372,17 @@ export class Gate {
   failures: string[] = []
   stdout = ''
   stderr = ''
+  /** 成功報告の印を消費して、検証を走らせずに Stop を通したとき true。 */
+  reportConsumed = false
+  /** 帯に出すコマンド（実行開始順）。完了後も runGate が終わるまで ✓/✗ 付きで残す。 */
+  private readonly running: RunningEntry[] = []
+  private stopTicking: (() => void) | undefined
+  /** 全エージェントの実行中一覧（running-registry）の中での、この Gate の持ち分の名前。 */
+  private readonly runningOwner: string
+  /** この Gate が実行した（または共有で結果を受け取った）コマンドの (root, cwd, cmd) キー。同じ回で控えを二重に走らせないために使う。 */
+  private readonly ranThisRun = new Set<string>()
+  /** この Gate が実際に実行した（または共有で結果を受け取った）コマンドの表示名。成功報告に使う。 */
+  private readonly executedLabels: string[] = []
 
   constructor(io: Io, opts: { sessionId?: string; agentId?: string; phase?: string; stopHookActive?: boolean } = {}) {
     this.io = io
@@ -350,11 +396,13 @@ export class Gate {
     this.claudeDir = join(this.projectDir, '.claude')
     this.action = join(this.claudeDir, 'gate.yaml')
     this.gateYml = join(this.claudeDir, 'gate.yml') // 拡張子 typo 検知用
-    this.stateDir = join(this.claudeDir, '.gate-status') // 状態ファイルとログの置き場所（gate.yaml は動かさない）
+    this.stateDir = gateStatusDir(io) // 状態ファイルとログの置き場所（gate.yaml は動かさない）
+    this.runningOwner = `${this.stateId}.${Math.random().toString(36).slice(2, 10)}`
     this.changed = join(this.stateDir, `changed_files.${this.stateId}.txt`)
     this.count = join(this.stateDir, `gate_attempts.${this.stateId}.txt`)
     this.sidecar = join(this.stateDir, `gate_passed.${this.stateId}.txt`) // rule通過・checks確認待ち
     this.pending = join(this.stateDir, `gate_pending_checks.${this.stateId}.json`) // checksフェーズへの予約
+    this.reported = join(this.stateDir, `gate_reported.${this.stateId}.txt`) // 成功報告でブロックした印
     this.trace = join(this.stateDir, `gate_trace.${this.stateId}.jsonl`) // ポリシー判定に食わせる実行履歴
     this.deferred = join(this.stateDir, `gate_deferred.${this.stateId}.json`) // ポリシーでスキップした分の控え
     this.logRoot = join(this.stateDir, 'logs')
@@ -366,7 +414,7 @@ export class Gate {
       CLAUDE_SESSION_ID: this.sessionId,
       CLAUDE_STOP_HOOK_ACTIVE: this.stopHookActive ? 'true' : 'false',
       CLAUDE_GATE_PHASE: this.phase,
-      ...(this.agentId ? { CLAUDE_AGENT_ID: this.agentId } : {}),
+      ...agentEnv(this.agentId),
     }
   }
 
@@ -380,7 +428,7 @@ export class Gate {
 
   /** 状態ファイルを削除する。only を渡すと、その集合だけを消す。 */
   async cleanup(only?: string[]): Promise<void> {
-    await this.io.removeFiles(only ?? [this.changed, this.count, this.sidecar, this.pending])
+    await this.io.removeFiles(only ?? [this.changed, this.count, this.sidecar, this.pending, this.reported])
   }
 
   private async rm(path: string): Promise<void> {
@@ -396,8 +444,22 @@ export class Gate {
     if (rmdir) await this.io.removeDir(dirpath)
   }
 
+  /** 受け取り手が読み終えた共有結果と、落ちたプロセスが残した実行中一覧を掃除する。 */
+  private async pruneShared(): Promise<void> {
+    const now = await this.io.now()
+    const stale = async (dir: string, suffix: string, maxAge: number): Promise<void> => {
+      const old = (await this.io.list(join(this.stateDir, dir)))
+        .filter((e) => e.kind === 'file' && e.name.endsWith(suffix) && e.mtimeMs < now - maxAge * 1000)
+        .map((e) => join(this.stateDir, dir, e.name))
+      if (old.length > 0) await this.io.removeFiles(old)
+    }
+    await stale('shared', '.result.json', LOG_STALE_GRACE)
+    await stale('running', '.json', LOG_MAX_AGE)
+  }
+
   /** 現セッション分は LOG_MAX_AGE、他セッション分は LOG_STALE_GRACE を超えたら削除。 */
   async pruneLogs(): Promise<void> {
+    await this.pruneShared()
     for (const e of await this.io.list(this.logRoot)) {
       const path = join(this.logRoot, e.name)
       if (e.kind === 'dir') {
@@ -677,12 +739,118 @@ export class Gate {
     return { out, ok: r.exitCode === 0 && !timedOut && r.error === undefined, timedOut, logpath }
   }
 
+  /**
+   * runCmd を、同じキーの実行が他のエージェントで進行中ならその完了を待って結果を受け取る形で呼ぶ。受け取った
+   * 側も自分の logDir にログを書く（出力を複製し、実行側のログのパスを添える）。scope.share が false なら
+   * 共有せず従来どおり自分で実行する。onWait は待機側になったときに呼ばれる。
+   */
+  private async runCmdShared(
+    cmd: string,
+    cwd: string,
+    timeout: number,
+    name: string | null | undefined,
+    extraEnv: Env | undefined,
+    scope: ExecScope,
+    onWait: () => Promise<void>,
+  ): Promise<Awaited<ReturnType<Gate['runCmd']>>> {
+    if (scope.share === false) return this.runCmd(cmd, cwd, timeout, name, extraEnv)
+    const key = shareKey(scope.root, cwd, cmd, { ...this.baseEnv, ...extraEnv })
+    const r = await runShared(this.io, key, Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS), () => this.runCmd(cmd, cwd, timeout, name, extraEnv), {
+      onWait,
+    })
+    if (!r.shared) return r.outcome
+    const uid = `${Math.floor((await this.io.now()) / 1000)}-${logSeq++}`
+    const logpath = join(this.logDir, `${slug(name || cmd)}.${uid}.log`)
+    const header = `$ ${cmd}  (cwd: ${cwd})\n[gate] 同じ実行が他のエージェントで走っていたため、その結果を受け取りました（実行側のログ: ${r.outcome.logpath}）\n`
+    await this.io.writeFile(logpath, header + r.outcome.out).catch(() => undefined)
+    return { ...r.outcome, logpath }
+  }
+
+  /**
+   * 実行中のコマンドを、プロンプトの上の帯に出す（描画は register.ts の ui.render。ここでは全エージェントの実行中
+   * 一覧に自分の分を公開して、帯を描き直させる）。戻り値の waiting は他のエージェントの実行の完了待ちになったとき、
+   * done は完了時に呼ぶ（成否を渡すと ✓/✗ 付きで残る）。経過秒を更新するため、実行中は 1 秒ごとに描き直す。
+   * 全エージェントの実行が終わったら帯は消え、その回の結果を 1 行にまとめてステータス行に残す。次のコマンドが
+   * 走り始めたらそのステータス行を消す。
+   */
+  private async showRunning(
+    name: string | null | undefined,
+    cmd: string,
+    started: number,
+  ): Promise<{ waiting: () => Promise<void>; done: (ok: boolean) => Promise<void> }> {
+    if (!this.io.redraw) return { waiting: async () => undefined, done: async () => undefined }
+    const entry: RunningEntry = { name: name || undefined, cmd, started }
+    this.running.push(entry)
+    if (!this.stopTicking) this.stopTicking = this.io.every?.(1000, () => this.io.redraw?.())
+    this.io.result?.(undefined)
+    await clearSummary(this.io)
+    await this.publishAndRedraw()
+    return {
+      waiting: async () => {
+        entry.waiting = true
+        await this.publishAndRedraw()
+      },
+      done: async (ok) => {
+        entry.result = ok ? 'ok' : 'fail'
+        entry.ended = await this.io.now()
+        entry.waiting = false
+        if (this.running.every((r) => r.result)) this.stopTicker()
+        await this.publishAndRedraw()
+        const summary = finishedSummary(await listRunning(this.io))
+        if (summary !== undefined) {
+          this.io.result?.(summary)
+          await saveSummary(this.io, summary)
+        }
+      },
+    }
+  }
+
+  private stopTicker(): void {
+    this.stopTicking?.()
+    this.stopTicking = undefined
+  }
+
+  /** runGate の終わりに呼ぶ。自分の分を一覧から外して再描画を止め、帯を描き直させる（他のエージェントが実行中ならその一覧が残る）。 */
+  async finishProgress(): Promise<void> {
+    this.stopTicker()
+    this.running.length = 0
+    await withdrawRunning(this.io, this.runningOwner)
+    this.io.redraw?.()
+  }
+
+  private async publishAndRedraw(): Promise<void> {
+    await publishRunning(this.io, this.runningOwner, this.running)
+    this.io.redraw?.()
+  }
+
   /** 1コマンド実行して [ログ行リスト, ok] を返す。並行実行時もログを混ぜないため一旦まとめる。 */
-  async execOne(label: string, cmd: string, cwd: string, timeout: number, mark = '', name?: string | null, extraEnv?: Env): Promise<[Chunk, boolean]> {
+  async execOne(
+    label: string,
+    cmd: string,
+    cwd: string,
+    timeout: number,
+    mark = '',
+    name?: string | null,
+    extraEnv?: Env,
+    scope: ExecScope = { root: this.projectDir },
+  ): Promise<[Chunk, boolean]> {
     const title = name ? `${name}: ${cmd}` : cmd
     const chunk: Chunk = { lines: [`=== [gate] (${label})${mark} $ ${title} ===`] }
     const started = await this.io.now()
-    const { out, ok, timedOut, logpath } = await this.runCmd(cmd, cwd, timeout, name, extraEnv)
+    const progress = await this.showRunning(name, cmd, started)
+    let ran: Awaited<ReturnType<Gate['runCmd']>>
+    let passed = false
+    try {
+      ran = await this.runCmdShared(cmd, cwd, timeout, name, extraEnv, scope, progress.waiting)
+      passed = ran.ok
+    } finally {
+      await progress.done(passed)
+    }
+    // 実行した（または共有で受け取った）コマンドは、控えに同じものが残っていれば消化済みとして外す。
+    this.ranThisRun.add(Gate.deferKey({ root: scope.root, cwd, cmd }))
+    await this.undeferCmd(scope.root, cwd, cmd)
+    const { out, ok, timedOut, logpath } = ran
+    this.executedLabels.push(name || oneLine(cmd))
     this.note(ok ? 'ok' : 'fail', label, cmd, `(${(((await this.io.now()) - started) / 1000).toFixed(1)}s)`)
     const detail = [chunk.lines[0] as string]
     if (out) {
@@ -720,9 +888,10 @@ export class Gate {
     logs: string[],
     policy?: PolicyContext | null,
     extraEnv?: Env,
+    root: string = policy?.rootDir ?? this.projectDir,
   ): Promise<boolean> {
     let failed = false
-    const tasks: Array<[string, number, string | null]> = []
+    const tasks: Array<[string, number, string | null, boolean]> = []
     for (const item of items) {
       if (isParallel(item)) {
         logs.push(`=== [gate] (${label}) parallel の中に parallel はネストできません。失敗扱いにします。 ===`)
@@ -732,12 +901,12 @@ export class Gate {
       const [cmd, timeout, name] = parseCmd(item, defaultTimeout)
       if (!cmd) continue
       if (policy && !(await policy.allows(label, cwd, cmd, timeout, name, logs, extraEnv))) continue
-      tasks.push([cmd, timeout, name])
+      tasks.push([cmd, timeout, name, parseShare(item)])
     }
     if (tasks.length === 0) return failed
-    const results = await Promise.all(tasks.map((t) => this.execOne(label, t[0], cwd, t[1], ' [parallel]', t[2], extraEnv)))
+    const results = await Promise.all(tasks.map((t) => this.execOne(label, t[0], cwd, t[1], ' [parallel]', t[2], extraEnv, { root, share: t[3] })))
     for (const [i, [chunk, ok]] of results.entries()) {
-      const [cmd, , name] = tasks[i] as [string, number, string | null]
+      const [cmd, , name] = tasks[i] as [string, number, string | null, boolean]
       logs.push(...chunk.lines)
       this.collectFailure(chunk)
       if (policy) await policy.record(cwd, cmd, name, ok)
@@ -755,17 +924,18 @@ export class Gate {
     logs: string[],
     policy?: PolicyContext | null,
     extraEnv?: Env,
+    root: string = policy?.rootDir ?? this.projectDir,
   ): Promise<boolean> {
     let failed = false
     for (const item of cmds) {
       if (isParallel(item)) {
-        if (await this.runParallel(label, item.parallel || [], cwd, defaultTimeout, logs, policy, extraEnv)) failed = true
+        if (await this.runParallel(label, item.parallel || [], cwd, defaultTimeout, logs, policy, extraEnv, root)) failed = true
         continue
       }
       const [cmd, timeout, name] = parseCmd(item, defaultTimeout)
       if (!cmd) continue
       if (policy && !(await policy.allows(label, cwd, cmd, timeout, name, logs, extraEnv))) continue
-      const [chunk, ok] = await this.execOne(label, cmd, cwd, timeout, '', name, extraEnv)
+      const [chunk, ok] = await this.execOne(label, cmd, cwd, timeout, '', name, extraEnv, { root, share: parseShare(item) })
       logs.push(...chunk.lines)
       this.collectFailure(chunk)
       if (policy) await policy.record(cwd, cmd, name, ok)
@@ -793,7 +963,7 @@ export class Gate {
       }
       const name = entry.name || slug(cmd)
       summary.push(`(${label}) ${cmd}`)
-      const [chunk, ok] = await this.execOne(label, cmd, cwd, entry.timeout || DEFAULT_TIMEOUT, '', name, entry.env)
+      const [chunk, ok] = await this.execOne(label, cmd, cwd, entry.timeout || DEFAULT_TIMEOUT, '', name, entry.env, { root: entry.root || this.projectDir })
       logs.push(...chunk.lines)
       this.collectFailure(chunk)
       await this.appendTrace(entry.root || this.projectDir, cwd, name, cmd, ok ? 'response' : 'error')
@@ -942,7 +1112,7 @@ export class Gate {
             continue
           }
           summary.push(`(${label}) ${summarizeCmds(cmds)}`)
-          if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(dirFiles))) {
+          if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(dirFiles), rootDir)) {
             failed = true
             for (const f of dirFiles) failFiles.add(f)
           } else {
@@ -959,7 +1129,7 @@ export class Gate {
           continue
         }
         summary.push(`(${label}) ${summarizeCmds(cmds)}`)
-        if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(ruleFiles))) {
+        if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(ruleFiles), rootDir)) {
           failed = true
           for (const f of ruleFiles) failFiles.add(f)
         } else {
@@ -1161,7 +1331,7 @@ export class Gate {
       const policy = await this.makePolicyContext(cfg, check, rootDir, policyState, logs)
       const refs = filesByName[name] || []
       const env = filesEnv(refs.map((raw) => this.splitRoot(raw)[1]))
-      if (await this.runCmds(`check:${name}`, cmds, cwd, timeout, logs, policy, env)) failed = true
+      if (await this.runCmds(`check:${name}`, cmds, cwd, timeout, logs, policy, env, rootDir)) failed = true
     }
     return [summary, failed]
   }
@@ -1228,6 +1398,15 @@ export class Gate {
   }
 
   private async runChecksPhase(): Promise<number> {
+    // 成功報告でブロックした直後の Stop（stop_hook_active）は、報告の確認だけなので検証を走らせず通す。
+    // 印は新しいユーザーターン起点の Stop でも消す（古い印が後の継続 Stop を素通しさせないように）。
+    if (await this.io.exists(this.reported)) {
+      await this.rm(this.reported)
+      if (this.stopHookActive) {
+        this.reportConsumed = true
+        return 0
+      }
+    }
     const pending = (await this.io.exists(this.pending)) ? await this.loadPending() : {}
     if (Object.keys(pending).length === 0) await this.rm(this.pending)
     // rules フェーズの控えは、そこで実行が起きた回にしか消化されない。編集が止まると残り続け、未検証のまま
@@ -1260,7 +1439,10 @@ export class Gate {
 
     await this.purgeRootsFromSidecar(droppedRoots)
 
-    const [dSummary, dFailed] = await this.runDeferred(deferred, logs)
+    // 予約チェックが実行した（または共有で結果を受け取った）コマンドは、ポリシーの有無にかかわらず、控えに同じものが
+    // あっても消化済みとして扱う（同じフェーズで二重に走らせない）。
+    const remaining = deferred.filter((e) => !this.ranThisRun.has(Gate.deferKey(e)))
+    const [dSummary, dFailed] = await this.runDeferred(remaining, logs)
     summary.push(...dSummary)
     if (dFailed.length > 0) {
       await this.requeueDeferred(dFailed)
@@ -1271,6 +1453,14 @@ export class Gate {
       await this.confirmPending(activePending)
       await this.cleanup([this.count, this.pending])
       const body = this.statusBlock(summary.length > 0 ? summary.map((s) => `✓ ${s}`).join('\n') : '（対象なし）')
+      if (this.executedLabels.length > 0 && !this.stopHookActive && mainCfg?.report_success !== false) {
+        // 失敗ブロック後の続きではない（stop_hook_active でない）ときだけ、成功をエージェントへ 1 回届ける。
+        await this.io.writeFile(this.reported, '1\n')
+        const reason = `[gate] 検証がすべて通りました: ${this.executedLabels.map((l) => `${l} ✓`).join(' / ')}。この結果をユーザーに報告して終了してください。`
+        this.writeErr(`${reason}\n`)
+        this.print({ decision: 'block', reason })
+        return 2
+      }
       const title = Object.keys(pending).length > 0 ? 'consistency checks' : '後回しにした検証コマンド'
       this.print({ systemMessage: `[gate] ${title} 成功:\n${body}` })
       return 0
@@ -1356,6 +1546,7 @@ export class PolicyContext {
       if (verdict === 'allow') {
         await this.gate.undeferCmd(this.rootDir, cwd, cmd)
         this.state.executed = true
+        this.state.allowedThisRun.add(`${this.rootDir}\0${cwd}\0${cmd}`)
         return true
       }
       logs.push(
@@ -1388,6 +1579,8 @@ export async function runGate(io: Io, opts: { sessionId?: string; agentId?: stri
     gate.stderr += `[gate] internal error:\n${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`
     gate.stdout += `${JSON.stringify({ systemMessage: '[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。' })}\n`
     exitCode = 0
+  } finally {
+    await gate.finishProgress()
   }
-  return { exitCode, stdout: gate.stdout, stderr: gate.stderr }
+  return { exitCode, stdout: gate.stdout, stderr: gate.stderr, ...(gate.reportConsumed ? { reportConsumed: true } : {}) }
 }

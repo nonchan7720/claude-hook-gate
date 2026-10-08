@@ -220,7 +220,7 @@ describe('checks phase drains deferred', () => {
       writeGateYaml(proj, { rules: [{ match: '**/*.go', run: ['true'] }] })
       const marker = path.join(proj, 'ran.txt')
       writeDeferred(proj, 'sess1', [entry(proj, `echo ok > ${marker}`)])
-      ok(await checks(proj))
+      ok(await checks(proj, 'sess1', { stopHookActive: true }))
       expect(exists(marker)).toBe(true)
       expect(readDeferred(proj, 'sess1')).toEqual([])
     }))
@@ -381,7 +381,7 @@ describe('default policy', () => {
       })
       writeChangedFiles(proj, 'sess1', 'x.py')
       await rules(proj, 'sess1', { dogwoodBin: fake })
-      const r = await checks(proj, 'sess1', { dogwoodBin: fake })
+      const r = await checks(proj, 'sess1', { dogwoodBin: fake, stopHookActive: true })
       expect(r.exitCode).toBe(0)
     }))
 })
@@ -640,10 +640,33 @@ describe('checks phase with policy', () => {
       const fake = reserved(proj, [`touch ${marker}`])
       ok(await rules(proj, 'sess1', { dogwoodBin: fake }))
       writeDeferred(proj, 'sess1', [{ root: proj, cwd: proj, name: 'left-over', cmd: `touch ${deferredMarker}`, timeout: 300, label: '.' }])
-      ok(await checks(proj, 'sess1', { dogwoodBin: fake }))
+      ok(await checks(proj, 'sess1', { dogwoodBin: fake, stopHookActive: true }))
       expect(exists(marker)).toBe(true)
       expect(exists(deferredMarker)).toBe(true)
       expect(readDeferred(proj, 'sess1')).toEqual([])
+    }))
+
+  test('a reserved check that ran a command consumes the same command left in the deferred store', () =>
+    withTmp(async (proj) => {
+      const counter = path.join(proj, 'count.txt')
+      const cmd = `echo x >> ${counter}`
+      const fake = reserved(proj, [{ cmd, name: 'chk-cmd' }])
+      ok(await rules(proj, 'sess1', { dogwoodBin: fake }))
+      writeDeferred(proj, 'sess1', [{ root: proj, cwd: proj, name: 'chk-cmd', cmd, timeout: 300, label: '.' }])
+      ok(await checks(proj, 'sess1', { dogwoodBin: fake, stopHookActive: true }))
+      expect(read(counter).split('\n').filter(Boolean).length).toBe(1)
+      expect(readDeferred(proj, 'sess1')).toEqual([])
+    }))
+
+  test('a deferred command the reserved check did not run is still executed', () =>
+    withTmp(async (proj) => {
+      const counter = path.join(proj, 'count.txt')
+      const cmd = `echo x >> ${counter}`
+      const fake = reserved(proj, [{ cmd, name: 'chk-cmd' }], { deny: ['chk-cmd'] })
+      ok(await rules(proj, 'sess1', { dogwoodBin: fake }))
+      writeDeferred(proj, 'sess1', [{ root: proj, cwd: proj, name: 'other', cmd: `echo y >> ${counter}`, timeout: 300, label: '.' }])
+      ok(await checks(proj, 'sess1', { dogwoodBin: fake, stopHookActive: true }))
+      expect(read(counter).split('\n').filter(Boolean)).toEqual(['y'])
     }))
 })
 

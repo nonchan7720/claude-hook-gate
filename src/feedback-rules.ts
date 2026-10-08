@@ -232,6 +232,7 @@ export async function evalPreBash(io: Io, rules: Rule[], command: string, projec
       if (truthy(unless) && pyRegExp(String(unless)).test(command)) continue
       const checkCmd = entry.check
       if (truthy(checkCmd)) {
+        io.progress?.(`[feedback-guard] 評価中: ${rule.name}`)
         const r = await io.run([...SHELL, String(checkCmd)], { cwd: dir, env: { CLAUDE_PROJECT_DIR: dir }, timeoutMs: 10_000 })
         // 非0終了で違反確定。0終了なら違反ではない。check 自体が動かせない場合は when 一致のみで違反扱いにする。
         if (r.exitCode === 0 && !r.timedOut && r.error === undefined) continue
@@ -427,6 +428,7 @@ export async function evalStopCheck(io: Io, rules: Rule[], projectDir: string, c
           if (!any) bad = true
         }
         if (truthy(checkCmd)) {
+          io.progress?.(`[feedback-stop-check] 検査中: ${rule.name} (${absPath})`)
           const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: projectDir, FILE: absPath }, timeoutMs: 15_000 })
           if (r.exitCode !== 0 || r.timedOut || r.error !== undefined) bad = true
         }

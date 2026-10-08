@@ -32,6 +32,7 @@ const LEGACY_NAMES = [
   'gate_trace.{sid}.jsonl',
   'gate_deferred.{sid}.json',
   'gate_push_verified.{sid}.txt',
+  'gate_reported.{sid}.txt',
   'feedback_gate_attempts.{sid}.txt',
 ]
 
@@ -219,5 +220,25 @@ describe('reset-gate policy state (trace / deferred)', () => {
       for (const f of stale) age(f)
       await run(proj, 'sess-current', 'resume')
       allGone(stale)
+    }))
+})
+
+describe('reset-gate status summary', () => {
+  const summary = (proj: string) => path.join(proj, '.claude', '.gate-status', 'summary.txt')
+  const put = (proj: string) => {
+    fs.mkdirSync(path.dirname(summary(proj)), { recursive: true })
+    fs.writeFileSync(summary(proj), '[gate] 完了: ✓ 1 (0.1s)')
+  }
+
+  test('the kept gate summary is deleted on startup / clear and kept on resume', () =>
+    withTmp(async (proj) => {
+      put(proj)
+      await run(proj, 'sess1', 'resume')
+      expect(exists(summary(proj))).toBe(true)
+      await run(proj, 'sess1', 'startup')
+      expect(exists(summary(proj))).toBe(false)
+      put(proj)
+      await run(proj, 'sess1', 'clear')
+      expect(exists(summary(proj))).toBe(false)
     }))
 })

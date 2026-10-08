@@ -130,6 +130,14 @@ describe('wrapper-prefixed command rule', () => {
     }
   })
 
+  test('shows the rule being evaluated when running a check command', async () => {
+    const progressLog: Array<string | undefined> = []
+    const withCheck = rule('chk_rule', 6, { event: 'pre_bash', when: 'rm', check: 'false', message: 'm', severity: 'deny' })
+    const v = await evalPreBash(makeIo({ projectDir: os.tmpdir(), progressLog }), [withCheck], 'rm x')
+    expect(v.length).toBe(1)
+    expect(progressLog).toEqual(['[feedback-guard] 評価中: chk_rule'])
+  })
+
   test('mise run task is not denied', async () => {
     for (const command of ['mise run test', 'mise run lint']) expect(await evalPreBash(io, [r], command)).toEqual([])
   })
@@ -534,6 +542,15 @@ describe('evalStopCheck', () => {
     fs.writeFileSync(path.join(tmp, 'README.md'), '')
     fs.writeFileSync(path.join(tmp, 'README_ja.md'), '')
     expect(await evalStopCheck(ioFor(tmp), readme, tmp, ['README.md'])).toEqual([])
+  })
+
+  test('shows the rule and file being checked when running a check command', async () => {
+    fs.writeFileSync(path.join(tmp, 'a.txt'), '')
+    const progressLog: Array<string | undefined> = []
+    const io = makeIo({ projectDir: tmp, env: { CLAUDE_FEEDBACK_DIR: tmp }, progressLog })
+    const r = rule('chk_rule', 4, { event: 'stop_check', changed: '**/*.txt', check: 'true', message: 'm', severity: 'block' })
+    await evalStopCheck(io, [r], tmp, ['a.txt'])
+    expect(progressLog).toEqual([`[feedback-stop-check] 検査中: chk_rule (${path.join(tmp, 'a.txt')})`])
   })
 
   test('unrelated changed file is ignored', async () => {

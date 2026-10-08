@@ -16,6 +16,8 @@ const setup = (on: any, files: Files = {}, env: Record<string, string> = {}, run
   const dirs = new Set<string>(['/proj'])
   for (const f of Object.keys(files)) for (let d = f.slice(0, f.lastIndexOf('/')); d.length > 0; d = d.slice(0, d.lastIndexOf('/'))) dirs.add(d)
   const runs: string[][] = []
+  const statuses: (string | undefined)[] = []
+  const invalidations: string[] = []
   mock.env(on, { HOME: '/h', ...env })
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.root', () => ({ value: '/proj' }))
@@ -39,12 +41,23 @@ const setup = (on: any, files: Files = {}, env: Record<string, string> = {}, run
   })
   on('process.run', (_$: unknown, e: { argv: string[] }) => {
     runs.push([...e.argv])
+    if (e.argv[0] === 'rm') for (const p of e.argv.slice(1).filter((a) => !a.startsWith('-'))) delete files[p]
     const r = run(e.argv)
     return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   for (const ev of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Notification', 'Stop', 'SubagentStop']) on(`classic.${ev}`, () => ({}))
+  on('ui.status', (_$: unknown, e: { text: string | undefined }) => {
+    statuses.push(e.text)
+    return { value: undefined }
+  })
+  on('ui.invalidate', (_$: unknown, e: { event: string }) => {
+    invalidations.push(e.event)
+    return { value: undefined }
+  })
+  // 実タイマーを走らせない。
+  on('clock.every', () => ({ value: undefined }))
   on('tool.call', () => ({ result: 'ran' as never }))
-  return { runs, files }
+  return { runs, files, statuses, invalidations }
 }
 
 const rule = (name: string, count: number, enforce: string) => `---\nname: ${name}\ndescription: d\ntype: feedback\ncount: ${count}\n${enforce}---\n\nbody\n`
@@ -152,6 +165,124 @@ test('PostToolUse: 変更ファイルを記録し、rules フェーズの失敗�
   expect(files['/proj/.claude/.gate-status/changed_files.sess-1.txt']).toBe('x.py\n')
   expect(runs.some((a) => a[0] === 'sh')).toBe(true)
   expect(r.block).toContain('lint failed')
+})
+
+test('PostToolUse: 実行中はステータス行を使わず帯を描き直させ、終わったら結果を 1 行でステータス行に残す', async ($, on) => {
+  const files: Files = { '/proj/.claude/gate.yaml': JSON.stringify({ policy: false, rules: [{ match: '**/*.py', run: ['echo linting'] }] }) }
+  const { statuses, invalidations } = setup(on, files)
+  await $.classic.PostToolUse({ session_id: 'sess-1', tool_name: 'Edit', tool_input: { file_path: 'x.py' }, tool_response: {}, tool_use_id: 't1' })
+  expect(statuses.some((s) => s?.startsWith('[gate] 実行中'))).toBe(false)
+  expect(statuses.at(-1)).toBe('[gate] 完了: ✓ 1 (0.0s)')
+  expect(invalidations).toContain('ui.render')
+})
+
+const BAND = { surface: 'terminal', component: 'AbovePrompt', requestId: 'r1', props: { hasSurvey: false, isWorking: false } } as const
+
+// biome-ignore lint/suspicious/noExplicitAny: エンジンの On 型は Claude Code の外では参照できないため緩く受ける
+const beneathBand = (on: any) => {
+  const engineBand = { type: 'Text', children: ['engine band'] }
+  on('ui.render', { component: 'AbovePrompt' }, () => engineBand)
+  return engineBand
+}
+
+test('ui.render AbovePrompt: 実行中の項目がある間は複数行の木を返す', async ($, on) => {
+  const started = 1_700_000_000_000 - 3000
+  setup(on, {
+    '/proj/.claude/.gate-status/running/a1.json': JSON.stringify([
+      { name: 'typecheck', cmd: 'bun run typecheck', started, result: 'ok', ended: started + 700 },
+      { name: 'test', cmd: 'bun run test', started },
+    ]),
+  })
+  beneathBand(on)
+  const tree = await $.ui.render(BAND)
+  expect(tree).toEqual({
+    type: 'Box',
+    props: { flexDirection: 'column' },
+    children: ['[gate] 実行中:', '  typecheck ✓ (0.7s)', '  test $ bun run test (3s)'].map((line) => ({ type: 'Text', children: [line] })),
+  })
+})
+
+test('ui.render AbovePrompt: 全部終わっているか何も無ければエンジンの帯に戻り、アンケート中は譲る', async ($, on) => {
+  const started = 1_700_000_000_000 - 3000
+  const files: Files = {}
+  setup(on, files)
+  const engineBand = beneathBand(on)
+  expect(await $.ui.render(BAND)).toEqual(engineBand)
+  files['/proj/.claude/.gate-status/running/a1.json'] = JSON.stringify([{ name: 'lint', cmd: 'x', started, result: 'ok', ended: started + 100 }])
+  expect(await $.ui.render(BAND)).toEqual(engineBand)
+  files['/proj/.claude/.gate-status/running/a1.json'] = JSON.stringify([{ name: 'test', cmd: 'x', started }])
+  expect(await $.ui.render({ ...BAND, props: { hasSurvey: true, isWorking: false } })).toEqual(engineBand)
+})
+
+test('Stop: 予約済みの consistency_checks の実行中は帯に出て、終わったらステータス行に結果が残る', async ($, on) => {
+  const files: Files = {
+    '/proj/.claude/gate.yaml': JSON.stringify({
+      policy: false,
+      rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+      consistency_checks: [{ name: 'chk', run: ['echo checking'] }],
+    }),
+  }
+  const { statuses } = setup(on, files)
+  await $.classic.PostToolUse({ session_id: 'sess-1', tool_name: 'Edit', tool_input: { file_path: 'x.py' }, tool_response: {}, tool_use_id: 't1' })
+  statuses.length = 0
+  await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: false })
+  expect(statuses.some((s) => s?.startsWith('[gate] 実行中'))).toBe(false)
+  expect(statuses.at(-1)).toBe('[gate] 完了: ✓ 1 (0.0s)')
+})
+
+test('Stop: 検証がすべて通ったら一度だけ結果を報告してブロックし、続きの Stop は通す', async ($, on) => {
+  const files: Files = {
+    '/proj/.claude/gate.yaml': JSON.stringify({
+      policy: false,
+      rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+      consistency_checks: [{ name: 'chk', run: [{ cmd: 'echo checking', name: 'lint' }] }],
+    }),
+  }
+  setup(on, files)
+  await $.classic.PostToolUse({ session_id: 'sess-1', tool_name: 'Edit', tool_input: { file_path: 'x.py' }, tool_response: {}, tool_use_id: 't1' })
+  const first = await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: false })
+  expect(first.block).toContain('検証がすべて通りました: lint ✓')
+  const second = await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: true })
+  expect(second.block).toBeUndefined()
+})
+
+test('Stop: 成功報告ブロックでは通知せず、その続きの Stop で一度だけ完了通知する', async ($, on) => {
+  const files: Files = {
+    '/proj/.claude/gate.yaml': JSON.stringify({
+      policy: false,
+      rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+      consistency_checks: [{ name: 'chk', run: [{ cmd: 'echo checking', name: 'lint' }] }],
+    }),
+  }
+  const { runs } = setup(on, files)
+  const notified = () => runs.filter((argv) => argv[0] === 'osascript').length
+  await $.classic.PostToolUse({ session_id: 'sess-1', tool_name: 'Edit', tool_input: { file_path: 'x.py' }, tool_response: {}, tool_use_id: 't1' })
+  await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: false })
+  expect(notified()).toBe(0)
+  await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: true })
+  expect(notified()).toBe(1)
+})
+
+test('Stop: 失敗ブロックの続きの Stop では通知しない', async ($, on) => {
+  const files: Files = {
+    '/proj/.claude/gate.yaml': JSON.stringify({
+      policy: false,
+      rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+      consistency_checks: [{ name: 'chk', run: ['echo broken; exit 1'] }],
+    }),
+  }
+  const { runs } = setup(on, files, {}, (argv) => ({ exitCode: argv[0] === 'sh' && argv[2]?.includes('echo broken') ? 1 : 0, stdout: '' }))
+  await $.classic.PostToolUse({ session_id: 'sess-1', tool_name: 'Edit', tool_input: { file_path: 'x.py' }, tool_response: {}, tool_use_id: 't1' })
+  await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: false })
+  await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: true })
+  expect(runs.filter((argv) => argv[0] === 'osascript').length).toBe(0)
+})
+
+test('PreToolUse: 検証コマンドを走らせない呼び出しではステータス行に触らない', async ($, on) => {
+  const { statuses } = setup(on)
+  await $.tool.call({ tool: 'Read', file_path: '/a' })
+  await $.tool.call({ tool: 'Bash', command: 'ls' })
+  expect(statuses).toEqual([])
 })
 
 test('Notification: 結果は使わず後続へ流す', async ($, on) => {

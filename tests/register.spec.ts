@@ -2,11 +2,21 @@ import { describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { register } from '../src/register.ts'
+import { publishRunning } from '../src/running-registry.ts'
 import { loadMod } from './helpers/fake-engine.ts'
 import { exists, writeChangedFiles, writeGateYaml } from './helpers/gate.ts'
-import { MISSING_DOGWOOD_BIN, rmTree, tmpDir } from './helpers/node-io.ts'
+import { MISSING_DOGWOOD_BIN, makeIo, rmTree, tmpDir } from './helpers/node-io.ts'
 
 type Out = Record<string, unknown>
+
+const statusLog: Array<string | undefined> = []
+const invalidateLog: string[] = []
+const runLog: string[][] = []
+const timerLog: number[] = []
+// true の間、遅延表示の待ち時間（$.clock.every）は既に経過したものとして扱う。
+let elapsed = false
+// 完了通知は最初に osascript で前面ウィンドウを調べるので、その実行回数を通知を試みた回数として数える
+const notifyCount = () => runLog.filter((argv) => argv[0] === 'osascript').length
 
 async function withMod<T>(
   body: (m: ReturnType<typeof loadMod>, proj: string, feedback: string, home: string) => Promise<T>,
@@ -15,8 +25,23 @@ async function withMod<T>(
   const proj = tmpDir()
   const feedback = tmpDir()
   const home = tmpDir()
+  statusLog.length = 0
+  invalidateLog.length = 0
+  runLog.length = 0
+  timerLog.length = 0
+  elapsed = false
   try {
-    const m = loadMod(register, { projectDir: proj, options, env: { HOME: home, CLAUDE_FEEDBACK_DIR: feedback, DOGWOOD_BIN: MISSING_DOGWOOD_BIN } })
+    const m = loadMod(register, {
+      projectDir: proj,
+      options,
+      statusLog,
+      invalidateLog,
+      runLog,
+      timerLog,
+      elapsed: () => elapsed,
+      stubCommands: ['osascript', 'terminal-notifier'],
+      env: { HOME: home, CLAUDE_FEEDBACK_DIR: feedback, DOGWOOD_BIN: MISSING_DOGWOOD_BIN },
+    })
     return await body(m, proj, feedback, home)
   } finally {
     rmTree(proj)
@@ -188,6 +213,54 @@ describe('Stop / SubagentStop / Notification', () => {
       expect(String(r.block)).toContain('consistency checks 失敗')
     }))
 
+  test('Stop blocks once to report success, then the follow-up Stop passes', () =>
+    withMod(async (m, proj) => {
+      writeGateYaml(proj, {
+        rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+        consistency_checks: [{ name: 'chk', run: [{ cmd: 'true', name: 'lint' }] }],
+      })
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      const first = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
+      expect(String(first.block)).toContain('検証がすべて通りました: lint ✓')
+      const second = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: true })) as Out
+      expect(second.block).toBeUndefined()
+    }))
+
+  test('the follow-up Stop after the success report notifies completion once; the report block itself does not', () =>
+    withMod(async (m, proj) => {
+      writeGateYaml(proj, {
+        rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+        consistency_checks: [{ name: 'chk', run: [{ cmd: 'true', name: 'lint' }] }],
+      })
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })
+      expect(notifyCount()).toBe(0)
+      await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: true })
+      expect(notifyCount()).toBe(1)
+      // 印は消費済みなので、さらに続く stop_hook_active の Stop では鳴らない
+      await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: true })
+      expect(notifyCount()).toBe(1)
+    }))
+
+  test('the follow-up Stop after a failure block does not notify', () =>
+    withMod(async (m, proj) => {
+      writeGateYaml(proj, {
+        rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+        consistency_checks: [{ name: 'chk', run: ['echo broken; exit 1'] }],
+      })
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })
+      await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: true })
+      expect(notifyCount()).toBe(0)
+    }))
+
+  test('a Stop with stop_hook_active and no report marker does not notify', () =>
+    withMod(async (m, proj) => {
+      writeGateYaml(proj, { rules: [] })
+      await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: true })
+      expect(notifyCount()).toBe(0)
+    }))
+
   test('Stop passes when nothing is pending', () =>
     withMod(async (m, proj) => {
       writeGateYaml(proj, { rules: [] })
@@ -207,6 +280,125 @@ describe('Stop / SubagentStop / Notification', () => {
       await m.call('classic.PostToolUse', { session_id: 'sess-1', agent_id: 'a1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
       const r = (await m.call('classic.SubagentStop', { session_id: 'sess-1', agent_id: 'a1', stop_hook_active: false })) as Out
       expect(String(r.block)).toContain('consistency checks 失敗')
+    }))
+
+  test('a blocked gate run never draws on the status line while running, and leaves its result there', () =>
+    withMod(async (m, proj) => {
+      writeGateYaml(proj, {
+        rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+        consistency_checks: [{ name: 'chk', run: ['exit 1'] }],
+      })
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      statusLog.length = 0
+      invalidateLog.length = 0
+      const blocked = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
+      expect(String(blocked.block)).toContain('consistency checks 失敗')
+      expect(statusLog.some((t) => t?.startsWith('[gate] 実行中'))).toBe(false)
+      expect(statusLog.at(-1)).toMatch(/^\[gate\] 完了: ✗ 1 \(\d+\.\ds\)$/)
+      expect(invalidateLog).toContain('ui.render')
+    }))
+
+  test('PostToolUse leaves the rules-phase result on the status line and asks the band to redraw', () =>
+    withMod(async (m, proj) => {
+      writeGateYaml(proj, { rules: [{ match: '**/*.py', run: [{ cmd: 'true', name: 'fmt' }] }] })
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      expect(statusLog.filter((t) => t !== undefined)).toEqual([expect.stringMatching(/^\[gate\] 完了: ✓ 1 \(\d+\.\ds\)$/)])
+      expect(statusLog.at(-1)).toMatch(/^\[gate\] 完了: ✓ 1 /)
+      expect(invalidateLog).toContain('ui.render')
+    }))
+
+  test('PreToolUse shows the evaluated rule only after 3 seconds, and clears even on deny', () =>
+    withMod(async (m, _proj, feedback) => {
+      writeRule(feedback, 'no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    check: 'false'\n    message: 'forbidden'\n    severity: deny\n")
+      elapsed = true
+      const r = (await m.call('classic.PreToolUse', { tool: 'Bash', command: 'rm -rf x' })) as Out
+      expect(String(r.deny)).toContain('no_rm')
+      expect(timerLog).toEqual([3000])
+      expect(statusLog).toEqual(['[feedback-guard] 評価中: no_rm', undefined])
+    }))
+
+  test('PreToolUse that finishes within 3 seconds never touches the status line', () =>
+    withMod(async (m, proj, feedback) => {
+      writeGateYaml(proj, { rules: [{ match: '**/*.py', run: [{ cmd: 'true', name: 'fmt' }] }] })
+      writeRule(feedback, 'no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    check: 'false'\n    message: 'forbidden'\n    severity: deny\n")
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      statusLog.length = 0
+      timerLog.length = 0
+      const r = (await m.call('classic.PreToolUse', { tool: 'Bash', command: 'rm -rf x' })) as Out
+      expect(String(r.deny)).toContain('no_rm')
+      expect(timerLog).toEqual([3000])
+      expect(statusLog).toEqual([])
+    }))
+
+  test('PreToolUse returns the status line to the gate summary after showing the evaluated rule', () =>
+    withMod(async (m, proj, feedback) => {
+      writeGateYaml(proj, { rules: [{ match: '**/*.py', run: [{ cmd: 'true', name: 'fmt' }] }] })
+      writeRule(feedback, 'no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    check: 'false'\n    message: 'forbidden'\n    severity: deny\n")
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      statusLog.length = 0
+      elapsed = true
+      await m.call('classic.PreToolUse', { tool: 'Bash', command: 'rm -rf x' })
+      expect(statusLog).toEqual(['[feedback-guard] 評価中: no_rm', expect.stringMatching(/^\[gate\] 完了: ✓ 1 \(\d+\.\ds\)$/)])
+    }))
+
+  test('the kept gate summary is dropped once the next gate command starts', () =>
+    withMod(async (m, proj, feedback) => {
+      writeGateYaml(proj, { rules: [{ match: '**/*.py', run: [{ cmd: 'true', name: 'fmt' }] }] })
+      writeRule(feedback, 'no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    check: 'false'\n    message: 'forbidden'\n    severity: deny\n")
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'y.py' } })
+      statusLog.length = 0
+      elapsed = true
+      await m.call('classic.PreToolUse', { tool: 'Bash', command: 'rm -rf x' })
+      expect(statusLog.at(-1)).toMatch(/^\[gate\] 完了: ✓ 1 /)
+      expect(statusLog.filter((t) => t?.startsWith('[gate]')).length).toBe(1)
+    }))
+
+  describe('ui.render AbovePrompt band', () => {
+    const idle = { type: 'Text', children: ['engine band'] }
+    const input = (hasSurvey = false) => ({ surface: 'terminal', component: 'AbovePrompt', requestId: 'r1', props: { hasSurvey, isWorking: false } })
+    const render = (m: ReturnType<typeof loadMod>, hasSurvey = false) => m.call('ui.render', input(hasSurvey), async () => idle)
+    const ownerIo = (proj: string) => makeIo({ projectDir: proj })
+
+    test('draws a column of lines while something is running', () =>
+      withMod(async (m, proj) => {
+        const started = Date.now()
+        await publishRunning(ownerIo(proj), 'a1', [
+          { name: 'typecheck', cmd: 'bun run typecheck', started, result: 'ok', ended: started + 700 },
+          { name: 'test', cmd: 'bun run test', started },
+        ])
+        const tree = (await render(m)) as unknown as { type: string; children: Array<{ children: string[] }> }
+        expect(tree.type).toBe('Box')
+        const lines = tree.children.map((c) => c.children[0])
+        expect(lines[0]).toBe('[gate] 実行中:')
+        expect(lines[1]).toBe('  typecheck ✓ (0.7s)')
+        expect(lines[2]).toMatch(/^ {2}test \$ bun run test \(\d+s\)$/)
+      }))
+
+    test('goes back to the engine band once everything has finished or nothing is listed', () =>
+      withMod(async (m, proj) => {
+        expect(await render(m)).toBe(idle as never)
+        const started = Date.now()
+        await publishRunning(ownerIo(proj), 'a1', [{ name: 'lint', cmd: 'x', started, result: 'ok', ended: started + 100 }])
+        expect(await render(m)).toBe(idle as never)
+      }))
+
+    test('yields to a survey', () =>
+      withMod(async (m, proj) => {
+        await publishRunning(ownerIo(proj), 'a1', [{ name: 'test', cmd: 'x', started: Date.now() }])
+        expect(await render(m, true)).toBe(idle as never)
+      }))
+  })
+
+  test('hooks that run nothing leave the status line alone', () =>
+    withMod(async (m, proj, feedback) => {
+      writeGateYaml(proj, { rules: [] })
+      writeRule(feedback, 'no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    message: 'forbidden'\n    severity: deny\n")
+      await m.call('classic.PreToolUse', { tool: 'Bash', command: 'ls' })
+      await m.call('classic.PreToolUse', { tool: 'Read', file_path: '/a' })
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Read' })
+      await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: true })
+      expect(statusLog).toEqual([])
     }))
 
   test('Notification never blocks and always continues to the next hook', () =>

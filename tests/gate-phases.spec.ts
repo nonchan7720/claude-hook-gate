@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import { runGate } from '../src/gate.ts'
 import {
   attemptsCount,
   attemptsPath,
@@ -16,12 +17,13 @@ import {
   rules,
   setupReservedCheckProject,
   sidecarPath,
+  statePath,
   touch,
   writeChangedFiles,
   writeGateYaml,
   writePending,
 } from './helpers/gate.ts'
-import { withTmp } from './helpers/node-io.ts'
+import { makeIo, withTmp } from './helpers/node-io.ts'
 
 const ok = (r: { exitCode: number }) => expect(r.exitCode).toBe(0)
 
@@ -69,7 +71,7 @@ describe('checks phase runs only reserved checks', () => {
       const unused = path.join(proj, 'unused.marker')
       setupReservedCheckProject(proj, 'sess1', [`touch ${used}`], { name: 'chk-unused', run: [`touch ${unused}`] })
       ok(await rules(proj))
-      ok(await checks(proj))
+      ok(await checks(proj, 'sess1', { stopHookActive: true }))
       expect(exists(used)).toBe(true)
       expect(exists(unused)).toBe(false)
     }))
@@ -78,7 +80,7 @@ describe('checks phase runs only reserved checks', () => {
     withTmp(async (proj) => {
       setupReservedCheckProject(proj, 'sess1', ['true'])
       ok(await rules(proj))
-      ok(await checks(proj))
+      ok(await checks(proj, 'sess1', { stopHookActive: true }))
       expect(exists(sidecarPath(proj, 'sess1'))).toBe(false)
       expect(exists(pendingPath(proj, 'sess1'))).toBe(false)
       expect(exists(changedPath(proj, 'sess1'))).toBe(false)
@@ -127,7 +129,7 @@ describe('pending root isolation', () => {
       expect(data[proj]).toEqual({ chk: ['docs/readme.md'] })
       expect(data[wt]).toEqual({ chk: [absFile] })
 
-      ok(await checks(proj))
+      ok(await checks(proj, 'sess1', { stopHookActive: true }))
       expect(exists(mainMarker)).toBe(true)
       expect(exists(wtMarker)).toBe(true)
     }))
@@ -148,7 +150,7 @@ describe('pending root isolation', () => {
 
       ok(await rules(proj))
       expect(Object.keys(readPending(proj, 'sess1'))).toEqual([proj])
-      ok(await checks(proj))
+      ok(await checks(proj, 'sess1', { stopHookActive: true }))
       expect(exists(mainMarker)).toBe(true)
       expect(exists(wtMarker)).toBe(false)
     }))
@@ -259,11 +261,11 @@ describe('checks phase failure stdout', () => {
       expect(() => JSON.parse(r.stdout)).not.toThrow()
     }))
 
-  test('success has no decision field', () =>
+  test('success under stop_hook_active has no decision field', () =>
     withTmp(async (proj) => {
       setupReservedCheckProject(proj, 'sess1', ['true'])
       ok(await rules(proj))
-      const r = await checks(proj, 'sess1', { stopHookActive: false })
+      const r = await checks(proj, 'sess1', { stopHookActive: true })
       expect(r.exitCode).toBe(0)
       if (r.stdout.trim()) expect(JSON.parse(r.stdout)).not.toHaveProperty('decision')
     }))
@@ -398,5 +400,228 @@ describe('gate without gate.yaml', () => {
       touch(proj, 'x.py')
       const r = await gate(proj, 'sess1', { phase: 'rules' })
       expect(r).toEqual({ exitCode: 0, stdout: '', stderr: '' })
+    }))
+})
+
+// 実行中は帯（redraw のたびの bandLog）に複数行で出し、全部終わったら帯を消してステータス行（resultLog）に 1 行の結果を残す。
+describe('progress band', () => {
+  // rules フェーズで consistency_checks を予約しておく（checks フェーズは予約分しか実行しない）。
+  const setup = async (proj: string, run: unknown[]) => {
+    writeGateYaml(proj, { rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }], consistency_checks: [{ name: 'chk', run }] })
+    writeChangedFiles(proj, 'sess1', 'x.py')
+    ok(await rules(proj))
+  }
+  const makeClock = () => {
+    const clock = { t: 1_000_000, fns: new Set<() => void>() }
+    return {
+      clock,
+      every: (_ms: number, fn: () => void) => {
+        clock.fns.add(fn)
+        return () => void clock.fns.delete(fn)
+      },
+      advance: (ms: number) => {
+        clock.t += ms
+        for (const f of [...clock.fns]) f()
+      },
+    }
+  }
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+
+  test('checks phase draws the running command in the band, redraws elapsed seconds, then hides it and leaves one result line', () =>
+    withTmp(async (proj) => {
+      await setup(proj, [{ cmd: 'sleep 0.4', name: 'slow' }])
+      const bandLog: Array<string | undefined> = []
+      const resultLog: Array<string | undefined> = []
+      const progressLog: Array<string | undefined> = []
+      const c = makeClock()
+      const io = makeIo({ projectDir: proj, bandLog, resultLog, progressLog, now: () => c.clock.t, every: c.every })
+      const p = runGate(io, { sessionId: 'sess1', phase: 'checks', stopHookActive: true })
+      await sleep(150)
+      c.advance(35_000)
+      await sleep(50)
+      ok(await p)
+      expect(bandLog[0]).toBe('[gate] 実行中:\n  slow $ sleep 0.4 (0s)')
+      expect(bandLog).toContain('[gate] 実行中:\n  slow $ sleep 0.4 (35s)')
+      expect(bandLog.at(-1)).toBeUndefined()
+      expect(resultLog.at(-1)).toMatch(/^\[gate\] 完了: ✓ 1 \(\d+\.\ds\)$/)
+      expect(progressLog).toEqual([])
+      expect(c.clock.fns.size).toBe(0)
+    }))
+
+  test('parallel commands are listed together and finished ones stay with a check mark', () =>
+    withTmp(async (proj) => {
+      await setup(proj, [
+        {
+          parallel: [
+            { cmd: 'sleep 0.4', name: 'a' },
+            { cmd: 'sleep 0.1', name: 'b' },
+          ],
+        },
+      ])
+      const bandLog: Array<string | undefined> = []
+      const resultLog: Array<string | undefined> = []
+      const io = makeIo({ projectDir: proj, bandLog, resultLog })
+      ok(await runGate(io, { sessionId: 'sess1', phase: 'checks', stopHookActive: true }))
+      expect(bandLog).toContain('[gate] 実行中:\n  a $ sleep 0.4 (0s)\n  b $ sleep 0.1 (0s)')
+      expect(bandLog.some((l) => /^\[gate\] 実行中:\n {2}a \$ sleep 0\.4 \(0s\)\n {2}b ✓ \(\d+\.\ds\)$/.test(l ?? ''))).toBe(true)
+      // 全部終わったら帯は消え、結果は帯ではなくステータス行に 1 行で出る。
+      expect(bandLog.at(-1)).toBeUndefined()
+      expect(resultLog.at(-1)).toMatch(/^\[gate\] 完了: ✓ 2 \(\d+\.\ds\)$/)
+    }))
+
+  test('a failed command stays with a cross mark and a command without a name is shown by its cmd', () =>
+    withTmp(async (proj) => {
+      await setup(proj, [
+        {
+          parallel: [{ cmd: 'sleep 0.3', name: 'a' }, { cmd: 'exit 1' }],
+        },
+      ])
+      const bandLog: Array<string | undefined> = []
+      const resultLog: Array<string | undefined> = []
+      const io = makeIo({ projectDir: proj, bandLog, resultLog })
+      await runGate(io, { sessionId: 'sess1', phase: 'checks' })
+      expect(bandLog.some((l) => /^\[gate\] 実行中:\n {2}a \$ sleep 0\.3 \(0s\)\n {2}exit 1 ✗ \(\d+\.\ds\)$/.test(l ?? ''))).toBe(true)
+      expect(bandLog.at(-1)).toBeUndefined()
+      expect(resultLog.at(-1)).toMatch(/^\[gate\] 完了: ✓ 1 \/ ✗ 1 \(\d+\.\ds\)$/)
+    }))
+
+  test('sequential commands: each result lands on the status line, and the next command clears it and returns to the band', () =>
+    withTmp(async (proj) => {
+      await setup(proj, [
+        { cmd: 'true', name: 'first' },
+        { cmd: 'sleep 0.1', name: 'second' },
+      ])
+      const bandLog: Array<string | undefined> = []
+      const resultLog: Array<string | undefined> = []
+      const io = makeIo({ projectDir: proj, bandLog, resultLog })
+      ok(await runGate(io, { sessionId: 'sess1', phase: 'checks', stopHookActive: true }))
+      expect(bandLog.some((l) => /^\[gate\] 実行中:\n {2}first ✓ \(\d+\.\ds\)\n {2}second \$ sleep 0\.1 \(0s\)$/.test(l ?? ''))).toBe(true)
+      expect(bandLog.at(-1)).toBeUndefined()
+      // 結果 → 次の開始で消える → 結果、の順。
+      expect(resultLog.map((l) => (l === undefined ? 'clear' : l.replace(/\d+\.\ds/g, 'Ns')))).toEqual([
+        'clear',
+        '[gate] 完了: ✓ 1 (Ns)',
+        'clear',
+        '[gate] 完了: ✓ 2 (Ns)',
+      ])
+    }))
+
+  test('rules phase draws the running command in the same format', () =>
+    withTmp(async (proj) => {
+      writeGateYaml(proj, { rules: [{ match: '**/*.py', run: [{ cmd: 'true', name: 'fmt' }] }] })
+      writeChangedFiles(proj, 'sess1', 'x.py')
+      const bandLog: Array<string | undefined> = []
+      const resultLog: Array<string | undefined> = []
+      ok(await runGate(makeIo({ projectDir: proj, bandLog, resultLog }), { sessionId: 'sess1', phase: 'rules' }))
+      expect(bandLog[0]).toBe('[gate] 実行中:\n  fmt $ true (0s)')
+      expect(bandLog.at(-1)).toBeUndefined()
+      expect(resultLog.at(-1)).toMatch(/^\[gate\] 完了: ✓ 1 \(\d+\.\ds\)$/)
+    }))
+})
+
+describe('checks phase reports success once', () => {
+  const reportedPath = (proj: string, id: string) => statePath(proj, 'gate_reported', id, 'txt')
+  const countLines = (p: string) => (exists(p) ? read(p).split('\n').filter(Boolean).length : 0)
+  const reasonOf = (stdout: string): string => (JSON.parse(stdout.trim().split('\n').at(-1) as string) as { reason: string }).reason
+
+  const setupNamed = (proj: string, extra: Record<string, unknown> = {}) => {
+    writeGateYaml(proj, {
+      ...extra,
+      rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+      consistency_checks: [
+        {
+          name: 'chk',
+          run: [
+            { cmd: 'true', name: 'lint' },
+            { cmd: 'true', name: 'typecheck' },
+          ],
+        },
+      ],
+    })
+    writeChangedFiles(proj, 'sess1', 'x.py')
+  }
+
+  test('blocks with the executed commands when everything passed', () =>
+    withTmp(async (proj) => {
+      setupNamed(proj)
+      ok(await rules(proj))
+      const r = await checks(proj)
+      expect(r.exitCode).toBe(2)
+      const body = JSON.parse(r.stdout.trim().split('\n').at(-1) as string)
+      expect(body.decision).toBe('block')
+      expect(body.reason).toContain('[gate] 検証がすべて通りました: lint ✓ / typecheck ✓')
+      expect(body.reason).toContain('報告')
+      expect(exists(reportedPath(proj, 'sess1'))).toBe(true)
+    }))
+
+  test('does not block when stop_hook_active is true', () =>
+    withTmp(async (proj) => {
+      setupNamed(proj)
+      ok(await rules(proj))
+      ok(await checks(proj, 'sess1', { stopHookActive: true }))
+      expect(exists(reportedPath(proj, 'sess1'))).toBe(false)
+    }))
+
+  test('does not block when nothing was executed', () =>
+    withTmp(async (proj) => {
+      writeGateYaml(proj, { rules: [], consistency_checks: [] })
+      writePending(proj, 'sess1', {})
+      ok(await checks(proj))
+      expect(exists(reportedPath(proj, 'sess1'))).toBe(false)
+    }))
+
+  test('report_success: false disables the report', () =>
+    withTmp(async (proj) => {
+      setupNamed(proj, { report_success: false })
+      ok(await rules(proj))
+      const r = await checks(proj)
+      ok(r)
+      expect(r.stdout).toContain('成功')
+      expect(exists(reportedPath(proj, 'sess1'))).toBe(false)
+    }))
+
+  test('the stop right after a success report runs no command and drops the marker', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'runs.marker')
+      setupReservedCheckProject(proj, 'sess1', [`echo x >> ${marker}`])
+      ok(await rules(proj))
+      expect((await checks(proj)).exitCode).toBe(2)
+      expect(countLines(marker)).toBe(1)
+
+      // 予約が残っていても走らせない
+      writePending(proj, 'sess1', { [proj]: { chk: ['x.py'] } })
+      const followUp = await checks(proj, 'sess1', { stopHookActive: true })
+      ok(followUp)
+      expect(followUp.reportConsumed).toBe(true)
+      expect(countLines(marker)).toBe(1)
+      expect(exists(reportedPath(proj, 'sess1'))).toBe(false)
+      expect(exists(pendingPath(proj, 'sess1'))).toBe(true)
+    }))
+
+  test('a new user turn after a report still runs the checks', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'runs.marker')
+      setupReservedCheckProject(proj, 'sess1', [`echo x >> ${marker}`])
+      ok(await rules(proj))
+      expect((await checks(proj)).exitCode).toBe(2)
+      writePending(proj, 'sess1', { [proj]: { chk: ['x.py'] } })
+      const next = await checks(proj)
+      expect(next.exitCode).toBe(2)
+      expect(next.reportConsumed).toBeUndefined()
+      expect(countLines(marker)).toBe(2)
+    }))
+
+  test('after a failure block the next stop reruns the checks', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'runs.marker')
+      setupReservedCheckProject(proj, 'sess1', [`echo x >> ${marker}; exit 1`])
+      ok(await rules(proj))
+      const first = await checks(proj)
+      expect(first.exitCode).toBe(2)
+      expect(reasonOf(first.stdout)).toContain('consistency checks 失敗')
+      expect(exists(reportedPath(proj, 'sess1'))).toBe(false)
+      const second = await checks(proj, 'sess1', { stopHookActive: true })
+      expect(second.exitCode).toBe(2)
+      expect(countLines(marker)).toBe(2)
     }))
 })
