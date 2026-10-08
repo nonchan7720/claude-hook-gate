@@ -9,6 +9,7 @@
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, jqStr } from './pyutil.ts'
+import { clearSummary } from './running-registry.ts'
 
 // [ファイル名の先頭, 拡張子]。<base>.<session>.<ext> と <base>.<session>--<agent>.<ext> が対象。
 const STATE_FILES: ReadonlyArray<readonly [string, string]> = [
@@ -16,6 +17,7 @@ const STATE_FILES: ReadonlyArray<readonly [string, string]> = [
   ['gate_attempts', '.txt'],
   ['gate_passed', '.txt'],
   ['gate_push_verified', '.txt'],
+  ['gate_reported', '.txt'],
   ['gate_pending_checks', '.json'],
   ['gate_trace', '.jsonl'],
   ['gate_deferred', '.json'],
@@ -35,6 +37,7 @@ export async function resetGate(io: Io, payload: Dict): Promise<ScriptResult> {
   const now = await io.now()
 
   if (source === 'startup' || source === 'clear') {
+    await clearSummary(io)
     // SubagentStop 経由の状態ファイル（changed_files.<session>--<agent>.txt 等）も対象。置き場所は
     // .claude/.gate-status/。移行前の旧パス（.claude/ 直下と .claude/hooks/logs/）の残骸も同じ条件で消す。
     for (const dir of [stateDir, claudeDir]) {

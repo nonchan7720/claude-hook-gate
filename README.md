@@ -71,6 +71,36 @@ Nothing to install: the hooks are plain TypeScript, bundled into one JavaScript 
 
 State files (changed files, attempt counters, command logs) are written under the project's `.claude/.gate-status/` directory (`gate.yaml` stays directly under `.claude/`). Add `.claude/.gate-status/` to the project's `.gitignore`. State files left by older versions directly under `.claude/` (and `.claude/hooks/logs/`) are removed automatically at session start.
 
+While gate commands run, a band above the prompt shows what is running, one item per line, e.g.
+
+```
+[gate] 実行中:
+  typecheck ✓ (0.7s)
+  lint ✗ (0.2s)
+  test $ bun run test (8s)
+```
+
+Finished commands stay in start order with `✓` for success or `✗` for failure and their fixed duration; a running one shows `name $ cmd` and its elapsed seconds, refreshed every second. A multi-line command is folded to its first line, and a long one is cut with ` ...` so each line stays around 80 characters. The band yields to the engine's own band while a survey is shown.
+
+The band is shared by all agents (main and subagents): their running commands are merged into one list, e.g. `  lint $ bun lint (3s)` and `  test $ bun test 待機中 (2s)` under `[gate] 実行中:`. `待機中` marks a command that is waiting for the same run in another agent (see below). The band disappears only when every agent has finished; while another agent is still running, its list stays.
+
+When everything has finished, the band goes away and the result of that round is left on the one-line status line instead, as counts only, e.g. `[gate] 完了: ✓ 5 / ✗ 1 (81.0s)` (`✗` is left out when nothing failed, `✓` when nothing passed; the seconds run from the first start to the last finish, not the sum, since checks run in parallel; check names are not shown, see the Stop hook output for which one failed. The status line cannot hold line breaks or long text, so it stays short). It stays until the next gate command starts running and the band appears again. Feedback checks still use the status line while they run: `[feedback-guard] 評価中: <rule>` or `[feedback-stop-check] 検査中: <rule> (<file>)`, cleared when the hook finishes.
+
+### Sharing runs between agents
+
+When several agents (the main session and subagents) run the same command at the same time, the gate starts it once. A command is the same when the root, the cwd, the `cmd` and the environment passed to it (such as `CLAUDE_GATE_FILES`) all match; the variable that identifies the agent (`CLAUDE_AGENT_ID`) is ignored. The agent that comes later does not start it again: it waits for the running one and receives the same result (exit status, output, timeout). The result is then handled as if that agent had run it itself: it is recorded in its own trace and log directory, it consumes a deferred entry with the same key, and it counts for its phase result. A finished run is never reused; only overlapping runs are merged. Coordination goes through files under `.claude/.gate-status/shared/` (a lock directory per command; a lock older than the command's `timeout` is treated as dead and taken over), because the hooks of different agents are not guaranteed to run in the same process.
+
+To opt a command out, set `share: false` on its `run` element (`{cmd, name, timeout, share}`):
+
+```yaml
+run:
+  - { cmd: "bun test", name: test, share: false }
+```
+
+### Success report
+
+When the `checks` phase (Stop / SubagentStop) actually ran at least one command and all of them passed, the gate blocks the stop once and returns a summary as the reason, e.g. `[gate] 検証がすべて通りました: lint ✓ / typecheck ✓ / test ✓。この結果をユーザーに報告して終了してください。`, so the agent can report the result and finish instead of waiting for you to say it passed. The stop right after such a report (`stop_hook_active`) runs no gate command and passes. Nothing is reported when no command ran, when `stop_hook_active` is true (a continuation after a failure block), or when it is turned off with a top-level `report_success: false` in `.claude/gate.yaml` (default: on). Failures block as before.
+
 ## Development
 
 Requires [Bun](https://bun.sh). The hook module runs inside Claude Code, which only resolves relative imports and `claude-code`; so the source in `src/` (plus the `yaml` package) is bundled into `hooks/register.js`. `hooks/hooks.json` points at that bundle. All file and process access goes through the engine's `$` API (`$.fs`, `$.process`, `$.env`, `$.session`), wrapped by the `Io` interface in `src/io.ts`; the tests run the same code against Node's `fs` / `child_process`.

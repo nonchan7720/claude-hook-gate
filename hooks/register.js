@@ -6635,6 +6635,7 @@ async function evalPreBash(io, rules, command, projectDir) {
         continue;
       const checkCmd = entry.check;
       if (truthy(checkCmd)) {
+        io.progress?.(`[feedback-guard] 評価中: ${rule.name}`);
         const r = await io.run([...SHELL, String(checkCmd)], { cwd: dir, env: { CLAUDE_PROJECT_DIR: dir }, timeoutMs: 1e4 });
         if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
           continue;
@@ -6819,6 +6820,7 @@ async function evalStopCheck(io, rules, projectDir, changedFiles) {
             bad = true;
         }
         if (truthy(checkCmd)) {
+          io.progress?.(`[feedback-stop-check] 検査中: ${rule.name} (${absPath})`);
           const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: projectDir, FILE: absPath }, timeoutMs: 15000 });
           if (r.exitCode !== 0 || r.timedOut || r.error !== undefined)
             bad = true;
@@ -7054,6 +7056,186 @@ async function notification(io, type, payload) {
   return ok();
 }
 
+// src/running-registry.ts
+var MAX_RUN_MS = 600000;
+var STALE_MS = MAX_RUN_MS + 60000;
+var gateStatusDir = (io) => join(io.projectDir || io.cwd, ".claude", ".gate-status");
+var runningDir = (io) => join(gateStatusDir(io), "running");
+var ownerFile = (io, owner) => join(runningDir(io), `${owner}.json`);
+var publishRunning = (io, owner, entries) => io.writeFile(ownerFile(io, owner), JSON.stringify(entries));
+var withdrawRunning = (io, owner) => io.removeFiles([ownerFile(io, owner)]);
+function mergeRunning(texts, now) {
+  const groups = [];
+  for (const text of texts) {
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      continue;
+    }
+    const entries = (Array.isArray(parsed) ? parsed : []).filter(isDict);
+    if (entries.length === 0 || Math.max(...entries.map((e) => e.started)) < now - STALE_MS)
+      continue;
+    groups.push(entries);
+  }
+  groups.sort((a, b) => a[0].started - b[0].started);
+  return groups.flat();
+}
+async function listRunning(io) {
+  const now = await io.now();
+  const texts = [];
+  for (const f of await io.list(runningDir(io))) {
+    if (f.kind !== "file" || !f.name.endsWith(".json"))
+      continue;
+    const text = await io.readFile(join(runningDir(io), f.name));
+    if (text !== undefined)
+      texts.push(text);
+  }
+  return mergeRunning(texts, now);
+}
+var BAND_LINE_MAX = 80;
+var INDENT = "  ";
+var ELLIPSIS = " ...";
+function foldCmd(cmd) {
+  const lines = cmd.split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "");
+  return `${lines[0] ?? ""}${lines.length > 1 ? ELLIPSIS : ""}`;
+}
+function cutCmd(text, room) {
+  if (text.length <= room)
+    return text;
+  const limit = Math.max(0, room - ELLIPSIS.length);
+  let head = text.slice(0, limit);
+  if (text[limit] !== " ") {
+    const space = head.lastIndexOf(" ");
+    if (space > 0)
+      head = head.slice(0, space);
+  }
+  return `${head.trimEnd()}${ELLIPSIS}`;
+}
+var markOf = (e) => e.result === "ok" ? "✓" : "✗";
+var doneText = (e, now) => `${e.name ?? foldCmd(e.cmd)} ${markOf(e)} (${(((e.ended ?? now) - e.started) / 1000).toFixed(1)}s)`;
+function runningLine(e, now) {
+  if (e.result)
+    return `${INDENT}${doneText(e, now)}`;
+  const seconds = Math.max(0, Math.floor((now - e.started) / 1000));
+  const head = e.name ? `${INDENT}${e.name} $ ` : INDENT;
+  const tail = `${e.waiting ? " 待機中" : ""} (${seconds}s)`;
+  return `${head}${cutCmd(foldCmd(e.cmd), BAND_LINE_MAX - head.length - tail.length)}${tail}`;
+}
+function runningLines(entries, now) {
+  return ["[gate] 実行中:", ...entries.map((e) => runningLine(e, now))];
+}
+function runningBand(entries, now) {
+  if (!entries.some((e) => !e.result))
+    return;
+  return {
+    type: "Box",
+    props: { flexDirection: "column" },
+    children: runningLines(entries, now).map((line) => ({ type: "Text", children: [line] }))
+  };
+}
+function finishedSummary(entries) {
+  if (entries.length === 0 || entries.some((e) => !e.result))
+    return;
+  const passed = entries.filter((e) => e.result === "ok").length;
+  const failed = entries.length - passed;
+  const counts = [passed > 0 ? `✓ ${passed}` : "", failed > 0 ? `✗ ${failed}` : ""].filter((s) => s !== "").join(" / ");
+  const first = Math.min(...entries.map((e) => e.started));
+  const last = Math.max(...entries.map((e) => e.ended ?? e.started));
+  return `[gate] 完了: ${counts} (${((last - first) / 1000).toFixed(1)}s)`;
+}
+var summaryFile = (io) => join(gateStatusDir(io), "summary.txt");
+var saveSummary = (io, text) => io.writeFile(summaryFile(io), text);
+var clearSummary = (io) => io.removeFiles([summaryFile(io)]);
+async function loadSummary(io) {
+  const text = await io.readFile(summaryFile(io));
+  return text === undefined || text === "" ? undefined : text;
+}
+
+// src/shared-run.ts
+var GRACE_MS = 5000;
+var MAX_WAIT_MS = 600000;
+var MAX_ROUNDS = 20;
+var POLL_SECONDS = "0.05";
+function hashKey(key) {
+  let h1 = 3735928559;
+  let h2 = 1103547991;
+  for (let i = 0;i < key.length; i++) {
+    const c = key.charCodeAt(i);
+    h1 = Math.imul(h1 ^ c, 2654435761);
+    h2 = Math.imul(h2 ^ c, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ h1 >>> 16, 2246822507) ^ Math.imul(h2 ^ h2 >>> 13, 3266489909);
+  h2 = Math.imul(h2 ^ h2 >>> 16, 2246822507) ^ Math.imul(h1 ^ h1 >>> 13, 3266489909);
+  return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, "0");
+}
+async function runShared(io, key, timeoutMs, execute, hooks = {}) {
+  const dir = join(gateStatusDir(io), "shared");
+  const base = join(dir, hashKey(key));
+  const lock = `${base}.run`;
+  const resultFile = `${base}.result.json`;
+  const claim = async () => (await io.run(["sh", "-c", 'mkdir -p "$1" && mkdir "$2"', "sh", dir, lock])).exitCode === 0;
+  const lead = async () => {
+    await io.writeFile(join(lock, "info.json"), JSON.stringify({ started: await io.now(), timeoutMs }));
+    await io.removeFiles([resultFile]);
+    try {
+      const outcome = await execute();
+      await io.writeFile(resultFile, JSON.stringify({ key, ...outcome }));
+      return outcome;
+    } finally {
+      await io.removeTree(lock);
+    }
+  };
+  const remainingMs = async () => {
+    const text = await io.readFile(join(lock, "info.json"));
+    let started;
+    let limit = 0;
+    try {
+      const info = text === undefined ? undefined : JSON.parse(text);
+      if (isDict(info)) {
+        started = Number(info.started);
+        limit = Number(info.timeoutMs) || 0;
+      }
+    } catch {}
+    started ??= (await io.stat(lock))?.mtimeMs ?? await io.now();
+    return started + limit + GRACE_MS - await io.now();
+  };
+  const readOutcome = async () => {
+    const text = await io.readFile(resultFile);
+    if (text === undefined)
+      return;
+    try {
+      const r = JSON.parse(text);
+      if (!isDict(r) || r.key !== key)
+        return;
+      return { out: String(r.out ?? ""), ok: r.ok === true, timedOut: r.timedOut === true, logpath: String(r.logpath ?? "") };
+    } catch {
+      return;
+    }
+  };
+  let announced = false;
+  for (let round = 0;round < MAX_ROUNDS; round++) {
+    if (await claim())
+      return { outcome: await lead(), shared: false };
+    const left = await remainingMs();
+    if (left <= 0) {
+      await io.removeTree(lock);
+      continue;
+    }
+    if (!announced) {
+      announced = true;
+      await hooks.onWait?.();
+    }
+    await io.run(["sh", "-c", `while [ -d "$1" ]; do sleep ${POLL_SECONDS}; done`, "sh", lock], { timeoutMs: Math.min(left, MAX_WAIT_MS) });
+    if (await io.exists(lock))
+      continue;
+    const outcome = await readOutcome();
+    if (outcome)
+      return { outcome, shared: true };
+  }
+  return { outcome: await execute(), shared: false };
+}
+
 // src/gate.ts
 var MAX_ATTEMPTS2 = 5;
 var DEFAULT_TIMEOUT = 300;
@@ -7150,6 +7332,13 @@ function parseCmd(item, defaultTimeout) {
   }
   return [item, defaultTimeout, null];
 }
+var parseShare = (item) => !(isDict(item) && item.share === false);
+var agentEnv = (agentId) => agentId ? { CLAUDE_AGENT_ID: agentId } : {};
+var AGENT_ENV_KEYS = Object.keys(agentEnv("-"));
+function shareKey(root, cwd, cmd, env) {
+  const shared = Object.entries(env).filter(([k]) => !AGENT_ENV_KEYS.includes(k)).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  return JSON.stringify([root, cwd, cmd, shared]);
+}
 var isParallel = (item) => isDict(item) && ("parallel" in item);
 function summarizeCmds(cmds) {
   const parts = [];
@@ -7212,6 +7401,7 @@ var UNSET = Symbol("unset");
 class PolicyState {
   executed = false;
   deferredThisRun = new Set;
+  allowedThisRun = new Set;
 }
 
 class Gate {
@@ -7230,6 +7420,7 @@ class Gate {
   count;
   sidecar;
   pending;
+  reported;
   trace;
   deferred;
   logRoot;
@@ -7241,6 +7432,12 @@ class Gate {
   failures = [];
   stdout = "";
   stderr = "";
+  reportConsumed = false;
+  running = [];
+  stopTicking;
+  runningOwner;
+  ranThisRun = new Set;
+  executedLabels = [];
   constructor(io, opts = {}) {
     this.io = io;
     this.projectDir = io.projectDir || io.cwd;
@@ -7252,11 +7449,13 @@ class Gate {
     this.claudeDir = join(this.projectDir, ".claude");
     this.action = join(this.claudeDir, "gate.yaml");
     this.gateYml = join(this.claudeDir, "gate.yml");
-    this.stateDir = join(this.claudeDir, ".gate-status");
+    this.stateDir = gateStatusDir(io);
+    this.runningOwner = `${this.stateId}.${Math.random().toString(36).slice(2, 10)}`;
     this.changed = join(this.stateDir, `changed_files.${this.stateId}.txt`);
     this.count = join(this.stateDir, `gate_attempts.${this.stateId}.txt`);
     this.sidecar = join(this.stateDir, `gate_passed.${this.stateId}.txt`);
     this.pending = join(this.stateDir, `gate_pending_checks.${this.stateId}.json`);
+    this.reported = join(this.stateDir, `gate_reported.${this.stateId}.txt`);
     this.trace = join(this.stateDir, `gate_trace.${this.stateId}.jsonl`);
     this.deferred = join(this.stateDir, `gate_deferred.${this.stateId}.json`);
     this.logRoot = join(this.stateDir, "logs");
@@ -7268,7 +7467,7 @@ class Gate {
       CLAUDE_SESSION_ID: this.sessionId,
       CLAUDE_STOP_HOOK_ACTIVE: this.stopHookActive ? "true" : "false",
       CLAUDE_GATE_PHASE: this.phase,
-      ...this.agentId ? { CLAUDE_AGENT_ID: this.agentId } : {}
+      ...agentEnv(this.agentId)
     };
   }
   print(obj) {
@@ -7279,7 +7478,7 @@ class Gate {
     this.stderr += text;
   }
   async cleanup(only) {
-    await this.io.removeFiles(only ?? [this.changed, this.count, this.sidecar, this.pending]);
+    await this.io.removeFiles(only ?? [this.changed, this.count, this.sidecar, this.pending, this.reported]);
   }
   async rm(path) {
     await this.io.removeFiles([path]);
@@ -7293,7 +7492,18 @@ class Gate {
     if (rmdir)
       await this.io.removeDir(dirpath);
   }
+  async pruneShared() {
+    const now = await this.io.now();
+    const stale = async (dir, suffix, maxAge) => {
+      const old = (await this.io.list(join(this.stateDir, dir))).filter((e) => e.kind === "file" && e.name.endsWith(suffix) && e.mtimeMs < now - maxAge * 1000).map((e) => join(this.stateDir, dir, e.name));
+      if (old.length > 0)
+        await this.io.removeFiles(old);
+    };
+    await stale("shared", ".result.json", LOG_STALE_GRACE);
+    await stale("running", ".json", LOG_MAX_AGE);
+  }
   async pruneLogs() {
+    await this.pruneShared();
     for (const e of await this.io.list(this.logRoot)) {
       const path = join(this.logRoot, e.name);
       if (e.kind === "dir") {
@@ -7538,11 +7748,90 @@ class Gate {
     });
     return { out, ok: r.exitCode === 0 && !timedOut && r.error === undefined, timedOut, logpath };
   }
-  async execOne(label, cmd, cwd, timeout, mark = "", name, extraEnv) {
+  async runCmdShared(cmd, cwd, timeout, name, extraEnv, scope, onWait) {
+    if (scope.share === false)
+      return this.runCmd(cmd, cwd, timeout, name, extraEnv);
+    const key = shareKey(scope.root, cwd, cmd, { ...this.baseEnv, ...extraEnv });
+    const r = await runShared(this.io, key, Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS), () => this.runCmd(cmd, cwd, timeout, name, extraEnv), {
+      onWait
+    });
+    if (!r.shared)
+      return r.outcome;
+    const uid = `${Math.floor(await this.io.now() / 1000)}-${logSeq++}`;
+    const logpath = join(this.logDir, `${slug(name || cmd)}.${uid}.log`);
+    const header = `$ ${cmd}  (cwd: ${cwd})
+[gate] 同じ実行が他のエージェントで走っていたため、その結果を受け取りました（実行側のログ: ${r.outcome.logpath}）
+`;
+    await this.io.writeFile(logpath, header + r.outcome.out).catch(() => {
+      return;
+    });
+    return { ...r.outcome, logpath };
+  }
+  async showRunning(name, cmd, started) {
+    if (!this.io.redraw)
+      return { waiting: async () => {
+        return;
+      }, done: async () => {
+        return;
+      } };
+    const entry = { name: name || undefined, cmd, started };
+    this.running.push(entry);
+    if (!this.stopTicking)
+      this.stopTicking = this.io.every?.(1000, () => this.io.redraw?.());
+    this.io.result?.(undefined);
+    await clearSummary(this.io);
+    await this.publishAndRedraw();
+    return {
+      waiting: async () => {
+        entry.waiting = true;
+        await this.publishAndRedraw();
+      },
+      done: async (ok) => {
+        entry.result = ok ? "ok" : "fail";
+        entry.ended = await this.io.now();
+        entry.waiting = false;
+        if (this.running.every((r) => r.result))
+          this.stopTicker();
+        await this.publishAndRedraw();
+        const summary = finishedSummary(await listRunning(this.io));
+        if (summary !== undefined) {
+          this.io.result?.(summary);
+          await saveSummary(this.io, summary);
+        }
+      }
+    };
+  }
+  stopTicker() {
+    this.stopTicking?.();
+    this.stopTicking = undefined;
+  }
+  async finishProgress() {
+    this.stopTicker();
+    this.running.length = 0;
+    await withdrawRunning(this.io, this.runningOwner);
+    this.io.redraw?.();
+  }
+  async publishAndRedraw() {
+    await publishRunning(this.io, this.runningOwner, this.running);
+    this.io.redraw?.();
+  }
+  async execOne(label, cmd, cwd, timeout, mark = "", name, extraEnv, scope = { root: this.projectDir }) {
     const title = name ? `${name}: ${cmd}` : cmd;
     const chunk = { lines: [`=== [gate] (${label})${mark} $ ${title} ===`] };
     const started = await this.io.now();
-    const { out, ok, timedOut, logpath } = await this.runCmd(cmd, cwd, timeout, name, extraEnv);
+    const progress = await this.showRunning(name, cmd, started);
+    let ran;
+    let passed = false;
+    try {
+      ran = await this.runCmdShared(cmd, cwd, timeout, name, extraEnv, scope, progress.waiting);
+      passed = ran.ok;
+    } finally {
+      await progress.done(passed);
+    }
+    this.ranThisRun.add(Gate.deferKey({ root: scope.root, cwd, cmd }));
+    await this.undeferCmd(scope.root, cwd, cmd);
+    const { out, ok, timedOut, logpath } = ran;
+    this.executedLabels.push(name || oneLine(cmd));
     this.note(ok ? "ok" : "fail", label, cmd, `(${((await this.io.now() - started) / 1000).toFixed(1)}s)`);
     const detail = [chunk.lines[0]];
     if (out) {
@@ -7573,7 +7862,7 @@ class Gate {
 --- 失敗したコマンドの出力 ---
 ${details}` : "");
   }
-  async runParallel(label, items, cwd, defaultTimeout, logs, policy, extraEnv) {
+  async runParallel(label, items, cwd, defaultTimeout, logs, policy, extraEnv, root = policy?.rootDir ?? this.projectDir) {
     let failed = false;
     const tasks = [];
     for (const item of items) {
@@ -7587,11 +7876,11 @@ ${details}` : "");
         continue;
       if (policy && !await policy.allows(label, cwd, cmd, timeout, name, logs, extraEnv))
         continue;
-      tasks.push([cmd, timeout, name]);
+      tasks.push([cmd, timeout, name, parseShare(item)]);
     }
     if (tasks.length === 0)
       return failed;
-    const results = await Promise.all(tasks.map((t) => this.execOne(label, t[0], cwd, t[1], " [parallel]", t[2], extraEnv)));
+    const results = await Promise.all(tasks.map((t) => this.execOne(label, t[0], cwd, t[1], " [parallel]", t[2], extraEnv, { root, share: t[3] })));
     for (const [i, [chunk, ok]] of results.entries()) {
       const [cmd, , name] = tasks[i];
       logs.push(...chunk.lines);
@@ -7603,11 +7892,11 @@ ${details}` : "");
     }
     return failed;
   }
-  async runCmds(label, cmds, cwd, defaultTimeout, logs, policy, extraEnv) {
+  async runCmds(label, cmds, cwd, defaultTimeout, logs, policy, extraEnv, root = policy?.rootDir ?? this.projectDir) {
     let failed = false;
     for (const item of cmds) {
       if (isParallel(item)) {
-        if (await this.runParallel(label, item.parallel || [], cwd, defaultTimeout, logs, policy, extraEnv))
+        if (await this.runParallel(label, item.parallel || [], cwd, defaultTimeout, logs, policy, extraEnv, root))
           failed = true;
         continue;
       }
@@ -7616,7 +7905,7 @@ ${details}` : "");
         continue;
       if (policy && !await policy.allows(label, cwd, cmd, timeout, name, logs, extraEnv))
         continue;
-      const [chunk, ok] = await this.execOne(label, cmd, cwd, timeout, "", name, extraEnv);
+      const [chunk, ok] = await this.execOne(label, cmd, cwd, timeout, "", name, extraEnv, { root, share: parseShare(item) });
       logs.push(...chunk.lines);
       this.collectFailure(chunk);
       if (policy)
@@ -7641,7 +7930,7 @@ ${details}` : "");
       }
       const name = entry.name || slug(cmd);
       summary.push(`(${label}) ${cmd}`);
-      const [chunk, ok] = await this.execOne(label, cmd, cwd, entry.timeout || DEFAULT_TIMEOUT, "", name, entry.env);
+      const [chunk, ok] = await this.execOne(label, cmd, cwd, entry.timeout || DEFAULT_TIMEOUT, "", name, entry.env, { root: entry.root || this.projectDir });
       logs.push(...chunk.lines);
       this.collectFailure(chunk);
       await this.appendTrace(entry.root || this.projectDir, cwd, name, cmd, ok ? "response" : "error");
@@ -7771,7 +8060,7 @@ ${details}` : "");
             continue;
           }
           summary.push(`(${label}) ${summarizeCmds(cmds)}`);
-          if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(dirFiles))) {
+          if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(dirFiles), rootDir)) {
             failed = true;
             for (const f of dirFiles)
               failFiles.add(f);
@@ -7790,7 +8079,7 @@ ${details}` : "");
           continue;
         }
         summary.push(`(${label}) ${summarizeCmds(cmds)}`);
-        if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(ruleFiles))) {
+        if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(ruleFiles), rootDir)) {
           failed = true;
           for (const f of ruleFiles)
             failFiles.add(f);
@@ -7973,7 +8262,7 @@ ${body}` });
       const policy = await this.makePolicyContext(cfg, check, rootDir, policyState, logs);
       const refs = filesByName[name] || [];
       const env = filesEnv(refs.map((raw) => this.splitRoot(raw)[1]));
-      if (await this.runCmds(`check:${name}`, cmds, cwd, timeout, logs, policy, env))
+      if (await this.runCmds(`check:${name}`, cmds, cwd, timeout, logs, policy, env, rootDir))
         failed = true;
     }
     return [summary, failed];
@@ -8025,6 +8314,13 @@ ${body}` });
     await this.writeChangedFlat(this.sidecar, order.filter((k) => !droppedRoots.has(unmk(k)[0])), rawByKey);
   }
   async runChecksPhase() {
+    if (await this.io.exists(this.reported)) {
+      await this.rm(this.reported);
+      if (this.stopHookActive) {
+        this.reportConsumed = true;
+        return 0;
+      }
+    }
     const pending = await this.io.exists(this.pending) ? await this.loadPending() : {};
     if (Object.keys(pending).length === 0)
       await this.rm(this.pending);
@@ -8054,7 +8350,8 @@ ${body}` });
         failed = true;
     }
     await this.purgeRootsFromSidecar(droppedRoots);
-    const [dSummary, dFailed] = await this.runDeferred(deferred, logs);
+    const remaining = deferred.filter((e) => !this.ranThisRun.has(Gate.deferKey(e)));
+    const [dSummary, dFailed] = await this.runDeferred(remaining, logs);
     summary.push(...dSummary);
     if (dFailed.length > 0) {
       await this.requeueDeferred(dFailed);
@@ -8065,6 +8362,15 @@ ${body}` });
       await this.cleanup([this.count, this.pending]);
       const body = this.statusBlock(summary.length > 0 ? summary.map((s) => `✓ ${s}`).join(`
 `) : "（対象なし）");
+      if (this.executedLabels.length > 0 && !this.stopHookActive && mainCfg?.report_success !== false) {
+        await this.io.writeFile(this.reported, `1
+`);
+        const reason = `[gate] 検証がすべて通りました: ${this.executedLabels.map((l) => `${l} ✓`).join(" / ")}。この結果をユーザーに報告して終了してください。`;
+        this.writeErr(`${reason}
+`);
+        this.print({ decision: "block", reason });
+        return 2;
+      }
       const title = Object.keys(pending).length > 0 ? "consistency checks" : "後回しにした検証コマンド";
       this.print({ systemMessage: `[gate] ${title} 成功:
 ${body}` });
@@ -8142,6 +8448,7 @@ class PolicyContext {
       if (verdict === "allow") {
         await this.gate.undeferCmd(this.rootDir, cwd, cmd);
         this.state.executed = true;
+        this.state.allowedThisRun.add(`${this.rootDir}\x00${cwd}\x00${cmd}`);
         return true;
       }
       logs.push(`=== [gate] (${label}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ ${cmd} ===`);
@@ -8167,8 +8474,10 @@ ${e instanceof Error ? e.stack ?? e.message : String(e)}
     gate.stdout += `${JSON.stringify({ systemMessage: "[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。" })}
 `;
     exitCode = 0;
+  } finally {
+    await gate.finishProgress();
   }
-  return { exitCode, stdout: gate.stdout, stderr: gate.stderr };
+  return { exitCode, stdout: gate.stdout, stderr: gate.stderr, ...gate.reportConsumed ? { reportConsumed: true } : {} };
 }
 
 // src/stop-test-gate.ts
@@ -8195,14 +8504,17 @@ async function stopTestGate(io, phase, payload) {
 async function allStop(io, payload) {
   let stdout = "";
   let stderr = "";
+  let reportConsumed = false;
   for (const step of [() => stopTestGate(io, "checks", payload), () => feedbackStopCheck(io, payload)]) {
     const r = await step();
     stdout += r.stdout;
     stderr += r.stderr;
     if (r.exitCode !== 0)
       return { exitCode: r.exitCode, stdout, stderr };
+    if (r.reportConsumed)
+      reportConsumed = true;
   }
-  if (payload.stop_hook_active !== true) {
+  if (payload.stop_hook_active !== true || reportConsumed) {
     const r = await notification(io, "stop", payload);
     stdout += r.stdout;
     stderr += r.stderr;
@@ -8286,7 +8598,14 @@ async function createIo($) {
         await run(["rm", "-rf", "--", path]);
     },
     run,
-    now: () => $.clock.now()
+    now: () => $.clock.now(),
+    progress: (text) => $.ui.status(text),
+    result: (text) => $.ui.status(text),
+    redraw: () => $.ui.invalidate("ui.render"),
+    every: (ms, fn) => {
+      const timer = $.clock.every(ms, fn);
+      return () => timer.cancel();
+    }
   };
 }
 
@@ -8504,6 +8823,7 @@ var STATE_FILES = [
   ["gate_attempts", ".txt"],
   ["gate_passed", ".txt"],
   ["gate_push_verified", ".txt"],
+  ["gate_reported", ".txt"],
   ["gate_pending_checks", ".json"],
   ["gate_trace", ".jsonl"],
   ["gate_deferred", ".json"],
@@ -8519,6 +8839,7 @@ async function resetGate(io, payload) {
   const source = jqStr(payload.source);
   const now = await io.now();
   if (source === "startup" || source === "clear") {
+    await clearSummary(io);
     for (const dir of [stateDir, claudeDir]) {
       const names = (await io.list(dir)).map((e) => e.name);
       const doomed = [];
@@ -8578,16 +8899,48 @@ async function loadRules(io, rulesFile) {
 }
 
 // src/register.ts
+var PROGRESS_DELAY_MS = 3000;
 var str = (v) => typeof v === "string" ? v : "";
 async function runSteps($, event, steps) {
   let acc = {};
-  const io = await createIo($);
-  for (const step of steps) {
-    const ran = await step(io).catch(() => {
+  const base = await createIo($);
+  let shown = false;
+  let pending;
+  let cancelDelay;
+  const show = () => {
+    if (shown || pending === undefined)
       return;
-    });
-    if (ran)
-      acc = merge2(acc, toOutcome(event, ran));
+    shown = true;
+    cancelDelay?.();
+    base.progress?.(pending);
+  };
+  const io = {
+    ...base,
+    progress: (text) => {
+      if (shown)
+        return base.progress?.(text);
+      pending = text;
+      if (text === undefined || cancelDelay)
+        return;
+      if (!base.every)
+        return show();
+      cancelDelay = base.every(PROGRESS_DELAY_MS, show);
+      if (shown)
+        cancelDelay();
+    }
+  };
+  try {
+    for (const step of steps) {
+      const ran = await step(io).catch(() => {
+        return;
+      });
+      if (ran)
+        acc = merge2(acc, toOutcome(event, ran));
+    }
+  } finally {
+    cancelDelay?.();
+    if (shown)
+      base.progress?.(await loadSummary(base));
   }
   return acc;
 }
@@ -8645,5 +8998,11 @@ export const register = (on, options) => {
   on("classic.SubagentStop", async ($, e, next) => {
     const mine = await runSteps($, "SubagentStop", [(io) => stopTestGate(io, "checks", e), (io) => feedbackStopCheck(io, e)]);
     return withNext(next, e, mine);
+  });
+  on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
+    if (e.props.hasSurvey)
+      return next(e);
+    const io = await createIo($);
+    return runningBand(await listRunning(io), await io.now()) ?? next(e);
   });
 };

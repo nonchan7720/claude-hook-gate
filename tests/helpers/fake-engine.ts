@@ -8,11 +8,23 @@ export type FakeEngineOptions = {
   env?: Record<string, string>
   options?: PluginOptions
   sessionId?: string
+  /** $.ui.status に渡されたテキストを順に記録する。 */
+  statusLog?: Array<string | undefined>
+  /** $.ui.invalidate に渡されたイベントを順に記録する。 */
+  invalidateLog?: string[]
+  /** $.clock.every に渡された間隔(ms)を順に記録する。 */
+  timerLog?: number[]
+  /** 真を返している間、$.clock.every は登録の時点で指定時間が経過済みとして fn を呼ぶ。 */
+  elapsed?: () => boolean
+  /** $.process.run に渡された argv を順に記録する。 */
+  runLog?: string[][]
+  /** argv[0] がこの一覧にあるコマンドは実行せず、記録だけして失敗扱いで返す。 */
+  stubCommands?: string[]
 }
 
 export type FakeEngine = {
   $: Engine
-  call: (event: string, e: HookEvent, next?: (e: HookEvent) => Promise<HookResult>) => Promise<HookResult>
+  call: (event: string, e: unknown, next?: (e: never) => Promise<unknown>) => Promise<HookResult>
   register: (register: Register) => void
 }
 
@@ -23,7 +35,19 @@ export function makeEngine(opts: FakeEngineOptions): FakeEngine {
     plugin: { root: REPO_ROOT },
     session: { id: async () => opts.sessionId ?? 'sess-1', root: async () => opts.projectDir, cwd: async () => opts.projectDir },
     env: { get: async (name) => env[name] },
-    clock: { now: async () => Date.now() },
+    clock: {
+      now: async () => Date.now(),
+      every: (ms, fn) => {
+        opts.timerLog?.push(ms)
+        // 時間を注入する: 真を返している間は、登録した時点で既にその時間が経ったものとして fn を呼ぶ。
+        if (opts.elapsed?.()) fn()
+        return { cancel: () => undefined }
+      },
+    },
+    ui: {
+      status: (text) => void opts.statusLog?.push(text),
+      invalidate: (event) => void opts.invalidateLog?.push(event),
+    },
     fs: {
       read: async (p) => fs.readFileSync(p, 'utf8'),
       write: async (p, text) => {
@@ -49,6 +73,8 @@ export function makeEngine(opts: FakeEngineOptions): FakeEngine {
     },
     process: {
       run: async (argv, init) => {
+        opts.runLog?.push([...argv])
+        if (opts.stubCommands?.includes(argv[0] ?? '')) return { exitCode: 1, stdout: '', stderr: '' }
         const r = await io.run(argv, init)
         if (r.error !== undefined) throw new Error(r.error)
         return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr }
@@ -61,10 +87,11 @@ export function makeEngine(opts: FakeEngineOptions): FakeEngine {
     call: async (event, e, next = async () => ({})) => {
       const hook = hooks.get(event)
       if (!hook) throw new Error(`no hook for ${event}`)
-      return hook($, e, next)
+      return hook($, e as HookEvent, next as never)
     },
     register: (register) => {
-      register((event, hook) => hooks.set(event, hook), opts.options ?? {})
+      // `on('ui.render', { component }, hook)` のように matcher を挟む形でも、最後の引数が hook。
+      register((event: string, ...args: unknown[]) => hooks.set(event, args.at(-1) as Hook), opts.options ?? {})
     },
   }
 }

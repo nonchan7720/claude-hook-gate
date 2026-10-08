@@ -5,6 +5,7 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { DirEntry, EnvVars, Io, RunOptions, RunResult, Stat } from '../../src/io.ts'
+import { mergeRunning, runningBand, runningLines } from '../../src/running-registry.ts'
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -20,6 +21,22 @@ export type NodeIoOptions = {
   env?: EnvVars
   /** 現在時刻（ミリ秒）を差し替える。 */
   now?: () => number
+  /** progress() に渡されたテキストを順に記録する。 */
+  progressLog?: Array<string | undefined>
+  /** result() に渡されたテキストを順に記録する。 */
+  resultLog?: Array<string | undefined>
+  /** redraw() のたびに、その時点で帯に描かれる内容（行を改行でつないだもの。帯が出ないなら undefined）を記録する。 */
+  bandLog?: Array<string | undefined>
+  /** every() を差し替える（時間を注入するため）。省略時は setInterval。 */
+  every?: (ms: number, fn: () => void) => () => void
+}
+
+/** 共有の実行中一覧のファイルを同期で読み、帯に描かれる内容を返す（redraw の時点の記録用）。 */
+function snapshotBand(projectDir: string, now: number): string | undefined {
+  const dir = path.join(projectDir, '.claude', '.gate-status', 'running')
+  const texts = fs.existsSync(dir) ? fs.readdirSync(dir).map((f) => fs.readFileSync(path.join(dir, f), 'utf8')) : []
+  const entries = mergeRunning(texts, now)
+  return runningBand(entries, now) ? runningLines(entries, now).join('\n') : undefined
 }
 
 const kindOf = (s: fs.Stats): 'file' | 'dir' | 'other' => (s.isFile() ? 'file' : s.isDirectory() ? 'dir' : 'other')
@@ -86,6 +103,21 @@ export function makeIo(opts: NodeIoOptions): Io {
     },
     run: (argv, options) => runProcess(argv, options),
     now: async () => (opts.now ? opts.now() : Date.now()),
+    progress: (text) => {
+      opts.progressLog?.push(text)
+    },
+    result: (text) => {
+      opts.resultLog?.push(text)
+    },
+    redraw: () => {
+      opts.bandLog?.push(snapshotBand(opts.projectDir, opts.now ? opts.now() : Date.now()))
+    },
+    every:
+      opts.every ??
+      ((ms, fn) => {
+        const t = setInterval(fn, ms)
+        return () => clearInterval(t)
+      }),
   }
 }
 
@@ -95,9 +127,11 @@ function runProcess(argv: readonly string[], options: RunOptions = {}): Promise<
     if (!cmd) return resolve({ exitCode: 1, stdout: '', stderr: '', timedOut: false, error: 'empty argv' })
     let child: ReturnType<typeof spawn>
     try {
+      // サブエージェント経由で起動された場合に親の CLAUDE_AGENT_ID が漏れ込むと、agent_id 無しのテストが環境依存になる。
+      const { CLAUDE_AGENT_ID: _inherited, ...inheritedEnv } = process.env
       child = spawn(cmd, args, {
         cwd: options.cwd,
-        env: { ...process.env, ...options.env },
+        env: { ...inheritedEnv, ...options.env },
         detached: true,
         stdio: ['pipe', 'pipe', 'pipe'],
       })

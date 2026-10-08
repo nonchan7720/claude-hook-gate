@@ -12,6 +12,7 @@ import type { Dict } from './pyutil.ts'
 import { recordChanges } from './record-changes.ts'
 import { resetGate } from './reset-gate.ts'
 import { loadRules } from './rules-file.ts'
+import { listRunning, loadSummary, runningBand } from './running-registry.ts'
 import { stopTestGate } from './stop-test-gate.ts'
 
 // settings.json の command hook をプラグイン同梱の TypeScript 関数（src/）として載せ替えた mod。
@@ -20,15 +21,48 @@ import { stopTestGate } from './stop-test-gate.ts'
 
 type Step = (io: Io) => Promise<ScriptResult>
 
+/** 評価中表示（progress）を出し始めるまでの待ち時間。これより早く終わる評価では何も出さない。 */
+const PROGRESS_DELAY_MS = 3000
+
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
 async function runSteps($: Engine, event: string, steps: Step[]): Promise<Outcome> {
   let acc: Outcome = {}
-  const io = await createIo($)
-  for (const step of steps) {
-    // スクリプトの内部エラーで作業を止めない。
-    const ran = await step(io).catch(() => undefined)
-    if (ran) acc = merge(acc, toOutcome(event, ran))
+  const base = await createIo($)
+  // 処理中の 1 行（progress）を出した hook だけ、終わりに片付ける（毎回のちらつきを避ける）。gate の結果（result）は
+  // 次のコマンドが走り始めるまで残すので、消さずに完了サマリへ戻す。
+  // ただし最初の progress から PROGRESS_DELAY_MS 経っても終わっていないときだけ出す（すぐ終わる評価でステータス行を触らない）。
+  let shown = false
+  let pending: string | undefined
+  let cancelDelay: (() => void) | undefined
+  const show = () => {
+    if (shown || pending === undefined) return
+    shown = true
+    cancelDelay?.()
+    base.progress?.(pending)
+  }
+  const io: Io = {
+    ...base,
+    progress: (text) => {
+      if (shown) return base.progress?.(text)
+      pending = text
+      if (text === undefined || cancelDelay) return
+      if (!base.every) return show()
+      cancelDelay = base.every(PROGRESS_DELAY_MS, show)
+      // every が登録中に fn を呼ぶ実装でも、cancelDelay の代入後に止める。
+      if (shown) cancelDelay()
+    },
+  }
+  try {
+    for (const step of steps) {
+      // スクリプトの内部エラーで作業を止めない。
+      const ran = await step(io).catch(() => undefined)
+      if (ran) acc = merge(acc, toOutcome(event, ran))
+    }
+  } finally {
+    cancelDelay?.()
+    // 出していたなら、残っている gate の完了サマリがあればそれに戻し、無ければ消す。
+    if (shown) base.progress?.(await loadSummary(base))
   }
   return acc
 }
@@ -92,5 +126,13 @@ export const register: Register = (on, options) => {
   on('classic.SubagentStop', async ($, e, next) => {
     const mine = await runSteps($, 'SubagentStop', [(io) => stopTestGate(io, 'checks', e), (io) => feedbackStopCheck(io, e)])
     return withNext(next, e, mine)
+  })
+
+  // gate が実行中のコマンドを、プロンプトの上の帯に複数行で出す。全エージェントの実行が終わるか、
+  // アンケートが帯を使っている間は、エンジンの帯に譲る。描き直しは gate が $.ui.invalidate で促す。
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+    const io = await createIo($)
+    return runningBand(await listRunning(io), await io.now()) ?? next(e)
   })
 }
