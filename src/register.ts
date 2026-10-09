@@ -1,6 +1,7 @@
 import type { Engine, HookEvent, HookResult, Register } from 'claude-code'
 import { agentLaunchGuard } from './agent-launch-guard.ts'
 import { allStop } from './all-stop.ts'
+import { bashChanges, bashStarted } from './bash-changes.ts'
 import { createIo } from './engine-io.ts'
 import { feedbackGuard } from './feedback-guard.ts'
 import { feedbackInject } from './feedback-inject.ts'
@@ -93,7 +94,7 @@ export const register: Register = (on, options) => {
     const tool = str(e.tool)
     const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool)
     if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool)) return next(e)
-    const { tool: _tool, tool_use_id, agentId: _agentId, ...toolInput } = e
+    const { tool: _tool, tool_use_id, agentId, ...toolInput } = e
     const payload: Dict = {
       session_id: await $.session.id(),
       cwd: await $.session.cwd(),
@@ -102,14 +103,23 @@ export const register: Register = (on, options) => {
       tool_input: toolInput,
       tool_use_id,
     }
+    // bash_started の状態 ID を PostToolUse（agent_id）と揃える。
+    if (typeof agentId === 'string' && agentId !== '') payload.agent_id = agentId
     // settings では `|| true` 付きなので、deny 以外（exit 2 以外）は無視していた。
     const step: Step = guardsAgents ? async () => agentLaunchGuard(payload) : (io) => feedbackGuard(io, payload)
-    const mine = await runSteps($, 'PreToolUse', [step])
+    // Bash は、開始時刻を控えてから guard を評価する（終了後の変更ファイル追跡用）。
+    const steps: Step[] = tool === 'Bash' ? [(io) => bashStarted(io, payload), step] : [step]
+    const mine = await runSteps($, 'PreToolUse', steps)
     if (decided(mine)) return mine as HookResult
     return withNext(next, e, mine)
   })
 
   on('classic.PostToolUse', async ($, e, next) => {
+    if (str(e.tool_name) === 'Bash') {
+      // Bash が実際に書き換えたファイルだけを記録し、あれば rules フェーズを走らせる。
+      const mine = await runSteps($, 'PostToolUse', [(io) => bashChanges(io, e)])
+      return withNext(next, e, mine)
+    }
     if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name))) return next(e)
     // gate の実行より先に、軽い feedback の post_edit 検査を済ませる。
     const mine = await runSteps($, 'PostToolUse', [(io) => recordChanges(io, e), (io) => feedbackPostEdit(io, e), (io) => stopTestGate(io, 'rules', e)])
