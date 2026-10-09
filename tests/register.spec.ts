@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { register } from '../src/register.ts'
@@ -186,6 +187,34 @@ describe('PostToolUse', () => {
       expect(String(r.block)).toContain('lint-failed')
       // 失敗したファイルは CHANGED に残る
       expect(fs.readFileSync(path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1.txt'), 'utf8')).toBe('x.py\n')
+    }))
+
+  test('Bash: files written between PreToolUse and PostToolUse are recorded and the rules run', () =>
+    withMod(async (m, proj) => {
+      for (const args of [
+        ['init', '-q'],
+        ['config', 'user.email', 't@example.com'],
+        ['config', 'user.name', 't'],
+      ])
+        execFileSync('git', args, { cwd: proj })
+      writeGateYaml(proj, { rules: [{ match: '**/*.py', run: ['echo lint-failed; exit 1'] }] })
+      // gate.yaml 自体が未追跡の変更として拾われないよう、先にコミットしておく
+      for (const args of [
+        ['add', '.'],
+        ['commit', '-q', '-m', 'init'],
+      ])
+        execFileSync('git', args, { cwd: proj })
+      await m.call('classic.PreToolUse', { tool: 'Bash', command: 'gen', tool_use_id: 'tu1' })
+      fs.writeFileSync(path.join(proj, 'x.py'), 'x = 1\n')
+      const r = (await m.call('classic.PostToolUse', {
+        session_id: 'sess-1',
+        tool_name: 'Bash',
+        tool_input: { command: 'gen' },
+        tool_response: {},
+        tool_use_id: 'tu1',
+      })) as Out
+      expect(String(r.block)).toContain('lint-failed')
+      expect(fs.readFileSync(path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1.txt'), 'utf8')).toBe(`${path.join(proj, 'x.py')}\n`)
     }))
 
   test('a post_edit feedback rule blocks on the edited file content', () =>

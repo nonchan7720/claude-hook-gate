@@ -20,6 +20,7 @@ const STATE_FILES: ReadonlyArray<readonly [string, string]> = [
   ['gate_pending_checks', '.json'],
   ['gate_trace', '.jsonl'],
   ['gate_deferred', '.json'],
+  ['bash_started', '.json'],
   ['feedback_gate_attempts', '.txt'],
   ['summary', '.txt'],
 ]
