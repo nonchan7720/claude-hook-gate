@@ -437,6 +437,10 @@ describe('resolveSeverity', () => {
     expect(resolveSeverity(4, undefined, 'pre_edit')).toBe('ask')
     expect(resolveSeverity(4, undefined, 'stop_check')).toBe('block')
   })
+  test('count 4 and 3 are block for post_edit', () => {
+    expect(resolveSeverity(4, undefined, 'post_edit')).toBe('block')
+    expect(resolveSeverity(3, undefined, 'post_edit')).toBe('block')
+  })
   test('count 3 matches same boundaries as 4', () => {
     expect(resolveSeverity(3, undefined, 'pre_bash')).toBe('ask')
     expect(resolveSeverity(3, undefined, 'stop_check')).toBe('block')
@@ -444,6 +448,10 @@ describe('resolveSeverity', () => {
   test('count 2 and 1 are warn', () => {
     expect(resolveSeverity(2, undefined, 'pre_bash')).toBe('warn')
     expect(resolveSeverity(1, undefined, 'stop_check')).toBe('warn')
+    expect(resolveSeverity(2, undefined, 'post_edit')).toBe('warn')
+  })
+  test('count 5 is deny for post_edit', () => {
+    expect(resolveSeverity(5, undefined, 'post_edit')).toBe('deny')
   })
   test('explicit severity overrides count', () => {
     expect(resolveSeverity(6, 'warn')).toBe('warn')

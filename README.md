@@ -17,7 +17,7 @@ The hooks are registered in `src/register.ts` (bundled into `hooks/register.js` 
 | SessionStart | `src/reset-gate.ts` | Clears this session's gate state on `startup` / `clear`; keeps it on resume / compact. |
 | UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | Adds the rules file (your `rulesFile` if it exists, otherwise the bundled `rules/feedback_rules.md`) and the confirmed feedback rules (`count >= 3`) to the context. |
 | PreToolUse (Bash / Edit / Write / MultiEdit) | `src/feedback-guard.ts` | Evaluates `pre_bash` / `pre_edit` enforce entries; denies, asks or warns by `count`. |
-| PostToolUse (Write / Edit / MultiEdit) | `src/record-changes.ts`, then `src/stop-test-gate.ts` (`rules`) | Records changed files, then runs the matching rules of `.claude/gate.yaml` (via `src/gate.ts`). |
+| PostToolUse (Write / Edit / MultiEdit) | `src/record-changes.ts`, `src/feedback-post-edit.ts`, then `src/stop-test-gate.ts` (`rules`) | Records changed files, evaluates `post_edit` enforce entries against the edited file as a whole (blocks or warns by `count`), then runs the matching rules of `.claude/gate.yaml` (via `src/gate.ts`). |
 | PreToolUse (Agent / SendMessage), opt-in | `src/agent-launch-guard.ts` | Only when `agentLaunchGuard` is `true`: asks before sending instructions to a subagent, showing the full text. |
 | Notification | `src/notification.ts` (`notify`) | Desktop notification when Claude waits for you (needs `terminal-notifier`, macOS). |
 | Stop | `src/all-stop.ts` | Runs, in order: the gate `checks` phase, `src/feedback-stop-check.ts`, then the `stop` notification. |
@@ -40,7 +40,8 @@ flowchart LR
   T[PreToolUse: Bash / Edit / Write / MultiEdit] --> G[feedback-guard]
   T2["PreToolUse: Agent / SendMessage<br/>(agentLaunchGuard = true)"] --> AL[agent-launch-guard]
   E[PostToolUse] --> R[record-changes]
-  R --> S[stop-test-gate: rules]
+  R --> PE[feedback-post-edit]
+  PE --> S[stop-test-gate: rules]
   S --> SG[gate]
   X[Stop] --> A[all-stop]
   A --> C[stop-test-gate: checks]

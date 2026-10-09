@@ -188,6 +188,20 @@ describe('PostToolUse', () => {
       expect(fs.readFileSync(path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1.txt'), 'utf8')).toBe('x.py\n')
     }))
 
+  test('a post_edit feedback rule blocks on the edited file content', () =>
+    withMod(async (m, proj, feedback) => {
+      writeRule(feedback, 'no_todo', 4, "enforce:\n  - event: post_edit\n    path: '**/*.py'\n    when: 'TODO'\n    message: 'TODO を残さない'\n")
+      fs.writeFileSync(path.join(proj, 'x.py'), 'x = 1  # TODO\n')
+      const r = (await m.call('classic.PostToolUse', {
+        session_id: 'sess-1',
+        tool_name: 'Edit',
+        tool_input: { file_path: path.join(proj, 'x.py') },
+        tool_response: {},
+      })) as Out
+      expect(String(r.block)).toContain('no_todo')
+      expect(String(r.block)).toContain('TODO を残さない')
+    }))
+
   test('non-edit tools do nothing', () =>
     withMod(async (m, proj) => {
       writeGateYaml(proj, { rules: [{ match: '**/*.py', run: ['true'] }] })

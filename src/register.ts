@@ -4,6 +4,7 @@ import { allStop } from './all-stop.ts'
 import { createIo } from './engine-io.ts'
 import { feedbackGuard } from './feedback-guard.ts'
 import { feedbackInject } from './feedback-inject.ts'
+import { feedbackPostEdit } from './feedback-post-edit.ts'
 import { feedbackStopCheck } from './feedback-stop-check.ts'
 import type { Io, ScriptResult } from './io.ts'
 import { notification } from './notification.ts'
@@ -110,7 +111,8 @@ export const register: Register = (on, options) => {
 
   on('classic.PostToolUse', async ($, e, next) => {
     if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name))) return next(e)
-    const mine = await runSteps($, 'PostToolUse', [(io) => recordChanges(io, e), (io) => stopTestGate(io, 'rules', e)])
+    // gate の実行より先に、軽い feedback の post_edit 検査を済ませる。
+    const mine = await runSteps($, 'PostToolUse', [(io) => recordChanges(io, e), (io) => feedbackPostEdit(io, e), (io) => stopTestGate(io, 'rules', e)])
     return withNext(next, e, mine)
   })
 

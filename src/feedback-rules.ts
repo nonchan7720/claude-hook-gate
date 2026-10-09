@@ -2,9 +2,10 @@
 //
 // グローバル (~/.claude/feedback/*.md) とプロジェクト (<projectDir>/.claude/feedback/*.md) の
 // 両ディレクトリから frontmatter を全件読み（同名はプロジェクト側が優先）、count に応じた強制力
-// （severity: deny / ask（pre_*）・block（stop_check） / warn）を解決する。
-// PreToolUse hook (feedback-guard.ts) / Stop hook (feedback-stop-check.ts) /
-// UserPromptSubmit hook (feedback-inject.ts) から使う共通ロジックのみを持つ。
+// （severity: deny / ask（pre_*）・block（stop_check / post_edit） / warn）を解決する。
+// PreToolUse hook (feedback-guard.ts) / PostToolUse hook (feedback-post-edit.ts) /
+// Stop hook (feedback-stop-check.ts) / UserPromptSubmit hook (feedback-inject.ts) から使う
+// 共通ロジックのみを持つ。
 //
 // enforce スキーマ（frontmatter に追記する形式）
 //
@@ -34,6 +35,17 @@
 //                              # kebab-case/snake_case 両方の候補が展開される。
 //                              # absent_sibling と併記した場合は OR で判定する
 //
+//   - event: post_edit         # PostToolUse(Edit|Write|MultiEdit) で、編集後のファイル全体を検査
+//     path: 'glob'             # 必須。file_path（プロジェクト相対）にマッチ
+//     exclude_path: 'glob'     # 任意。文字列または配列。マッチしたら検査対象外
+//     when: '正規表現'          # 任意。編集後のファイル内容（ディスク上の全文）に対して（m フラグ）
+//     unless: '正規表現'        # 任意。マッチすれば違反ではない
+//     check: 'shell cmd'       # 任意。$FILE に絶対パス、cwd はそのファイルのルート。非0終了で違反
+//                              # when と check の少なくとも一方が必要（どちらも無い要素は無視）。
+//                              # 両方あれば AND（when がマッチし、かつ check が非0）
+//     message: '...'
+//     severity: block          # 任意。省略時は count から自動決定
+//
 //   - event: stop_check        # Stop 時、そのセッションの変更ファイルを検査
 //     changed: 'glob'          # 必須。worktree 内のファイルは worktree ルート相対で判定する
 //     check: 'shell cmd'       # 任意。$FILE に該当ファイルの絶対パスが入る。非0で違反。
@@ -45,7 +57,7 @@
 //
 // severity の自動決定（明示があればそれを優先）:
 //   count >= 5   -> deny
-//   count 3, 4   -> ask（pre_bash / pre_edit） / block（stop_check）
+//   count 3, 4   -> ask（pre_bash / pre_edit） / block（stop_check / post_edit）
 //   count 1, 2   -> warn
 //
 // 有効期限と適用スコープ（frontmatter の任意キー。3つすべてを満たしたときだけルールが有効になる）
@@ -62,7 +74,7 @@
 import { asList, compileGlobs, expandBraces, globExists } from './glob.ts'
 import type { Io } from './io.ts'
 import { parseYaml } from './load-yaml.ts'
-import { basename, dirname, join, splitext } from './path.ts'
+import { basename, dirname, isAbsolute, join, splitext } from './path.ts'
 import { type Dict, isDict, pyRegExp, toCount, truthy } from './pyutil.ts'
 import { splitRoot } from './roots.ts'
 
@@ -243,7 +255,7 @@ export function resolveSeverity(count: unknown, explicit?: unknown, event?: stri
   if (truthy(explicit)) return String(explicit)
   const n = toCount(count)
   if (n >= 5) return 'deny'
-  if (n >= 3) return event === 'stop_check' ? 'block' : 'ask'
+  if (n >= 3) return event === 'stop_check' || event === 'post_edit' ? 'block' : 'ask'
   return 'warn'
 }
 
@@ -419,6 +431,60 @@ export async function evalPreEdit(io: Io, rules: Rule[], filePath: string, conte
         event: 'pre_edit',
         message: truthy(entry.message) ? String(entry.message) : '',
         detail,
+      })
+    }
+  }
+  return violations
+}
+
+// ---- enforce 評価: post_edit ----
+/** 編集後のファイル（ディスク上の全文）を検査する。読めないファイルは対象外（違反なし）。 */
+export async function evalPostEdit(io: Io, rules: Rule[], filePath: string, projectDir?: string): Promise<Violation[]> {
+  const dir = projectDir || io.projectDir || io.cwd
+  const [root, rel] = splitRoot(dir, filePath)
+  const absPath = isAbsolute(filePath) ? filePath : join(dir, filePath)
+  const violations: Violation[] = []
+  let text: string | undefined
+  for (const rule of rules) {
+    for (const entry of rule.enforce) {
+      if (entry.event !== 'post_edit') continue
+      const patterns = asList(entry.path)
+      if (patterns.length === 0) continue
+      if (!compileGlobs(patterns).some((rx) => rx.test(rel))) continue
+
+      const exclPatterns = asList(entry.exclude_path)
+      if (exclPatterns.length > 0 && compileGlobs(exclPatterns).some((rx) => rx.test(rel))) continue
+
+      // when / check のどちらも無い要素は無視する
+      const when = entry.when
+      const checkCmd = entry.check
+      if (!truthy(when) && !truthy(checkCmd)) continue
+
+      if (text === undefined) {
+        text = await io.readFile(absPath)
+        if (text === undefined) return violations
+      }
+      const details: string[] = []
+      if (truthy(when)) {
+        if (!pyRegExp(String(when), 'm').test(text)) continue
+        const unless = entry.unless
+        if (truthy(unless) && pyRegExp(String(unless), 'm').test(text)) continue
+        details.push(`content matched: ${String(when)}`)
+      }
+      if (truthy(checkCmd)) {
+        io.progress?.(`[feedback-post-edit] 検査中: ${rule.name} (${absPath})`)
+        const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: dir, FILE: absPath }, timeoutMs: 15_000 })
+        // 非0終了（タイムアウト・実行不能を含む）で違反確定。0終了なら違反ではない。
+        if (r.exitCode === 0 && !r.timedOut && r.error === undefined) continue
+        details.push(`check failed: ${String(checkCmd)}`)
+      }
+      violations.push({
+        rule: rule.name,
+        count: rule.count,
+        severity: resolveSeverity(rule.count, entry.severity, 'post_edit'),
+        event: 'post_edit',
+        message: truthy(entry.message) ? String(entry.message) : '',
+        detail: details.join(', '),
       })
     }
   }
