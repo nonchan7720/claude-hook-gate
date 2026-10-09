@@ -6622,7 +6622,7 @@ function resolveSeverity(count, explicit, event) {
   if (n >= 5)
     return "deny";
   if (n >= 3)
-    return event === "stop_check" ? "block" : "ask";
+    return event === "stop_check" || event === "post_edit" ? "block" : "ask";
   return "warn";
 }
 var logQueue = Promise.resolve();
@@ -6791,6 +6791,61 @@ async function evalPreEdit(io, rules, filePath, content, projectDir) {
         event: "pre_edit",
         message: truthy(entry.message) ? String(entry.message) : "",
         detail
+      });
+    }
+  }
+  return violations;
+}
+async function evalPostEdit(io, rules, filePath, projectDir) {
+  const dir = projectDir || io.projectDir || io.cwd;
+  const [root, rel] = splitRoot(dir, filePath);
+  const absPath = isAbsolute(filePath) ? filePath : join(dir, filePath);
+  const violations = [];
+  let text;
+  for (const rule of rules) {
+    for (const entry of rule.enforce) {
+      if (entry.event !== "post_edit")
+        continue;
+      const patterns = asList(entry.path);
+      if (patterns.length === 0)
+        continue;
+      if (!compileGlobs(patterns).some((rx) => rx.test(rel)))
+        continue;
+      const exclPatterns = asList(entry.exclude_path);
+      if (exclPatterns.length > 0 && compileGlobs(exclPatterns).some((rx) => rx.test(rel)))
+        continue;
+      const when = entry.when;
+      const checkCmd = entry.check;
+      if (!truthy(when) && !truthy(checkCmd))
+        continue;
+      if (text === undefined) {
+        text = await io.readFile(absPath);
+        if (text === undefined)
+          return violations;
+      }
+      const details = [];
+      if (truthy(when)) {
+        if (!pyRegExp(String(when), "m").test(text))
+          continue;
+        const unless = entry.unless;
+        if (truthy(unless) && pyRegExp(String(unless), "m").test(text))
+          continue;
+        details.push(`content matched: ${String(when)}`);
+      }
+      if (truthy(checkCmd)) {
+        io.progress?.(`[feedback-post-edit] 検査中: ${rule.name} (${absPath})`);
+        const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: dir, FILE: absPath }, timeoutMs: 15000 });
+        if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
+          continue;
+        details.push(`check failed: ${String(checkCmd)}`);
+      }
+      violations.push({
+        rule: rule.name,
+        count: rule.count,
+        severity: resolveSeverity(rule.count, entry.severity, "post_edit"),
+        event: "post_edit",
+        message: truthy(entry.message) ? String(entry.message) : "",
+        detail: details.join(", ")
       });
     }
   }
@@ -8808,6 +8863,44 @@ async function feedbackInject(io) {
   }
 }
 
+// src/feedback-post-edit.ts
+async function main3(io, payload) {
+  const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
+  if (toolName !== "Edit" && toolName !== "Write" && toolName !== "MultiEdit")
+    return ok();
+  const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
+  const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : "";
+  if (!filePath)
+    return ok();
+  const rules = await listRules(io);
+  const violations = await evalPostEdit(io, rules, filePath);
+  if (violations.length === 0)
+    return ok();
+  for (const v of violations)
+    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
+  const warnings = violations.filter((v) => v.severity === "warn");
+  const blocking = violations.filter((v) => v.severity !== "warn");
+  let stderr = warnings.map((v) => `[feedback-post-edit] warn: ${v.rule} (count: ${v.count}): ${v.message}
+`).join("");
+  if (blocking.length === 0)
+    return ok("", stderr);
+  const lines = blocking.map((v) => `[feedback-post-edit] ${v.rule} (count: ${v.count}): ${v.message} (${v.detail})`);
+  stderr += lines.map((l) => `${l}
+`).join("");
+  const stdout = `${JSON.stringify({ decision: "block", reason: lines.join(`
+`) })}
+`;
+  return ok(stdout, stderr);
+}
+async function feedbackPostEdit(io, payload) {
+  try {
+    return await main3(io, payload);
+  } catch (e) {
+    return ok("", `[feedback-post-edit] internal error (ignored): ${e instanceof Error ? e.message : String(e)}
+`);
+  }
+}
+
 // src/outcome.ts
 var TEXT_CONTEXT_EVENTS = new Set(["UserPromptSubmit", "SessionStart"]);
 var parseJson = (text) => {
@@ -9059,7 +9152,7 @@ export const register = (on, options) => {
   on("classic.PostToolUse", async ($, e, next) => {
     if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name)))
       return next(e);
-    const mine = await runSteps($, "PostToolUse", [(io) => recordChanges(io, e), (io) => stopTestGate(io, "rules", e)]);
+    const mine = await runSteps($, "PostToolUse", [(io) => recordChanges(io, e), (io) => feedbackPostEdit(io, e), (io) => stopTestGate(io, "rules", e)]);
     return withNext(next, e, mine);
   });
   on("classic.Notification", async ($, e, next) => {
