@@ -7298,44 +7298,78 @@ function hashKey(key) {
   h2 = Math.imul(h2 ^ h2 >>> 16, 2246822507) ^ Math.imul(h1 ^ h1 >>> 13, 3266489909);
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, "0");
 }
-async function runShared(io, key, timeoutMs, execute, hooks = {}) {
+var normalizeFiles = (files) => [...new Set(files)].sort();
+var shareId = (key, files) => `${hashKey(key)}.${hashKey(JSON.stringify(normalizeFiles(files)))}`;
+async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
+  const mine = normalizeFiles(files);
   const dir = join(gateStatusDir(io), "shared");
-  const base = join(dir, hashKey(key));
-  const lock = `${base}.run`;
-  const resultFile = `${base}.result.json`;
-  const claim = async () => (await io.run(["sh", "-c", 'mkdir -p "$1" && mkdir "$2"', "sh", dir, lock])).exitCode === 0;
+  const keyPrefix = `${hashKey(key)}.`;
+  const ownLock = join(dir, `${shareId(key, mine)}.run`);
+  const resultOf = (lock) => `${lock.slice(0, -".run".length)}.result.json`;
+  const claim = async () => (await io.run(["sh", "-c", 'mkdir -p "$1" && mkdir "$2"', "sh", dir, ownLock])).exitCode === 0;
   const lead = async () => {
-    await io.writeFile(join(lock, "info.json"), JSON.stringify({ started: await io.now(), timeoutMs }));
+    const resultFile = resultOf(ownLock);
+    await io.writeFile(join(ownLock, "info.json"), JSON.stringify({ started: await io.now(), timeoutMs, key, files: mine }));
     await io.removeFiles([resultFile]);
     try {
       const outcome = await execute();
-      await io.writeFile(resultFile, JSON.stringify({ key, ...outcome }));
+      await io.writeFile(resultFile, JSON.stringify({ key, files: mine, ...outcome }));
       return outcome;
     } finally {
-      await io.removeTree(lock);
+      await io.removeTree(ownLock);
     }
   };
-  const remainingMs = async () => {
+  const readInfo = async (lock) => {
     const text = await io.readFile(join(lock, "info.json"));
-    let started;
-    let limit = 0;
     try {
       const info = text === undefined ? undefined : JSON.parse(text);
-      if (isDict(info)) {
-        started = Number(info.started);
-        limit = Number(info.timeoutMs) || 0;
-      }
-    } catch {}
-    started ??= (await io.stat(lock))?.mtimeMs ?? await io.now();
-    return started + limit + GRACE_MS - await io.now();
+      if (!isDict(info))
+        return;
+      return {
+        started: Number.isFinite(Number(info.started)) ? Number(info.started) : undefined,
+        limit: Number(info.timeoutMs) || 0,
+        key: typeof info.key === "string" ? info.key : undefined,
+        files: Array.isArray(info.files) ? info.files.map(String) : undefined
+      };
+    } catch {
+      return;
+    }
   };
-  const readOutcome = async () => {
+  const remainingMs = async (lock, info) => {
+    const started = info?.started ?? (await io.stat(lock))?.mtimeMs ?? await io.now();
+    return started + (info?.limit ?? 0) + GRACE_MS - await io.now();
+  };
+  const covers = (theirs) => theirs !== undefined && mine.every((f) => theirs.includes(f));
+  const findRunning = async () => {
+    let pending = false;
+    for (const e of await io.list(dir)) {
+      if (e.kind !== "dir" || !e.name.startsWith(keyPrefix) || !e.name.endsWith(".run"))
+        continue;
+      const lock = join(dir, e.name);
+      const info = await readInfo(lock);
+      const alive = await remainingMs(lock, info) > 0;
+      if (!info) {
+        if (alive)
+          pending = true;
+        continue;
+      }
+      if (info.key !== key || !covers(info.files))
+        continue;
+      if (!alive) {
+        await io.removeTree(lock);
+        continue;
+      }
+      return { lock, pending };
+    }
+    return { pending };
+  };
+  const readOutcome = async (resultFile) => {
     const text = await io.readFile(resultFile);
     if (text === undefined)
       return;
     try {
       const r = JSON.parse(text);
-      if (!isDict(r) || r.key !== key)
+      if (!isDict(r) || r.key !== key || !Array.isArray(r.files) || !covers(r.files.map(String)))
         return;
       return { out: String(r.out ?? ""), ok: r.ok === true, timedOut: r.timedOut === true, logpath: String(r.logpath ?? "") };
     } catch {
@@ -7344,21 +7378,31 @@ async function runShared(io, key, timeoutMs, execute, hooks = {}) {
   };
   let announced = false;
   for (let round = 0;round < MAX_ROUNDS; round++) {
-    if (await claim())
-      return { outcome: await lead(), shared: false };
-    const left = await remainingMs();
+    const found = await findRunning();
+    if (!found.lock && found.pending) {
+      await io.run(["sleep", POLL_SECONDS]);
+      round--;
+      continue;
+    }
+    let target = found.lock;
+    if (!target) {
+      if (await claim())
+        return { outcome: await lead(), shared: false };
+      target = ownLock;
+    }
+    const left = await remainingMs(target, await readInfo(target));
     if (left <= 0) {
-      await io.removeTree(lock);
+      await io.removeTree(target);
       continue;
     }
     if (!announced) {
       announced = true;
       await hooks.onWait?.();
     }
-    await io.run(["sh", "-c", `while [ -d "$1" ]; do sleep ${POLL_SECONDS}; done`, "sh", lock], { timeoutMs: Math.min(left, MAX_WAIT_MS) });
-    if (await io.exists(lock))
+    await io.run(["sh", "-c", `while [ -d "$1" ]; do sleep ${POLL_SECONDS}; done`, "sh", target], { timeoutMs: Math.min(Math.max(left, 1), MAX_WAIT_MS) });
+    if (await io.exists(target))
       continue;
-    const outcome = await readOutcome();
+    const outcome = await readOutcome(resultOf(target));
     if (outcome)
       return { outcome, shared: true };
   }
@@ -7462,12 +7506,14 @@ function parseCmd(item, defaultTimeout) {
   return [item, defaultTimeout, null];
 }
 var parseShare = (item) => !(isDict(item) && item.share === false);
+var parseFiles = (item) => !(isDict(item) && item.files === false);
 var agentEnv = (agentId) => agentId ? { CLAUDE_AGENT_ID: agentId } : {};
 var AGENT_ENV_KEYS = Object.keys(agentEnv("-"));
 function shareKey(root, cwd, cmd, env) {
-  const shared = Object.entries(env).filter(([k]) => !AGENT_ENV_KEYS.includes(k)).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  const shared = Object.entries(env).filter(([k]) => !AGENT_ENV_KEYS.includes(k) && k !== FILES_ENV_KEY).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   return JSON.stringify([root, cwd, cmd, shared]);
 }
+var shareFiles = (env, files) => files && env[FILES_ENV_KEY] ? shellSplit(env[FILES_ENV_KEY]) : [];
 var isParallel = (item) => isDict(item) && ("parallel" in item);
 function summarizeCmds(cmds) {
   const parts = [];
@@ -7880,8 +7926,9 @@ class Gate {
   async runCmdShared(cmd, cwd, timeout, name, extraEnv, scope, onWait) {
     if (scope.share === false)
       return this.runCmd(cmd, cwd, timeout, name, extraEnv);
-    const key = shareKey(scope.root, cwd, cmd, { ...this.baseEnv, ...extraEnv });
-    const r = await runShared(this.io, key, Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS), () => this.runCmd(cmd, cwd, timeout, name, extraEnv), {
+    const env = { ...this.baseEnv, ...extraEnv };
+    const key = shareKey(scope.root, cwd, cmd, env);
+    const r = await runShared(this.io, key, shareFiles(env, scope.files !== false), Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS), () => this.runCmd(cmd, cwd, timeout, name, extraEnv), {
       onWait
     });
     if (!r.shared)
@@ -8005,11 +8052,11 @@ ${details}` : "");
         continue;
       if (policy && !await policy.allows(label, cwd, cmd, timeout, name, logs, extraEnv))
         continue;
-      tasks.push([cmd, timeout, name, parseShare(item)]);
+      tasks.push([cmd, timeout, name, { root, share: parseShare(item), files: parseFiles(item) }]);
     }
     if (tasks.length === 0)
       return failed;
-    const results = await Promise.all(tasks.map((t) => this.execOne(label, t[0], cwd, t[1], " [parallel]", t[2], extraEnv, { root, share: t[3] })));
+    const results = await Promise.all(tasks.map((t) => this.execOne(label, t[0], cwd, t[1], " [parallel]", t[2], extraEnv, t[3])));
     for (const [i, [chunk, ok]] of results.entries()) {
       const [cmd, , name] = tasks[i];
       logs.push(...chunk.lines);
@@ -8034,7 +8081,7 @@ ${details}` : "");
         continue;
       if (policy && !await policy.allows(label, cwd, cmd, timeout, name, logs, extraEnv))
         continue;
-      const [chunk, ok] = await this.execOne(label, cmd, cwd, timeout, "", name, extraEnv, { root, share: parseShare(item) });
+      const [chunk, ok] = await this.execOne(label, cmd, cwd, timeout, "", name, extraEnv, { root, share: parseShare(item), files: parseFiles(item) });
       logs.push(...chunk.lines);
       this.collectFailure(chunk);
       if (policy)

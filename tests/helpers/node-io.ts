@@ -187,3 +187,15 @@ export async function withTmp<T>(body: (dir: string) => Promise<T> | T): Promise
     rmTree(dir)
   }
 }
+
+/** 実行側のロック（<ハッシュ>.*.run/info.json）が現れるまで待つ。sleep で「先に始まっている」ことを仮定しないための順序付け。 */
+export async function waitForSharedLock(proj: string, timeoutMs = 10_000): Promise<void> {
+  const dir = path.join(proj, '.claude', '.gate-status', 'shared')
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const has = fs.existsSync(dir) && fs.readdirSync(dir).some((f) => f.endsWith('.run') && fs.existsSync(path.join(dir, f, 'info.json')))
+    if (has) return
+    await new Promise((r) => setTimeout(r, 10))
+  }
+  throw new Error('shared lock did not appear')
+}

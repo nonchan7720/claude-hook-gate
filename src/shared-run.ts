@@ -2,12 +2,14 @@
 //
 // メインとサブエージェントの hook が同じプロセスで動く保証はないので、プロセス内の状態には頼らず、
 // .gate-status/shared/ 配下のファイルで調停する:
-//   - <hash>.run/   ロックディレクトリ。`mkdir` は原子的なので、作れた側が実行側（先着 1 名）になる。
-//                   中の info.json に開始時刻とタイムアウトを書く。
-//   - <hash>.result.json  実行側が完了時、ロックを外す前に書く結果。
-// 後から来た側は新たに起動せず、ロックが消えるまで待って結果を受け取る。完了済みの結果は再利用しない
-// （次に同じキーが来たら実行し直す）。ロックは「開始時刻 + タイムアウト + 猶予」を過ぎたら実行側が
-// 落ちたとみなして奪い直す。
+//   - <キーのハッシュ>.<ファイル一覧のハッシュ>.run/   ロックディレクトリ。`mkdir` は原子的なので、作れた側が
+//                   実行側（先着 1 名）になる。中の info.json にキー・ファイル一覧・開始時刻・タイムアウトを書く。
+//   - <同じ名前>.result.json  実行側が完了時、ロックを外す前に書く結果（キーとファイル一覧付き）。
+// 共有の単位はキー（root・cwd・cmd など）で、各実行は対象ファイル一覧を別に持つ。同じキーのロックが複数並び得る。
+// 後から来た側は、同じキーで実行中のロックのうち実行側のファイル一覧が自分の一覧を含むもの（空の一覧はどれにも
+// 含まれる）があれば、新たに起動せずロックが消えるまで待って結果を受け取る。無ければ自分で実行する。
+// 完了済みの結果は再利用しない（次に同じキーが来たら実行し直す）。ロックは「開始時刻 + タイムアウト + 猶予」を
+// 過ぎたら実行側が落ちたとみなして奪い直す。
 import type { Io } from './io.ts'
 import { join } from './path.ts'
 import { isDict } from './pyutil.ts'
@@ -36,56 +38,98 @@ export function hashKey(key: string): string {
 
 type Hooks = { onWait?: () => void | Promise<void> }
 
-/** key の実行を共有する。戻り値の shared は「他の側の結果を受け取った」こと。 */
+/** ファイル一覧を昇順・重複なしにそろえる。 */
+const normalizeFiles = (files: readonly string[]): string[] => [...new Set(files)].sort()
+
+/** ロック・結果ファイルの名前の元になる、キーとファイル一覧の組のハッシュ。 */
+export const shareId = (key: string, files: readonly string[]): string => `${hashKey(key)}.${hashKey(JSON.stringify(normalizeFiles(files)))}`
+
+type Info = { started?: number; limit: number; key?: string; files?: string[] }
+
+/** key の実行を共有する。files はこの実行が対象にするファイル一覧。戻り値の shared は「他の側の結果を受け取った」こと。 */
 export async function runShared(
   io: Io,
   key: string,
+  files: readonly string[],
   timeoutMs: number,
   execute: () => Promise<SharedOutcome>,
   hooks: Hooks = {},
 ): Promise<{ outcome: SharedOutcome; shared: boolean }> {
+  const mine = normalizeFiles(files)
   const dir = join(gateStatusDir(io), 'shared')
-  const base = join(dir, hashKey(key))
-  const lock = `${base}.run`
-  const resultFile = `${base}.result.json`
+  const keyPrefix = `${hashKey(key)}.`
+  const ownLock = join(dir, `${shareId(key, mine)}.run`)
+  const resultOf = (lock: string): string => `${lock.slice(0, -'.run'.length)}.result.json`
 
-  const claim = async (): Promise<boolean> => (await io.run(['sh', '-c', 'mkdir -p "$1" && mkdir "$2"', 'sh', dir, lock])).exitCode === 0
+  const claim = async (): Promise<boolean> => (await io.run(['sh', '-c', 'mkdir -p "$1" && mkdir "$2"', 'sh', dir, ownLock])).exitCode === 0
 
   const lead = async (): Promise<SharedOutcome> => {
-    await io.writeFile(join(lock, 'info.json'), JSON.stringify({ started: await io.now(), timeoutMs }))
+    const resultFile = resultOf(ownLock)
+    await io.writeFile(join(ownLock, 'info.json'), JSON.stringify({ started: await io.now(), timeoutMs, key, files: mine }))
     await io.removeFiles([resultFile])
     try {
       const outcome = await execute()
-      await io.writeFile(resultFile, JSON.stringify({ key, ...outcome }))
+      await io.writeFile(resultFile, JSON.stringify({ key, files: mine, ...outcome }))
       return outcome
     } finally {
-      await io.removeTree(lock)
+      await io.removeTree(ownLock)
     }
   }
 
-  const remainingMs = async (): Promise<number> => {
+  const readInfo = async (lock: string): Promise<Info | undefined> => {
     const text = await io.readFile(join(lock, 'info.json'))
-    let started: number | undefined
-    let limit = 0
     try {
       const info: unknown = text === undefined ? undefined : JSON.parse(text)
-      if (isDict(info)) {
-        started = Number(info.started)
-        limit = Number(info.timeoutMs) || 0
+      if (!isDict(info)) return undefined
+      return {
+        started: Number.isFinite(Number(info.started)) ? Number(info.started) : undefined,
+        limit: Number(info.timeoutMs) || 0,
+        key: typeof info.key === 'string' ? info.key : undefined,
+        files: Array.isArray(info.files) ? info.files.map(String) : undefined,
       }
     } catch {
-      // 書きかけは info 無しと同じに扱う
+      return undefined // 書きかけは info 無しと同じに扱う
     }
-    started ??= (await io.stat(lock))?.mtimeMs ?? (await io.now())
-    return started + limit + GRACE_MS - (await io.now())
   }
 
-  const readOutcome = async (): Promise<SharedOutcome | undefined> => {
+  const remainingMs = async (lock: string, info: Info | undefined): Promise<number> => {
+    const started = info?.started ?? (await io.stat(lock))?.mtimeMs ?? (await io.now())
+    return started + (info?.limit ?? 0) + GRACE_MS - (await io.now())
+  }
+
+  const covers = (theirs: readonly string[] | undefined): boolean => theirs !== undefined && mine.every((f) => theirs.includes(f))
+
+  /**
+   * 同じキーで実行中の、自分のファイル一覧を含むロックを探す。期限切れのロックはここで片付ける。info.json がまだ無い
+   * ロック（実行側が mkdir してから書くまでの隙間）は、どの一覧か判定できないので pending として返す。
+   */
+  const findRunning = async (): Promise<{ lock?: string; pending: boolean }> => {
+    let pending = false
+    for (const e of await io.list(dir)) {
+      if (e.kind !== 'dir' || !e.name.startsWith(keyPrefix) || !e.name.endsWith('.run')) continue
+      const lock = join(dir, e.name)
+      const info = await readInfo(lock)
+      const alive = (await remainingMs(lock, info)) > 0
+      if (!info) {
+        if (alive) pending = true
+        continue
+      }
+      if (info.key !== key || !covers(info.files)) continue
+      if (!alive) {
+        await io.removeTree(lock)
+        continue
+      }
+      return { lock, pending }
+    }
+    return { pending }
+  }
+
+  const readOutcome = async (resultFile: string): Promise<SharedOutcome | undefined> => {
     const text = await io.readFile(resultFile)
     if (text === undefined) return undefined
     try {
       const r: unknown = JSON.parse(text)
-      if (!isDict(r) || r.key !== key) return undefined
+      if (!isDict(r) || r.key !== key || !Array.isArray(r.files) || !covers(r.files.map(String))) return undefined
       return { out: String(r.out ?? ''), ok: r.ok === true, timedOut: r.timedOut === true, logpath: String(r.logpath ?? '') }
     } catch {
       return undefined
@@ -94,19 +138,30 @@ export async function runShared(
 
   let announced = false
   for (let round = 0; round < MAX_ROUNDS; round++) {
-    if (await claim()) return { outcome: await lead(), shared: false }
-    const left = await remainingMs()
+    const found = await findRunning()
+    if (!found.lock && found.pending) {
+      // info が現れるのを待って探し直す。猶予を過ぎれば pending でなくなるので、ラウンドは消費しない
+      await io.run(['sleep', POLL_SECONDS])
+      round--
+      continue
+    }
+    let target = found.lock
+    if (!target) {
+      if (await claim()) return { outcome: await lead(), shared: false }
+      target = ownLock // 同じ一覧の実行が info を書く前だった場合など。そのロックを待つ
+    }
+    const left = await remainingMs(target, await readInfo(target))
     if (left <= 0) {
-      await io.removeTree(lock)
+      await io.removeTree(target)
       continue
     }
     if (!announced) {
       announced = true
       await hooks.onWait?.()
     }
-    await io.run(['sh', '-c', `while [ -d "$1" ]; do sleep ${POLL_SECONDS}; done`, 'sh', lock], { timeoutMs: Math.min(left, MAX_WAIT_MS) })
-    if (await io.exists(lock)) continue
-    const outcome = await readOutcome()
+    await io.run(['sh', '-c', `while [ -d "$1" ]; do sleep ${POLL_SECONDS}; done`, 'sh', target], { timeoutMs: Math.min(Math.max(left, 1), MAX_WAIT_MS) })
+    if (await io.exists(target)) continue
+    const outcome = await readOutcome(resultOf(target))
     if (outcome) return { outcome, shared: true }
   }
   return { outcome: await execute(), shared: false }

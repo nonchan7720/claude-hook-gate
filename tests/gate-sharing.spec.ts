@@ -3,7 +3,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { filesEnv, Gate, runGate } from '../src/gate.ts'
 import { checks, readTraceRecords, rules, writeChangedFiles, writeDeferred, writeGateYaml } from './helpers/gate.ts'
-import { MISSING_DOGWOOD_BIN, makeIo, withTmp } from './helpers/node-io.ts'
+import { MISSING_DOGWOOD_BIN, makeIo, waitForSharedLock, withTmp } from './helpers/node-io.ts'
 
 const count = (file: string): number => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).length : 0)
 const logFiles = (proj: string, stateId: string): string[] => {
@@ -71,6 +71,14 @@ describe('two agents running the same command', () => {
       expect([r1.exitCode, r2.exitCode]).toEqual([0, 0])
     }))
 
+  test('files: false in gate.yaml runs it once even when the agents changed different files', () =>
+    withTmp(async (proj) => {
+      const marker = setup(proj, 'true', { files: false })
+      writeChangedFiles(proj, 'sess1--a2', 'y.py')
+      await both()(proj)
+      expect(count(marker)).toBe(1)
+    }))
+
   test('a differing CLAUDE_GATE_FILES runs it twice', () =>
     withTmp(async (proj) => {
       const marker = setup(proj, 'true')
@@ -115,6 +123,43 @@ describe('the share key', () => {
       expect(count(marker)).toBe(2)
     }))
 
+  test('files: false shares the run even though CLAUDE_GATE_FILES differ', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const g = (id: string, files: string[]) => agentGate(proj, id).execOne('l', cmd(marker), proj, 10, '', 'n', filesEnv(files), { root: proj, files: false })
+      await Promise.all([g('a1', ['x.py']), g('a2', ['y.py', 'z.py'])])
+      expect(count(marker)).toBe(1)
+    }))
+
+  test('files: false with share: false still runs twice', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const g = (id: string, files: string[]) =>
+        agentGate(proj, id).execOne('l', cmd(marker), proj, 10, '', 'n', filesEnv(files), { root: proj, share: false, files: false })
+      await Promise.all([g('a1', ['x.py']), g('a2', ['y.py'])])
+      expect(count(marker)).toBe(2)
+    }))
+
+  test('files that are a subset of the running ones share the run', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const pa = run(proj, 'a1', cmd(marker), proj, filesEnv(['x.py', 'y.py']))
+      await waitForSharedLock(proj)
+      const pb = run(proj, 'a2', cmd(marker), proj, filesEnv(['x.py']))
+      await Promise.all([pa, pb])
+      expect(count(marker)).toBe(1)
+    }))
+
+  test('files that are not a subset of the running ones run separately', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const pa = run(proj, 'a1', cmd(marker), proj, filesEnv(['x.py']))
+      await waitForSharedLock(proj)
+      const pb = run(proj, 'a2', cmd(marker), proj, filesEnv(['x.py', 'y.py']))
+      await Promise.all([pa, pb])
+      expect(count(marker)).toBe(2)
+    }))
+
   test('a differing root runs twice', () =>
     withTmp(async (proj) => {
       const marker = path.join(proj, 'm.txt')
@@ -149,7 +194,7 @@ describe('shared band', () => {
       const b = agentGate(proj, 'a2', { bandLog })
       const exec = (g: Gate) => g.execOne('l', 'sleep 0.6', proj, 10, '', 'job', filesEnv(['x.py']), { root: proj })
       const pa = exec(a)
-      await sleep(150)
+      await waitForSharedLock(proj)
       const pb = exec(b)
       await Promise.all([pa, pb])
       expect(bandLog.some((l) => l?.includes('\n  job $ sleep 0.6 (') && l.includes('\n  job $ sleep 0.6 待機中 ('))).toBe(true)

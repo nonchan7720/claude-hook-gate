@@ -52,8 +52,12 @@
 //              または {parallel: [...]} 形式。timeout はそのコマンドのタイムアウト秒数（省略時 300 秒）。
 //              超過したら強制終了して失敗扱い。rule / consistency_check レベルの timeout: はデフォルト値になる。
 //              name はログファイル名に使う識別名（省略時は cmd から生成）。share: false を書くと、他のエージェントが
-//              同じキー（root・cwd・cmd・渡す環境変数。エージェント識別用の変数は除く）を実行中でも待たずに自分で
-//              実行する（既定は共有: 進行中の実行があれば起動せず完了を待って同じ結果を受け取る。src/shared-run.ts）。
+//              同じキー（root・cwd・cmd・渡す環境変数。エージェント識別用の変数と CLAUDE_GATE_FILES は除く）を
+//              実行中でも待たずに自分で実行する（既定は共有: 進行中の実行があれば起動せず完了を待って同じ結果を
+//              受け取る。ただし進行中の実行の対象ファイルが自分の対象ファイルをすべて含むときだけ。src/shared-run.ts）。
+//              files: false を書くと、そのコマンドは対象ファイルを使わないものとして、共有の判定上の対象ファイルを
+//              空として扱う（対象ファイルが違っても共有される）。CLAUDE_GATE_FILES 自体は従来どおり渡る。
+//              share: false と併記した場合は share: false が優先される。
 // CLAUDE_GATE_FILES:
 //              run / consistency_checks の各コマンドには、そのとき対象になっているファイルのルート相対
 //              パスが環境変数 CLAUDE_GATE_FILES で渡る。値は shlex 引用済み・重複排除・昇順で、空白区切りの
@@ -127,7 +131,7 @@ const UNMATCHED_SHOWN = 5 // どのルールにもマッチしなかったファ
 const MAX_TIMEOUT_MS = 600_000 // $.process.run の上限（10 分）
 
 // ---- 設定の型（YAML はユーザー入力なので、実行時は緩く扱う） ----
-export type RunItem = string | { cmd?: string; name?: string; timeout?: number; share?: boolean } | { parallel?: RunItem[] }
+export type RunItem = string | { cmd?: string; name?: string; timeout?: number; share?: boolean; files?: boolean } | { parallel?: RunItem[] }
 type Setting = { policy?: unknown; policy_schema?: unknown }
 export type GateRule = Setting & {
   match?: unknown
@@ -257,17 +261,26 @@ export function parseCmd(item: unknown, defaultTimeout: number): [cmd: string, t
 /** run の要素が他のエージェントとの実行共有を許すか。{cmd, share: false} だけが無効化で、既定は共有する。 */
 export const parseShare = (item: unknown): boolean => !(isDict(item) && item.share === false)
 
+/** run の要素が対象ファイル（CLAUDE_GATE_FILES）を共有の判定に使うか。{cmd, files: false} だけが「使わない」で、既定は使う。 */
+export const parseFiles = (item: unknown): boolean => !(isDict(item) && item.files === false)
+
 /** gate がエージェントを識別するために子プロセスへ付ける環境変数。共有キーからはこれを除く（エージェントごとに必ず異なるため）。 */
 export const agentEnv = (agentId: string): Env => (agentId ? { CLAUDE_AGENT_ID: agentId } : {})
 const AGENT_ENV_KEYS = Object.keys(agentEnv('-'))
 
-/** 実行共有のキー。root・cwd・cmd・コマンドに渡す環境変数（エージェント識別用を除く）がすべて一致するものだけが同じ実行になる。 */
+/**
+ * 実行共有のキー。root・cwd・cmd・コマンドに渡す環境変数（エージェント識別用と対象ファイル一覧を除く）が
+ * すべて一致するものだけが同じ実行になる。対象ファイル一覧は shareFiles で別に扱う。
+ */
 export function shareKey(root: string, cwd: string, cmd: string, env: Env): string {
   const shared = Object.entries(env)
-    .filter(([k]) => !AGENT_ENV_KEYS.includes(k))
+    .filter(([k]) => !AGENT_ENV_KEYS.includes(k) && k !== FILES_ENV_KEY)
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
   return JSON.stringify([root, cwd, cmd, shared])
 }
+
+/** 共有の判定に使う対象ファイル一覧。files が false（対象ファイルを使わないコマンド）なら空。 */
+export const shareFiles = (env: Env, files: boolean): string[] => (files && env[FILES_ENV_KEY] ? shellSplit(env[FILES_ENV_KEY]) : [])
 
 const isParallel = (item: unknown): item is { parallel?: RunItem[] } => isDict(item) && 'parallel' in item
 
@@ -328,7 +341,7 @@ let logSeq = 0
 
 type Chunk = { lines: string[]; detail?: string }
 /** コマンドをどのルートで・共有を許して実行するか。 */
-type ExecScope = { root: string; share?: boolean }
+type ExecScope = { root: string; share?: boolean; files?: boolean }
 type PolicyResolved = { policy: string; schema: string; isDefault: boolean }
 const UNSET = Symbol('unset')
 
@@ -754,10 +767,18 @@ export class Gate {
     onWait: () => Promise<void>,
   ): Promise<Awaited<ReturnType<Gate['runCmd']>>> {
     if (scope.share === false) return this.runCmd(cmd, cwd, timeout, name, extraEnv)
-    const key = shareKey(scope.root, cwd, cmd, { ...this.baseEnv, ...extraEnv })
-    const r = await runShared(this.io, key, Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS), () => this.runCmd(cmd, cwd, timeout, name, extraEnv), {
-      onWait,
-    })
+    const env = { ...this.baseEnv, ...extraEnv }
+    const key = shareKey(scope.root, cwd, cmd, env)
+    const r = await runShared(
+      this.io,
+      key,
+      shareFiles(env, scope.files !== false),
+      Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS),
+      () => this.runCmd(cmd, cwd, timeout, name, extraEnv),
+      {
+        onWait,
+      },
+    )
     if (!r.shared) return r.outcome
     const uid = `${Math.floor((await this.io.now()) / 1000)}-${logSeq++}`
     const logpath = join(this.logDir, `${slug(name || cmd)}.${uid}.log`)
@@ -891,7 +912,7 @@ export class Gate {
     root: string = policy?.rootDir ?? this.projectDir,
   ): Promise<boolean> {
     let failed = false
-    const tasks: Array<[string, number, string | null, boolean]> = []
+    const tasks: Array<[string, number, string | null, ExecScope]> = []
     for (const item of items) {
       if (isParallel(item)) {
         logs.push(`=== [gate] (${label}) parallel の中に parallel はネストできません。失敗扱いにします。 ===`)
@@ -901,12 +922,12 @@ export class Gate {
       const [cmd, timeout, name] = parseCmd(item, defaultTimeout)
       if (!cmd) continue
       if (policy && !(await policy.allows(label, cwd, cmd, timeout, name, logs, extraEnv))) continue
-      tasks.push([cmd, timeout, name, parseShare(item)])
+      tasks.push([cmd, timeout, name, { root, share: parseShare(item), files: parseFiles(item) }])
     }
     if (tasks.length === 0) return failed
-    const results = await Promise.all(tasks.map((t) => this.execOne(label, t[0], cwd, t[1], ' [parallel]', t[2], extraEnv, { root, share: t[3] })))
+    const results = await Promise.all(tasks.map((t) => this.execOne(label, t[0], cwd, t[1], ' [parallel]', t[2], extraEnv, t[3])))
     for (const [i, [chunk, ok]] of results.entries()) {
-      const [cmd, , name] = tasks[i] as [string, number, string | null, boolean]
+      const [cmd, , name] = tasks[i] as [string, number, string | null, ExecScope]
       logs.push(...chunk.lines)
       this.collectFailure(chunk)
       if (policy) await policy.record(cwd, cmd, name, ok)
@@ -935,7 +956,7 @@ export class Gate {
       const [cmd, timeout, name] = parseCmd(item, defaultTimeout)
       if (!cmd) continue
       if (policy && !(await policy.allows(label, cwd, cmd, timeout, name, logs, extraEnv))) continue
-      const [chunk, ok] = await this.execOne(label, cmd, cwd, timeout, '', name, extraEnv, { root, share: parseShare(item) })
+      const [chunk, ok] = await this.execOne(label, cmd, cwd, timeout, '', name, extraEnv, { root, share: parseShare(item), files: parseFiles(item) })
       logs.push(...chunk.lines)
       this.collectFailure(chunk)
       if (policy) await policy.record(cwd, cmd, name, ok)
