@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.4.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.4.0...v0.4.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* share gate runs across agents whose target files differ ([#19](https://github.com/nonchan7720/claude-hook-gate/issues/19)) ([4990708](https://github.com/nonchan7720/claude-hook-gate/commit/4990708a48376318bf096af191eb08f463dd110a))
+
+## [0.4.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.3.1...v0.4.0) (2026-10-09)
+
+
+### Features
+
+* add expires, projects and when_exists scopes to feedback rules ([#16](https://github.com/nonchan7720/claude-hook-gate/issues/16)) ([d0ab45b](https://github.com/nonchan7720/claude-hook-gate/commit/d0ab45b63103e3213a2f076450cafad0cf5b0247))
+* add post_edit event to feedback enforce rules ([#17](https://github.com/nonchan7720/claude-hook-gate/issues/17)) ([fe03e0e](https://github.com/nonchan7720/claude-hook-gate/commit/fe03e0ec511375ecf6046910143d41b858ddb2eb))
+* track files changed by Bash commands via mtime ([#15](https://github.com/nonchan7720/claude-hook-gate/issues/15)) ([4a5fc59](https://github.com/nonchan7720/claude-hook-gate/commit/4a5fc5974e2eae20ff3699125dbab36bb11e4be9))
+
+
+### Bug Fixes
+
+* read project .claude/feedback rules as well as the global ones ([#13](https://github.com/nonchan7720/claude-hook-gate/issues/13)) ([9270219](https://github.com/nonchan7720/claude-hook-gate/commit/9270219844b259eb114de8c2693109881668d045))
+
 ## [0.3.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.3.0...v0.3.1) (2026-10-08)
 
 
