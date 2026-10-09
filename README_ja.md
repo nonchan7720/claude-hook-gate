@@ -17,7 +17,7 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 | SessionStart | `src/reset-gate.ts` | `startup` / `clear` のときだけ自セッションのゲート状態を消す。resume / compact では消さない。 |
 | UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | ルールファイル（`rulesFile` のファイルがあればそれ、無ければ同梱の `rules/feedback_rules.md`）と確定済みフィードバックルール（`count >= 3`）をコンテキストに追加する。 |
 | PreToolUse（Bash / Edit / Write / MultiEdit） | `src/feedback-guard.ts` | `pre_bash` / `pre_edit` の enforce を評価し、`count` に応じて deny / ask / warn する。 |
-| PostToolUse（Write / Edit / MultiEdit） | `src/record-changes.ts` → `src/stop-test-gate.ts`（`rules`） | 変更ファイルを記録し、`.claude/gate.yaml` の該当ルールを実行する（`src/gate.ts` 経由）。 |
+| PostToolUse（Write / Edit / MultiEdit） | `src/record-changes.ts` → `src/feedback-post-edit.ts` → `src/stop-test-gate.ts`（`rules`） | 変更ファイルを記録し、`post_edit` の enforce を編集後のファイル全体に対して評価（`count` に応じて block / warn）したあと、`.claude/gate.yaml` の該当ルールを実行する（`src/gate.ts` 経由）。 |
 | PreToolUse（Agent / SendMessage）、任意 | `src/agent-launch-guard.ts` | `agentLaunchGuard` が `true` のときだけ有効。サブエージェントへ指示を送る前に、送信本文を見せて確認する。 |
 | Notification | `src/notification.ts`（`notify`） | 確認待ちのときにデスクトップ通知（`terminal-notifier` が必要、macOS）。 |
 | Stop | `src/all-stop.ts` | ゲートの `checks` フェーズ、`src/feedback-stop-check.ts`、`stop` 通知を順に実行する。 |
@@ -40,7 +40,8 @@ flowchart LR
   T[PreToolUse: Bash / Edit / Write / MultiEdit] --> G[feedback-guard]
   T2["PreToolUse: Agent / SendMessage<br/>(agentLaunchGuard = true)"] --> AL[agent-launch-guard]
   E[PostToolUse] --> R[record-changes]
-  R --> S[stop-test-gate: rules]
+  R --> PE[feedback-post-edit]
+  PE --> S[stop-test-gate: rules]
   S --> SG[gate]
   X[Stop] --> A[all-stop]
   A --> C[stop-test-gate: checks]

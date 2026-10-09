@@ -57,9 +57,9 @@ when_exists: ['go.mod']      # 任意。この glob が存在するプロジェ�
 
 ### enforce（count に応じた強制力）
 
-hook（`src/feedback-guard.ts` / `src/feedback-stop-check.ts`）が実際にルールを
-検知・強制できる場合は、frontmatter に `enforce:` を追記できる。`src/feedback-rules.ts`
-がこれを読み、PreToolUse（Bash / Edit・Write・MultiEdit）と Stop で評価する。
+hook（`src/feedback-guard.ts` / `src/feedback-post-edit.ts` / `src/feedback-stop-check.ts`）が
+実際にルールを検知・強制できる場合は、frontmatter に `enforce:` を追記できる。`src/feedback-rules.ts`
+がこれを読み、PreToolUse（Bash / Edit・Write・MultiEdit）・PostToolUse（Edit・Write・MultiEdit）・Stop で評価する。
 
 ```yaml
 enforce:
@@ -83,6 +83,19 @@ enforce:
                              # 別ツリーのテストを拾う）。{stem} と {dir}（プロジェクト相対
                              # ディレクトリ）を展開する。absent_sibling とは OR
 
+  - event: post_edit         # PostToolUse(Edit|Write|MultiEdit) で、編集後のファイル全体を検査
+                             # （pre_edit は差分しか見ないので「console.log を残さない」のような
+                             # 編集後の状態の検査はこちらを使う）
+    path: 'glob'             # 必須。file_path（プロジェクト相対）にマッチ
+    exclude_path: 'glob'     # 任意。文字列または配列。マッチしたら検査対象外
+    when: '正規表現'          # 任意。編集後のファイル内容（ディスク上の全文）に対して（m フラグ）
+    unless: '正規表現'        # 任意。これにマッチするなら違反ではない
+    check: 'shell cmd'       # 任意。$FILE に絶対パス、cwd はそのファイルのルート。非0終了で違反
+                             # when と check の少なくとも一方が必要（どちらも無い要素は無視）。
+                             # 両方あれば AND（when がマッチし、かつ check が非0）
+    message: '...'
+    severity: block          # 任意。省略時は count から自動決定
+
   - event: stop_check        # Stop 時、そのセッションの変更ファイルを検査
     changed: 'glob'          # 必須
     check: 'shell cmd'       # 任意。$FILE に該当ファイルパスが入る。非0で違反
@@ -93,17 +106,19 @@ enforce:
 glob は `*` が `/` を跨がない、`**` が跨ぐ、`{a,b}` 展開に対応する（`src/glob.ts`
 の `globToRegex` と同じ挙動）。
 
-`severity` を省略した場合、`count` から自動決定される（`event` が `stop_check` かどうかで
-count 3・4 の扱いが変わる）。
+`severity` を省略した場合、`count` から自動決定される（`event` が `stop_check` / `post_edit`
+かどうかで count 3・4 の扱いが変わる）。
 
-| count | pre_bash / pre_edit | stop_check |
-| ----- | ------------------- | ---------- |
-| >= 5  | `deny`              | `deny`     |
-| 3〜4  | `ask`               | `block`    |
-| 1〜2  | `warn`              | `warn`     |
+| count | pre_bash / pre_edit | stop_check / post_edit |
+| ----- | ------------------- | ---------------------- |
+| >= 5  | `deny`              | `deny`                 |
+| 3〜4  | `ask`               | `block`                |
+| 1〜2  | `warn`              | `warn`                 |
 
-- `deny` / `block`：ツール呼び出しを止める（PreToolUse は `permissionDecision: deny`、Stop は exit 2）
-- `ask`：ユーザーに確認を求める（PreToolUse `permissionDecision: ask`）
+- `deny` / `block`：ツール呼び出しを止める（PreToolUse は `permissionDecision: deny`、Stop は exit 2、
+  PostToolUse（`post_edit`）は `decision: block` でフィードバックを返して修正を促す）
+- `ask`：ユーザーに確認を求める（PreToolUse `permissionDecision: ask`。PostToolUse には ask が無いので
+  `post_edit` で明示した場合は `block` 扱い）
 - `warn`：stderr に警告を出すのみで、処理は継続する
 
 違反は `~/.claude/feedback/.violations.jsonl` に追記される（`count` 自体は書き換えない）。
