@@ -2,6 +2,7 @@ import type { Engine, HookEvent, HookResult, Register } from 'claude-code'
 import { agentLaunchGuard } from './agent-launch-guard.ts'
 import { allStop } from './all-stop.ts'
 import { bashChanges, bashStarted } from './bash-changes.ts'
+import { correctCommand } from './correct.ts'
 import { createIo } from './engine-io.ts'
 import { feedbackGuard } from './feedback-guard.ts'
 import { feedbackInject } from './feedback-inject.ts'
@@ -77,6 +78,22 @@ async function withNext(next: (e: HookEvent) => Promise<HookResult>, e: HookEven
 }
 
 export const register: Register = (on, options) => {
+  // /correct: feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する。
+  on('session.start', async ($, e, next) => {
+    try {
+      await $.command.register({
+        name: 'correct',
+        description: 'feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する',
+        argumentHint: '[--window 30d] [--min 2] [apply]',
+      })
+    } catch {
+      // コマンド API の無いエンジンでもセッション開始は止めない。
+    }
+    return next(e)
+  })
+
+  on('command.run', { command: 'correct' }, async ($, e) => correctCommand(await createIo($), String(e.args ?? '')))
+
   on('classic.SessionStart', async ($, e, next) => {
     const mine = await runSteps($, 'SessionStart', [(io) => resetGate(io, e)])
     return withNext(next, e, mine)

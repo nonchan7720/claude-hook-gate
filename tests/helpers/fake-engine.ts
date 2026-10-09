@@ -20,6 +20,8 @@ export type FakeEngineOptions = {
   runLog?: string[][]
   /** argv[0] がこの一覧にあるコマンドは実行せず、記録だけして失敗扱いで返す。 */
   stubCommands?: string[]
+  /** $.command.register に渡された引数を順に記録する。 */
+  commandLog?: Array<{ name: string; description: string }>
 }
 
 export type FakeEngine = {
@@ -78,6 +80,11 @@ export function makeEngine(opts: FakeEngineOptions): FakeEngine {
         const r = await io.run(argv, init)
         if (r.error !== undefined) throw new Error(r.error)
         return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr }
+      },
+    },
+    command: {
+      register: async (command) => {
+        opts.commandLog?.push({ name: command.name, description: command.description })
       },
     },
   }
