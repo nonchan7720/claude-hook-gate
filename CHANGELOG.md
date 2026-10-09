@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.4.0...v0.4.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* share gate runs across agents whose target files differ ([#19](https://github.com/nonchan7720/claude-hook-gate/issues/19)) ([4990708](https://github.com/nonchan7720/claude-hook-gate/commit/4990708a48376318bf096af191eb08f463dd110a))
+
 ## [0.4.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.3.1...v0.4.0) (2026-10-09)
 
 
