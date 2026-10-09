@@ -8,6 +8,7 @@ import {
   evalPreEdit,
   evalStopCheck,
   getChangedFiles,
+  isRuleActive,
   listRules,
   loadRule,
   logViolation,
@@ -25,7 +26,7 @@ import { makeIo, rmTree, tmpDir } from './helpers/node-io.ts'
 const REAL_FEEDBACK_DIR = path.join(os.homedir(), '.claude', 'feedback')
 const hasRealDir = fs.existsSync(REAL_FEEDBACK_DIR)
 
-const rule = (name: string, count: number, ...enforce: Dict[]): Rule => ({ name, count, description: '', enforce, path: '' })
+const rule = (name: string, count: number, ...enforce: Dict[]): Rule => ({ name, count, description: '', enforce, path: '', projects: [], whenExists: [] })
 const ioFor = (projectDir: string, feedbackDir = projectDir) => makeIo({ projectDir, env: { CLAUDE_FEEDBACK_DIR: feedbackDir } })
 
 // ~/.claude/feedback/ は利用者ごとの実ファイルなので、CI など存在しない環境ではスキップする。
@@ -300,6 +301,129 @@ describe('loadRule / listRules', () => {
       const rules = await listRules(ioFor(projectDir, projectFeedback))
       expect(rules.map((r) => r.name)).toEqual(['a'])
     })
+  })
+})
+
+describe('expires / projects / when_exists', () => {
+  let tmp: string
+  beforeEach(() => {
+    tmp = tmpDir()
+  })
+  afterEach(() => rmTree(tmp))
+
+  /** グローバル用ディレクトリに name のルールを書き、listRules（マージ経路）で返る名前を返す。 */
+  const names = async (extra: string[], opts: { projectDir?: string; now?: number; home?: string } = {}) => {
+    const globalDir = path.join(tmp, 'global')
+    fs.mkdirSync(globalDir, { recursive: true })
+    fs.writeFileSync(path.join(globalDir, 'r.md'), `---\nname: r\ndescription: d\ntype: feedback\ncount: 3\n${extra.join('\n')}\n---\nbody\n`)
+    const projectDir = opts.projectDir ?? path.join(tmp, 'project')
+    fs.mkdirSync(projectDir, { recursive: true })
+    const now = opts.now
+    const io = makeIo({
+      projectDir,
+      env: { CLAUDE_FEEDBACK_DIR: globalDir, ...(opts.home ? { HOME: opts.home } : {}) },
+      ...(now === undefined ? {} : { now: () => now }),
+    })
+    return (await listRules(io)).map((r) => r.name)
+  }
+  const T = Date.parse('2026-06-15T12:00:00Z')
+
+  test('loadRule reads the three keys', async () => {
+    const p = path.join(tmp, 'x.md')
+    fs.writeFileSync(p, "---\nname: x\nexpires: 2026-12-31T10:00:00Z\nprojects: '~/a/**'\nwhen_exists: ['go.mod', '**/*.go']\n---\n")
+    const r = await loadRule(ioFor(tmp), p)
+    expect(r?.expires).toBe(Date.parse('2026-12-31T10:00:00Z'))
+    expect(r?.projects).toEqual(['~/a/**'])
+    expect(r?.whenExists).toEqual(['go.mod', '**/*.go'])
+  })
+
+  test('expires in the future is active, in the past is excluded', async () => {
+    expect(await names(['expires: 2026-12-31T00:00:00Z'], { now: T })).toEqual(['r'])
+    expect(await names(['expires: 2026-01-01T00:00:00Z'], { now: T })).toEqual([])
+  })
+
+  test('YYYY-MM-DD is valid until the end of that day', async () => {
+    expect(await names(['expires: 2026-06-15'], { now: Date.parse('2026-06-15T23:59:59.999Z') })).toEqual(['r'])
+    expect(await names(['expires: 2026-06-15'], { now: Date.parse('2026-06-16T00:00:00Z') })).toEqual([])
+    // 引用符付き（文字列）でも同じ
+    expect(await names(["expires: '2026-06-15'"], { now: Date.parse('2026-06-15T23:59:59.999Z') })).toEqual(['r'])
+  })
+
+  test('unparsable expires is treated as no expiry', async () => {
+    expect(await names(['expires: not-a-date'], { now: T })).toEqual(['r'])
+  })
+
+  test('projects: matches the project directory, excludes otherwise', async () => {
+    const projectDir = path.join(tmp, 'src', 'myorg', 'app')
+    expect(await names([`projects: ['${tmp}/src/myorg/**']`], { projectDir })).toEqual(['r'])
+    expect(await names([`projects: '${tmp}/src/myorg/**'`], { projectDir })).toEqual(['r'])
+    expect(await names([`projects: ['${tmp}/other/**']`], { projectDir })).toEqual([])
+    expect(await names([`projects: ['${tmp}/other/**', '${tmp}/src/**']`], { projectDir })).toEqual(['r'])
+    expect(await names(['projects: []'], { projectDir })).toEqual(['r'])
+  })
+
+  test('projects: leading ~ is expanded to HOME', async () => {
+    const projectDir = path.join(tmp, 'src', 'myorg', 'app')
+    expect(await names(["projects: ['~/src/myorg/**']"], { projectDir, home: tmp })).toEqual(['r'])
+    expect(await names(["projects: ['~/src/another/**']"], { projectDir, home: tmp })).toEqual([])
+  })
+
+  test('when_exists: active only if one of the globs exists', async () => {
+    const projectDir = path.join(tmp, 'project')
+    fs.mkdirSync(projectDir, { recursive: true })
+    expect(await names(["when_exists: ['go.mod']"], { projectDir })).toEqual([])
+    fs.writeFileSync(path.join(projectDir, 'go.mod'), 'module x\n')
+    expect(await names(["when_exists: ['go.mod']"], { projectDir })).toEqual(['r'])
+    expect(await names(["when_exists: 'go.mod'"], { projectDir })).toEqual(['r'])
+    expect(await names(["when_exists: ['Cargo.toml', 'go.mod']"], { projectDir })).toEqual(['r'])
+    expect(await names(["when_exists: ['Cargo.toml']"], { projectDir })).toEqual([])
+  })
+
+  test('when_exists: recursive pattern', async () => {
+    const projectDir = path.join(tmp, 'project')
+    expect(await names(["when_exists: ['**/*.go']"], { projectDir })).toEqual([])
+    fs.mkdirSync(path.join(projectDir, 'cmd', 'app'), { recursive: true })
+    fs.writeFileSync(path.join(projectDir, 'cmd', 'app', 'main.go'), 'package main\n')
+    expect(await names(["when_exists: ['**/*.go']"], { projectDir })).toEqual(['r'])
+  })
+
+  test('all three conditions must hold', async () => {
+    const projectDir = path.join(tmp, 'project')
+    fs.mkdirSync(projectDir, { recursive: true })
+    fs.writeFileSync(path.join(projectDir, 'go.mod'), 'module x\n')
+    const ok = [`projects: ['${tmp}/**']`, "when_exists: ['go.mod']", 'expires: 2026-12-31']
+    expect(await names(ok, { projectDir, now: T })).toEqual(['r'])
+    expect(await names(ok, { projectDir, now: Date.parse('2027-01-01T00:00:00Z') })).toEqual([])
+  })
+
+  test('isRuleActive takes an explicit projectDir', async () => {
+    const dir = path.join(tmp, 'other')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'go.mod'), '')
+    const r: Rule = { ...rule('r', 3), whenExists: ['go.mod'] }
+    const io = ioFor(path.join(tmp, 'project'))
+    expect(await isRuleActive(io, r)).toBe(false)
+    expect(await isRuleActive(io, r, dir)).toBe(true)
+  })
+
+  test('explicit feedbackDirPath returns rules even when expired', async () => {
+    const dir = path.join(tmp, 'explicit')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'r.md'), '---\nname: r\ncount: 3\nexpires: 2020-01-01\nprojects: [/nowhere/**]\n---\n')
+    const io = makeIo({ projectDir: tmp, env: { CLAUDE_FEEDBACK_DIR: dir }, now: () => T })
+    expect((await listRules(io, dir)).map((r) => r.name)).toEqual(['r'])
+  })
+
+  test('expired project rule does not resurrect the global rule of the same name', async () => {
+    const globalDir = path.join(tmp, 'global')
+    const projectDir = path.join(tmp, 'project')
+    const projectFeedback = projectFeedbackDir(makeIo({ projectDir }))
+    fs.mkdirSync(globalDir, { recursive: true })
+    fs.mkdirSync(projectFeedback, { recursive: true })
+    fs.writeFileSync(path.join(globalDir, 'dup.md'), '---\nname: dup\ncount: 3\n---\n')
+    fs.writeFileSync(path.join(projectFeedback, 'dup.md'), '---\nname: dup\ncount: 5\nexpires: 2020-01-01\n---\n')
+    const io = makeIo({ projectDir, env: { CLAUDE_FEEDBACK_DIR: globalDir }, now: () => T })
+    expect(await listRules(io)).toEqual([])
   })
 })
 

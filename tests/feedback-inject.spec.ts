@@ -6,8 +6,8 @@ import { makeIo, withTmp } from './helpers/node-io.ts'
 
 const runInject = (feedbackDir: string) => feedbackInject(makeIo({ projectDir: feedbackDir, env: { CLAUDE_FEEDBACK_DIR: feedbackDir } }))
 
-function writeRule(dir: string, name: string, count: number, description = 'desc'): void {
-  const content = `---\nname: ${name}\ndescription: ${description}\ntype: feedback\ncount: ${count}\n---\n\n${name} の本文の第一段落。ここが注入される。\n\n**Why:** 理由の説明。\n`
+function writeRule(dir: string, name: string, count: number, description = 'desc', extra = ''): void {
+  const content = `---\nname: ${name}\ndescription: ${description}\ntype: feedback\ncount: ${count}\n${extra}---\n\n${name} の本文の第一段落。ここが注入される。\n\n**Why:** 理由の説明。\n`
   fs.writeFileSync(path.join(dir, `${name}.md`), content, 'utf8')
 }
 
@@ -70,6 +70,15 @@ describe('feedback-inject', () => {
       expect(r.exitCode).toBe(0)
       expect(r.stdout).toContain('proj_high')
       expect(r.stdout).not.toContain('proj_low')
+    }))
+
+  test('expired rules are not injected', () =>
+    withTmp(async (tmp) => {
+      writeRule(tmp, 'fresh', 4, 'desc', 'expires: 2999-12-31\n')
+      writeRule(tmp, 'stale', 4, 'desc', 'expires: 2020-01-01\n')
+      const r = await runInject(tmp)
+      expect(r.stdout).toContain('fresh')
+      expect(r.stdout).not.toContain('stale')
     }))
 
   test('never fails hard when the feedback directory does not exist', async () => {
