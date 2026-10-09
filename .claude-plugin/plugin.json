@@ -1,6 +1,6 @@
 {
   "name": "feedback-gate",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Claude Code hooks that inject feedback rules, enforce them on tool calls and at stop time, and run per-project quality gates defined in .claude/gate.yaml",
   "author": {
     "name": "nonchan7720"
