@@ -6493,6 +6493,9 @@ function feedbackDir(io) {
     return override;
   return join(io.env.HOME || "~", ".claude", "feedback");
 }
+function projectFeedbackDir(io, projectDir) {
+  return join(projectDir || io.projectDir || io.cwd, ".claude", "feedback");
+}
 var violationsLogPath = (io) => join(feedbackDir(io), ".violations.jsonl");
 var FRONTMATTER_RE = /^---\s*\n([\s\S]*?\n)---\s*\n?/;
 var BODY_STOP_RE = /\*\*(Why|言い訳|How to apply)[:：]?\*\*/;
@@ -6529,8 +6532,7 @@ async function loadBodyIntro(io, path) {
 
 `)[0] ?? "").trim();
 }
-async function listRules(io, feedbackDirPath) {
-  const d = feedbackDirPath || feedbackDir(io);
+async function listRulesIn(io, d) {
   const rules = [];
   const names = (await io.list(d)).map((e) => e.name).sort();
   for (const name of names) {
@@ -6541,6 +6543,18 @@ async function listRules(io, feedbackDirPath) {
       rules.push(rule);
   }
   return rules;
+}
+async function listRules(io, feedbackDirPath) {
+  if (feedbackDirPath)
+    return listRulesIn(io, feedbackDirPath);
+  const globalDir = feedbackDir(io);
+  const projectDir = projectFeedbackDir(io);
+  const globalRules = await listRulesIn(io, globalDir);
+  if (projectDir === globalDir)
+    return globalRules;
+  const projectRules = await listRulesIn(io, projectDir);
+  const overridden = new Set(projectRules.map((r) => r.name));
+  return [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules];
 }
 function resolveSeverity(count, explicit, event) {
   if (truthy(explicit))

@@ -12,6 +12,7 @@ import {
   loadRule,
   logViolation,
   looksLikeTestFile,
+  projectFeedbackDir,
   type Rule,
   resolveSeverity,
 } from '../src/feedback-rules.ts'
@@ -250,6 +251,55 @@ describe('loadRule / listRules', () => {
     write('rules.md', '# no frontmatter\n')
     const names = (await listRules(ioFor(tmp))).map((r) => r.name).sort()
     expect(names).toEqual(['a', 'b'])
+  })
+
+  describe('project .claude/feedback', () => {
+    const ruleText = (name: string, count: number) => `---\nname: ${name}\ndescription: d\ntype: feedback\ncount: ${count}\n---\nbody\n`
+    const setup = () => {
+      const globalDir = path.join(tmp, 'global')
+      const projectDir = path.join(tmp, 'project')
+      const projectFeedback = projectFeedbackDir(makeIo({ projectDir }))
+      fs.mkdirSync(globalDir, { recursive: true })
+      fs.mkdirSync(projectFeedback, { recursive: true })
+      return { globalDir, projectDir, projectFeedback, io: ioFor(projectDir, globalDir) }
+    }
+
+    test('reads project .claude/feedback/*.md in addition to global', async () => {
+      const { globalDir, projectFeedback, io } = setup()
+      fs.writeFileSync(path.join(globalDir, 'g.md'), ruleText('g', 3))
+      fs.writeFileSync(path.join(projectFeedback, 'p.md'), ruleText('p', 4))
+      const rules = await listRules(io)
+      expect(rules.map((r) => r.name)).toEqual(['g', 'p'])
+    })
+
+    test('project rule wins over global rule with the same name', async () => {
+      const { globalDir, projectFeedback, io } = setup()
+      fs.writeFileSync(path.join(globalDir, 'dup.md'), ruleText('dup', 3))
+      fs.writeFileSync(path.join(globalDir, 'only-g.md'), ruleText('only-g', 3))
+      fs.writeFileSync(path.join(projectFeedback, 'dup.md'), ruleText('dup', 5))
+      const rules = await listRules(io)
+      const dups = rules.filter((r) => r.name === 'dup')
+      expect(dups).toHaveLength(1)
+      expect(dups[0]?.count).toBe(5)
+      expect(dups[0]?.path).toBe(path.join(projectFeedback, 'dup.md'))
+      expect(rules.map((r) => r.name)).toEqual(['only-g', 'dup'])
+    })
+
+    test('explicit feedbackDirPath does not read the project directory', async () => {
+      const { globalDir, projectFeedback, io } = setup()
+      fs.writeFileSync(path.join(globalDir, 'g.md'), ruleText('g', 3))
+      fs.writeFileSync(path.join(projectFeedback, 'p.md'), ruleText('p', 3))
+      expect((await listRules(io, globalDir)).map((r) => r.name)).toEqual(['g'])
+    })
+
+    test('same directory for global and project is read only once', async () => {
+      const projectDir = path.join(tmp, 'same')
+      const projectFeedback = projectFeedbackDir(makeIo({ projectDir }))
+      fs.mkdirSync(projectFeedback, { recursive: true })
+      fs.writeFileSync(path.join(projectFeedback, 'a.md'), ruleText('a', 3))
+      const rules = await listRules(ioFor(projectDir, projectFeedback))
+      expect(rules.map((r) => r.name)).toEqual(['a'])
+    })
   })
 })
 
