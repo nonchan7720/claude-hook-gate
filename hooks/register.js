@@ -6500,6 +6500,24 @@ var violationsLogPath = (io) => join(feedbackDir(io), ".violations.jsonl");
 var FRONTMATTER_RE = /^---\s*\n([\s\S]*?\n)---\s*\n?/;
 var BODY_STOP_RE = /\*\*(Why|言い訳|How to apply)[:：]?\*\*/;
 var loadYamlText = (text) => parseYaml(text);
+var DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
+var DAY_MS = 86400000;
+function parseExpires(v) {
+  if (v instanceof Date) {
+    const t = v.getTime();
+    if (Number.isNaN(t))
+      return;
+    return t % DAY_MS === 0 ? t + DAY_MS - 1 : t;
+  }
+  if (typeof v !== "string")
+    return;
+  const text = v.trim();
+  const t = Date.parse(text);
+  if (Number.isNaN(t))
+    return;
+  return DATE_ONLY_RE.test(text) ? t + DAY_MS - 1 : t;
+}
+var stringList = (v) => asList(v).filter((x) => typeof x === "string");
 async function loadRule(io, path) {
   const content = await io.readFile(path);
   if (content === undefined)
@@ -6515,8 +6533,43 @@ async function loadRule(io, path) {
     description: truthy(data.description) ? String(data.description) : "",
     count: toCount(data.count),
     enforce: truthy(data.enforce) ? data.enforce : [],
-    path
+    path,
+    expires: parseExpires(data.expires),
+    projects: stringList(data.projects),
+    whenExists: stringList(data.when_exists)
   };
+}
+function expandTilde(io, pattern) {
+  const home = io.env.HOME;
+  if (!home || pattern !== "~" && !pattern.startsWith("~/"))
+    return pattern;
+  return join(home, pattern.slice(2));
+}
+async function isRuleActive(io, rule, projectDir) {
+  if (rule.expires !== undefined && await io.now() > rule.expires)
+    return false;
+  const dir = projectDir || io.projectDir || io.cwd;
+  if (rule.projects.length > 0) {
+    const rxs = compileGlobs(rule.projects.map((p) => expandTilde(io, p)));
+    if (!rxs.some((rx) => rx.test(dir)))
+      return false;
+  }
+  if (rule.whenExists.length > 0) {
+    let found = false;
+    for (const pattern of rule.whenExists) {
+      for (const expanded of expandBraces(pattern)) {
+        if (await globExists(io, join(dir, expanded))) {
+          found = true;
+          break;
+        }
+      }
+      if (found)
+        break;
+    }
+    if (!found)
+      return false;
+  }
+  return true;
 }
 async function loadBodyIntro(io, path) {
   const content = await io.readFile(path);
@@ -6550,11 +6603,17 @@ async function listRules(io, feedbackDirPath) {
   const globalDir = feedbackDir(io);
   const projectDir = projectFeedbackDir(io);
   const globalRules = await listRulesIn(io, globalDir);
-  if (projectDir === globalDir)
-    return globalRules;
-  const projectRules = await listRulesIn(io, projectDir);
-  const overridden = new Set(projectRules.map((r) => r.name));
-  return [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules];
+  let merged = globalRules;
+  if (projectDir !== globalDir) {
+    const projectRules = await listRulesIn(io, projectDir);
+    const overridden = new Set(projectRules.map((r) => r.name));
+    merged = [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules];
+  }
+  const active = [];
+  for (const r of merged)
+    if (await isRuleActive(io, r))
+      active.push(r);
+  return active;
 }
 function resolveSeverity(count, explicit, event) {
   if (truthy(explicit))
@@ -8845,7 +8904,7 @@ var STATE_FILES = [
   ["feedback_gate_attempts", ".txt"],
   ["summary", ".txt"]
 ];
-var DAY_MS = 1440 * 60 * 1000;
+var DAY_MS2 = 1440 * 60 * 1000;
 var globMatch = (name, prefix, suffix) => name.length >= prefix.length + suffix.length && name.startsWith(prefix) && name.endsWith(suffix);
 async function resetGate(io, payload) {
   const projectDir = io.projectDir || io.cwd;
@@ -8877,7 +8936,7 @@ async function resetGate(io, payload) {
   for (const dir of [stateDir, claudeDir]) {
     const old = [];
     for (const e of await io.list(dir)) {
-      if (e.kind !== "file" || e.mtimeMs >= now - DAY_MS)
+      if (e.kind !== "file" || e.mtimeMs >= now - DAY_MS2)
         continue;
       if (STATE_FILES.some(([base, ext]) => globMatch(e.name, `${base}.`, ext))) {
         old.push(join(dir, e.name));
@@ -8890,7 +8949,7 @@ async function resetGate(io, payload) {
       if (e.kind !== "dir")
         continue;
       const st = await io.stat(join(logRoot, e.name));
-      if (st && st.mtimeMs < now - DAY_MS)
+      if (st && st.mtimeMs < now - DAY_MS2)
         await io.removeTree(join(logRoot, e.name));
     }
   }

@@ -47,6 +47,18 @@
 //   count >= 5   -> deny
 //   count 3, 4   -> ask（pre_bash / pre_edit） / block（stop_check）
 //   count 1, 2   -> warn
+//
+// 有効期限と適用スコープ（frontmatter の任意キー。3つすべてを満たしたときだけルールが有効になる）
+//
+// expires: 2026-12-31        # 任意。この日付（YYYY-MM-DD ならその日の終わり。UTC）または ISO 8601 日時を
+//                            # 過ぎたらルールは無効。パースできない値は無視（無期限扱い）
+// projects: ['~/src/myorg/**']  # 任意。文字列または配列。プロジェクトディレクトリの絶対パスにマッチする glob。
+//                            # 先頭の ~ は HOME に展開。1つでもマッチすれば適用。未指定・空なら制限なし
+// when_exists: ['go.mod', '**/*.go']  # 任意。文字列または配列。プロジェクトルート相対の glob。
+//                            # 1つでも存在すれば適用。未指定・空なら制限なし
+//
+// このフィルタは listRules を feedbackDirPath 省略で呼んだとき（グローバル＋プロジェクトのマージ後）にだけ
+// かかる。ディレクトリを明示したときは無加工で返す。
 import { asList, compileGlobs, expandBraces, globExists } from './glob.ts'
 import type { Io } from './io.ts'
 import { parseYaml } from './load-yaml.ts'
@@ -60,6 +72,12 @@ export type Rule = {
   count: number
   enforce: Dict[]
   path: string
+  /** 有効期限（ミリ秒）。これより後は無効。未指定なら無期限。 */
+  expires?: number
+  /** プロジェクトディレクトリの絶対パスにマッチする glob（~ 展開前）。空なら制限なし。 */
+  projects: string[]
+  /** プロジェクトルート相対の glob。空なら制限なし。 */
+  whenExists: string[]
 }
 
 export type Violation = {
@@ -92,6 +110,30 @@ const BODY_STOP_RE = /\*\*(Why|言い訳|How to apply)[:：]?\*\*/
 /** frontmatter のテキスト（YAML のサブセット）を読む。 */
 export const loadYamlText = (text: string): unknown => parseYaml(text)
 
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/
+const DAY_MS = 86_400_000
+
+/**
+ * expires の値をミリ秒にする。YYYY-MM-DD はその日の 23:59:59.999（UTC）、それ以外は Date.parse で解釈する。
+ * パースできない値は undefined（無期限扱い）。YAML 1.1 では日付が Date に解決されるので、それも受ける
+ * （UTC 0 時ちょうどの Date は日付のみの指定とみなして日の終わりにする）。
+ */
+function parseExpires(v: unknown): number | undefined {
+  if (v instanceof Date) {
+    const t = v.getTime()
+    if (Number.isNaN(t)) return undefined
+    return t % DAY_MS === 0 ? t + DAY_MS - 1 : t
+  }
+  if (typeof v !== 'string') return undefined
+  const text = v.trim()
+  const t = Date.parse(text)
+  if (Number.isNaN(t)) return undefined
+  return DATE_ONLY_RE.test(text) ? t + DAY_MS - 1 : t
+}
+
+/** 文字列または配列を文字列だけのリストにそろえる。 */
+const stringList = (v: unknown): string[] => asList(v).filter((x): x is string => typeof x === 'string')
+
 /** 1つの feedback ファイルから frontmatter を読む。frontmatter が無ければ null（rules.md はこれで黙ってスキップされる）。 */
 export async function loadRule(io: Io, path: string): Promise<Rule | null> {
   const content = await io.readFile(path)
@@ -106,7 +148,44 @@ export async function loadRule(io: Io, path: string): Promise<Rule | null> {
     count: toCount(data.count),
     enforce: (truthy(data.enforce) ? data.enforce : []) as Dict[],
     path,
+    expires: parseExpires(data.expires),
+    projects: stringList(data.projects),
+    whenExists: stringList(data.when_exists),
   }
+}
+
+/** 先頭の ~ を HOME に展開する（HOME が無ければそのまま）。 */
+function expandTilde(io: Io, pattern: string): string {
+  const home = io.env.HOME
+  if (!home || (pattern !== '~' && !pattern.startsWith('~/'))) return pattern
+  return join(home, pattern.slice(2))
+}
+
+/**
+ * ルールが今のプロジェクトで有効か。expires / projects / when_exists の3つすべてを満たしたときだけ true。
+ * projectDir 省略時は io.projectDir（無ければ cwd）。
+ */
+export async function isRuleActive(io: Io, rule: Rule, projectDir?: string): Promise<boolean> {
+  if (rule.expires !== undefined && (await io.now()) > rule.expires) return false
+  const dir = projectDir || io.projectDir || io.cwd
+  if (rule.projects.length > 0) {
+    const rxs = compileGlobs(rule.projects.map((p) => expandTilde(io, p)))
+    if (!rxs.some((rx) => rx.test(dir))) return false
+  }
+  if (rule.whenExists.length > 0) {
+    let found = false
+    for (const pattern of rule.whenExists) {
+      for (const expanded of expandBraces(pattern)) {
+        if (await globExists(io, join(dir, expanded))) {
+          found = true
+          break
+        }
+      }
+      if (found) break
+    }
+    if (!found) return false
+  }
+  return true
 }
 
 /** ルール本文のうち、**Why:** / **言い訳:** / **How to apply:** より前の第1段落（最初の空行まで）を返す。 */
@@ -138,6 +217,8 @@ async function listRulesIn(io: Io, d: string): Promise<Rule[]> {
  * feedbackDirPath を明示したときはそのディレクトリだけを読む。省略時はグローバル (feedbackDir) と
  * プロジェクト (projectFeedbackDir) の両方を読んでマージし、同名 (name) のルールはプロジェクト側を優先する。
  * 返す順序はグローバル（上書きされたものを除く）→プロジェクト。
+ * マージ後に isRuleActive で絞る（プロジェクト側の同名ルールが期限切れ・対象外のとき、グローバル側が復活しないように）。
+ * feedbackDirPath を明示したときはフィルタせず無加工で返す。
  */
 export async function listRules(io: Io, feedbackDirPath?: string): Promise<Rule[]> {
   if (feedbackDirPath) return listRulesIn(io, feedbackDirPath)
@@ -145,10 +226,15 @@ export async function listRules(io: Io, feedbackDirPath?: string): Promise<Rule[
   const projectDir = projectFeedbackDir(io)
   const globalRules = await listRulesIn(io, globalDir)
   // 両方が同じパスを指す場合は一度しか読まない
-  if (projectDir === globalDir) return globalRules
-  const projectRules = await listRulesIn(io, projectDir)
-  const overridden = new Set(projectRules.map((r) => r.name))
-  return [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules]
+  let merged = globalRules
+  if (projectDir !== globalDir) {
+    const projectRules = await listRulesIn(io, projectDir)
+    const overridden = new Set(projectRules.map((r) => r.name))
+    merged = [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules]
+  }
+  const active: Rule[] = []
+  for (const r of merged) if (await isRuleActive(io, r)) active.push(r)
+  return active
 }
 
 // ---- severity 解決 ----
