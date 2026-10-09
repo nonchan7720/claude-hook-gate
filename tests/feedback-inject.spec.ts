@@ -57,6 +57,21 @@ describe('feedback-inject', () => {
       expect(r.stdout.trim()).toBe('')
     }))
 
+  test('injects count >= 3 rules from the project .claude/feedback directory', () =>
+    withTmp(async (tmp) => {
+      const globalDir = path.join(tmp, 'global')
+      const projectDir = path.join(tmp, 'project')
+      const projectFeedback = path.join(projectDir, '.claude', 'feedback')
+      fs.mkdirSync(globalDir, { recursive: true })
+      fs.mkdirSync(projectFeedback, { recursive: true })
+      writeRule(projectFeedback, 'proj_high', 4)
+      writeRule(projectFeedback, 'proj_low', 1)
+      const r = await feedbackInject(makeIo({ projectDir, env: { CLAUDE_FEEDBACK_DIR: globalDir } }))
+      expect(r.exitCode).toBe(0)
+      expect(r.stdout).toContain('proj_high')
+      expect(r.stdout).not.toContain('proj_low')
+    }))
+
   test('never fails hard when the feedback directory does not exist', async () => {
     const r = await runInject('/no/such/feedback/dir')
     expect(r.exitCode).toBe(0)

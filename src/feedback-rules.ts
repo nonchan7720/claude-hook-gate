@@ -1,6 +1,7 @@
 // feedback ルール共通モジュール。
 //
-// ~/.claude/feedback/*.md の frontmatter を全件読み、count に応じた強制力
+// グローバル (~/.claude/feedback/*.md) とプロジェクト (<projectDir>/.claude/feedback/*.md) の
+// 両ディレクトリから frontmatter を全件読み（同名はプロジェクト側が優先）、count に応じた強制力
 // （severity: deny / ask（pre_*）・block（stop_check） / warn）を解決する。
 // PreToolUse hook (feedback-guard.ts) / Stop hook (feedback-stop-check.ts) /
 // UserPromptSubmit hook (feedback-inject.ts) から使う共通ロジックのみを持つ。
@@ -77,6 +78,11 @@ export function feedbackDir(io: Io): string {
   return join(io.env.HOME || '~', '.claude', 'feedback')
 }
 
+/** プロジェクト固有の feedback ディレクトリ（<projectDir>/.claude/feedback）を返す。 */
+export function projectFeedbackDir(io: Io, projectDir?: string): string {
+  return join(projectDir || io.projectDir || io.cwd, '.claude', 'feedback')
+}
+
 export const violationsLogPath = (io: Io): string => join(feedbackDir(io), '.violations.jsonl')
 
 // ---- frontmatter 読み込み ----
@@ -115,9 +121,8 @@ export async function loadBodyIntro(io: Io, path: string): Promise<string> {
   return (lead.split('\n\n')[0] ?? '').trim()
 }
 
-/** feedback ディレクトリ配下の *.md を全件走査し、frontmatter を持つものだけ返す。 */
-export async function listRules(io: Io, feedbackDirPath?: string): Promise<Rule[]> {
-  const d = feedbackDirPath || feedbackDir(io)
+/** 1つのディレクトリ直下の *.md を名前順に走査し、frontmatter を持つものだけ返す。 */
+async function listRulesIn(io: Io, d: string): Promise<Rule[]> {
   const rules: Rule[] = []
   const names = (await io.list(d)).map((e) => e.name).sort()
   for (const name of names) {
@@ -126,6 +131,24 @@ export async function listRules(io: Io, feedbackDirPath?: string): Promise<Rule[
     if (rule) rules.push(rule)
   }
   return rules
+}
+
+/**
+ * feedback ルールを全件読み、frontmatter を持つものだけ返す。
+ * feedbackDirPath を明示したときはそのディレクトリだけを読む。省略時はグローバル (feedbackDir) と
+ * プロジェクト (projectFeedbackDir) の両方を読んでマージし、同名 (name) のルールはプロジェクト側を優先する。
+ * 返す順序はグローバル（上書きされたものを除く）→プロジェクト。
+ */
+export async function listRules(io: Io, feedbackDirPath?: string): Promise<Rule[]> {
+  if (feedbackDirPath) return listRulesIn(io, feedbackDirPath)
+  const globalDir = feedbackDir(io)
+  const projectDir = projectFeedbackDir(io)
+  const globalRules = await listRulesIn(io, globalDir)
+  // 両方が同じパスを指す場合は一度しか読まない
+  if (projectDir === globalDir) return globalRules
+  const projectRules = await listRulesIn(io, projectDir)
+  const overridden = new Set(projectRules.map((r) => r.name))
+  return [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules]
 }
 
 // ---- severity 解決 ----
