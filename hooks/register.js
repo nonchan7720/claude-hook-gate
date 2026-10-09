@@ -8651,6 +8651,100 @@ async function allStop(io, payload) {
   return { exitCode: 0, stdout, stderr };
 }
 
+// src/bash-changes.ts
+var SKIP_COMMAND_RE = /\bgit\b[^|;&\n]*\b(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/;
+var MTIME_SLACK_MS = 2000;
+var STATE_DIR = ".gate-status";
+var stateIdOf = (payload) => {
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  const agentId = jqStr(payload.agent_id);
+  return agentId ? `${sessionId}--${agentId}` : sessionId;
+};
+var startedPath = (projectDir, stateId) => join(projectDir, ".claude", STATE_DIR, `bash_started.${stateId}.json`);
+async function bashStarted(io, payload) {
+  try {
+    const projectDir = io.projectDir || io.cwd;
+    if (!await io.exists(join(projectDir, ".claude", "gate.yaml")))
+      return ok();
+    const started = await io.now();
+    await io.writeFile(startedPath(projectDir, stateIdOf(payload)), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}
+`);
+  } catch {}
+  return ok();
+}
+async function recordBashChanges(io, payload) {
+  try {
+    const projectDir = io.projectDir || io.cwd;
+    if (!await io.exists(join(projectDir, ".claude", "gate.yaml")))
+      return [];
+    const stateId = stateIdOf(payload);
+    const startedFile = startedPath(projectDir, stateId);
+    const raw = await io.readFile(startedFile);
+    if (raw === undefined)
+      return [];
+    try {
+      return await record(io, projectDir, stateId, raw, payload);
+    } finally {
+      await io.removeFiles([startedFile]);
+    }
+  } catch {
+    return [];
+  }
+}
+async function record(io, projectDir, stateId, raw, payload) {
+  let saved;
+  try {
+    saved = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  if (!isDict(saved) || typeof saved.started !== "number")
+    return [];
+  if (jqStr(saved.tool_use_id) !== jqStr(payload.tool_use_id))
+    return [];
+  const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
+  if (SKIP_COMMAND_RE.test(command))
+    return [];
+  const cwd = jqStr(payload.cwd) || io.cwd;
+  const top = await io.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 });
+  if (top.exitCode !== 0)
+    return [];
+  const root = top.stdout.replace(/\n+$/, "");
+  if (root === "")
+    return [];
+  const listed = await io.run(["git", "-C", cwd, "ls-files", "-z", "--modified", "--others", "--exclude-standard", "--full-name"], { timeoutMs: 1e4 });
+  if (listed.exitCode !== 0)
+    return [];
+  const threshold = saved.started - MTIME_SLACK_MS;
+  const stateDir = join(projectDir, ".claude", STATE_DIR);
+  const picked = [];
+  for (const rel of new Set(listed.stdout.split("\x00").filter((s) => s !== ""))) {
+    const abs = join(root, rel);
+    if (abs.startsWith(`${stateDir}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
+      continue;
+    const st = await io.stat(abs);
+    if (st?.kind === "file" && st.mtimeMs >= threshold)
+      picked.push(abs);
+  }
+  if (picked.length === 0)
+    return [];
+  const memo = join(stateDir, `changed_files.${stateId}.txt`);
+  const existing = await io.readFile(memo) ?? "";
+  const have = new Set(existing.split(`
+`));
+  const added = picked.filter((p) => !have.has(p));
+  if (added.length > 0)
+    await io.writeFile(memo, `${existing}${added.map((p) => `${p}
+`).join("")}`);
+  return added;
+}
+async function bashChanges(io, payload) {
+  const recorded = await recordBashChanges(io, payload);
+  if (recorded.length === 0)
+    return ok();
+  return stopTestGate(io, "rules", payload);
+}
+
 // src/engine-io.ts
 var errorText = (e) => e instanceof Error ? e.message : String(e);
 async function readEnv($) {
@@ -8994,6 +9088,7 @@ var STATE_FILES = [
   ["gate_pending_checks", ".json"],
   ["gate_trace", ".jsonl"],
   ["gate_deferred", ".json"],
+  ["bash_started", ".json"],
   ["feedback_gate_attempts", ".txt"],
   ["summary", ".txt"]
 ];
@@ -9134,7 +9229,7 @@ export const register = (on, options) => {
     const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
     if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool))
       return next(e);
-    const { tool: _tool, tool_use_id, agentId: _agentId, ...toolInput } = e;
+    const { tool: _tool, tool_use_id, agentId, ...toolInput } = e;
     const payload = {
       session_id: await $.session.id(),
       cwd: await $.session.cwd(),
@@ -9143,13 +9238,20 @@ export const register = (on, options) => {
       tool_input: toolInput,
       tool_use_id
     };
+    if (typeof agentId === "string" && agentId !== "")
+      payload.agent_id = agentId;
     const step = guardsAgents ? async () => agentLaunchGuard(payload) : (io) => feedbackGuard(io, payload);
-    const mine = await runSteps($, "PreToolUse", [step]);
+    const steps = tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
+    const mine = await runSteps($, "PreToolUse", steps);
     if (decided(mine))
       return mine;
     return withNext(next, e, mine);
   });
   on("classic.PostToolUse", async ($, e, next) => {
+    if (str(e.tool_name) === "Bash") {
+      const mine = await runSteps($, "PostToolUse", [(io) => bashChanges(io, e)]);
+      return withNext(next, e, mine);
+    }
     if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name)))
       return next(e);
     const mine = await runSteps($, "PostToolUse", [(io) => recordChanges(io, e), (io) => feedbackPostEdit(io, e), (io) => stopTestGate(io, "rules", e)]);
