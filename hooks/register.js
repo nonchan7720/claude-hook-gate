@@ -1,5 +1,164 @@
+// src/i18n.ts
+var msg = (ja, en) => ({ ja, en });
+var tr = (lang) => (m, ...a) => m[lang](...a);
+var isLang = (v) => v === "ja" || v === "en";
+function langOfLocale(locale) {
+  const v = (locale ?? "").trim();
+  if (v === "")
+    return;
+  return /^ja(?![a-z])/i.test(v) ? "ja" : "en";
+}
+function resolveLang(env, configured) {
+  if (isLang(configured))
+    return configured;
+  if (isLang(env.FEEDBACK_GATE_LANG))
+    return env.FEEDBACK_GATE_LANG;
+  for (const v of [env.FEEDBACK_GATE_LANG, env.LC_ALL, env.LC_MESSAGES, env.LANG]) {
+    const lang = langOfLocale(v);
+    if (lang)
+      return lang;
+  }
+  return "en";
+}
+
 // src/io.ts
 var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
+
+// src/messages.ts
+var NOTIFY_WAITING = msg(() => "確認待ち", () => "Waiting for you");
+var NOTIFY_WAITING_FALLBACK = msg(() => "確認を待っています", () => "Claude is waiting for your input");
+var NOTIFY_DONE = msg(() => "完了", () => "Done");
+var NOTIFY_DONE_FALLBACK = msg(() => "応答が完了しました", () => "The response has finished");
+var INJECT_HEADER = msg(() => `# 確定フィードバックルール（count >= 3）
+これらは繰り返し指摘された確定ルール。違反すると hook がブロックする。
+
+`, () => `# Confirmed feedback rules (count >= 3)
+These rules were pointed out repeatedly and are confirmed. A hook blocks violations.
+
+`);
+var INJECT_RULE_TITLE = msg((name, count) => `■ ${name} (これまで ${count} 回指摘されています)`, (name, count) => `■ ${name} (pointed out ${count} times so far)`);
+var GUARD_EVALUATING = msg((rule) => `[feedback-guard] 評価中: ${rule}`, (rule) => `[feedback-guard] evaluating: ${rule}`);
+var POST_EDIT_CHECKING = msg((rule, file) => `[feedback-post-edit] 検査中: ${rule} (${file})`, (rule, file) => `[feedback-post-edit] checking: ${rule} (${file})`);
+var STOP_CHECK_CHECKING = msg((rule, file) => `[feedback-stop-check] 検査中: ${rule} (${file})`, (rule, file) => `[feedback-stop-check] checking: ${rule} (${file})`);
+var STOP_CHECK_GAVE_UP = msg((max) => `[feedback-stop-check] ${max} 回連続でブロックしました。ループを打ち切ります。手動確認を。`, (max) => `[feedback-stop-check] Blocked ${max} times in a row. Giving up the loop; please check manually.`);
+var STOP_CHECK_FIX_ABOVE = msg((attempt, max) => `[feedback-stop-check] 上記を修正してください（試行 ${attempt}/${max}）。`, (attempt, max) => `[feedback-stop-check] Fix the above (attempt ${attempt}/${max}).`);
+var LAUNCH_CHECKLIST = msg(() => "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件", () => "--- Check: what to do / background / current state of the code / what not to do / done criteria");
+var LAUNCH_PROMPT_TO = msg((agentType) => `${agentType} に送るプロンプト:`, (agentType) => `Prompt to send to ${agentType}:`);
+var LAUNCH_MESSAGE_TO = msg((recipient) => `${recipient} に送るメッセージ:`, (recipient) => `Message to send to ${recipient}:`);
+var LAUNCH_UNKNOWN_RECIPIENT = msg(() => "宛先不明", () => "unknown recipient");
+var CORRECT_DESCRIPTION = msg(() => "feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する", () => "Aggregate the feedback rules and the violation log, and propose count bumps and enforce additions");
+var CORRECT_ENFORCE_TEMPLATE = msg(() => `enforce:
+  - event: pre_bash
+    when: '正規表現'
+    unless: '正規表現'
+    message: '違反時に出す指示文'
+  - event: pre_edit
+    path: 'glob'
+    when: '正規表現'
+    message: '違反時に出す指示文'
+  - event: post_edit
+    path: 'glob'
+    when: '正規表現'
+    message: '違反時に出す指示文'
+  - event: stop_check
+    changed: 'glob'
+    check: 'shell cmd'
+    message: '違反時に出す指示文'`, () => `enforce:
+  - event: pre_bash
+    when: 'regex'
+    unless: 'regex'
+    message: 'instruction shown on violation'
+  - event: pre_edit
+    path: 'glob'
+    when: 'regex'
+    message: 'instruction shown on violation'
+  - event: post_edit
+    path: 'glob'
+    when: 'regex'
+    message: 'instruction shown on violation'
+  - event: stop_check
+    changed: 'glob'
+    check: 'shell cmd'
+    message: 'instruction shown on violation'`);
+var CORRECT_EXPIRED = msg((date) => `expires（${date}）を過ぎている`, (date) => `expires (${date}) has passed`);
+var CORRECT_CONDITIONS = msg(() => "条件", () => "the conditions");
+var CORRECT_NOT_MATCHING = msg((what) => `${what} がこのプロジェクトに一致せず無効`, (what) => `${what} do not match this project, so the rule is inactive`);
+var CORRECT_TOP_DETAIL = msg((detail) => `。最多: ${detail}`, (detail) => `. Most frequent: ${detail}`);
+var CORRECT_BUMP_TO_CONFIRMED = msg((window, n, counts, top) => `直近 ${window} で ${n} 回違反（${counts}）。確定ルールへ昇格${top}`, (window, n, counts, top) => `${n} violations in the last ${window} (${counts}). Promote to a confirmed rule${top}`);
+var CORRECT_BUMP_TO_DENY = msg((window, strong, counts, top) => `直近 ${window} で ask / block が ${strong} 回（${counts}）。deny へ引き上げ${top}`, (window, strong, counts, top) => `ask / block ${strong} times in the last ${window} (${counts}). Raise to deny${top}`);
+var CORRECT_NO_ENFORCE = msg((count) => `count ${count} の確定ルールだが enforce が無く、hook が検知できない（違反ログにも出ない）`, (count) => `Confirmed rule with count ${count} but no enforce, so no hook can detect it (and it never appears in the violation log)`);
+var CORRECT_STALE = msg(() => "enforce ありで違反ログに一度も出ていない。enforce が効いているか、ルールが古くなっていないか確認", () => "Has enforce but has never appeared in the violation log. Check that the enforce works and that the rule is not out of date");
+var CORRECT_EXPIRED_ACTION = msg((reason) => `${reason}。削除または更新を検討`, (reason) => `${reason}. Consider deleting or updating it`);
+var CORRECT_REPORT_HEADER = msg((window, rules, violations) => `[correct] 直近 ${window}: ルール ${rules} 件 / 違反 ${violations} 件`, (window, rules, violations) => `[correct] last ${window}: ${rules} rules / ${violations} violations`);
+var CORRECT_NO_PROPOSALS = msg(() => "提案はありません。", () => "No proposals.");
+var CORRECT_APPLY_NONE = msg(() => "apply: 書き換えたファイルはありません。", () => "apply: no files were rewritten.");
+var CORRECT_APPLY_DONE = msg(() => "apply: count を書き換えました。", () => "apply: count was rewritten.");
+var CORRECT_APPLY_HINT = msg(() => "`/correct apply` で bump の count 引き上げをファイルに書き込みます（enforce は提案のみ）。", () => "`/correct apply` writes the count bumps of the bump proposals to the files (enforce is proposal only).");
+var CORRECT_CONTEXT = msg(() => [
+  "/correct の結果です。ユーザーに上記の提案を提示してください。",
+  "- enforce の追加は、対象ルールの本文から正規表現 / glob を起こして具体案を提案する（雛形は rules/feedback_rules.md の enforce 節）。",
+  "- ファイルを書き換える前に、必ずユーザーに確認する（rules/feedback_rules.md のルールどおり）。",
+  "- stale / expired は、ルールを残すか更新・削除するかをユーザーに尋ねる。"
+].join(`
+`), () => [
+  "This is the result of /correct. Present the proposals above to the user.",
+  "- For an enforce addition, derive a regex / glob from the body of the rule and propose a concrete entry (template: the enforce section of rules/feedback_rules.md).",
+  "- Always ask the user before rewriting any file (as the rules in rules/feedback_rules.md say).",
+  "- For stale / expired, ask the user whether to keep, update or delete the rule."
+].join(`
+`));
+var CORRECT_CONTEXT_APPLIED = msg((list) => `- apply により次のファイルの count をすでに書き換えた。その事実をユーザーに伝えること: ${list}`, (list) => `- apply has already rewritten count in the following files. Tell the user so: ${list}`);
+var BAND_RUNNING = msg(() => "[gate] 実行中:", () => "[gate] running:");
+var BAND_WAITING = msg(() => "待機中", () => "waiting");
+var BAND_DONE = msg((counts, seconds) => `[gate] 完了: ${counts} (${seconds}s)`, (counts, seconds) => `[gate] done: ${counts} (${seconds}s)`);
+var GATE_HEAD_OMITTED = msg((n) => `…（先頭 ${n} 行省略）`, (n) => `… (first ${n} lines omitted)`);
+var GATE_REST_OMITTED = msg(() => "…（以降省略）", () => "… (rest omitted)");
+var GATE_FAILURES_OMITTED = msg((n) => `…（残り ${n} 件の失敗は省略。各 [gate] log のパスを見てください）`, (n) => `… (${n} more failures omitted; see the [gate] log path of each)`);
+var GATE_POLICY_NOT_FOUND = msg((policy) => `=== [gate] policy に指定されたファイルが見つかりません: ${policy}。ポリシー判定を行わず実行します。 ===`, (policy) => `=== [gate] The policy file was not found: ${policy}. Running without policy evaluation. ===`);
+var DOGWOOD_NOT_FOUND = msg(() => "dogwood バイナリが見つかりません（DOGWOOD_BIN / PATH / ~/.cargo/bin を確認してください）", () => "dogwood binary not found (check DOGWOOD_BIN / PATH / ~/.cargo/bin)");
+var DOGWOOD_RUN_FAILED = msg((error) => `dogwood の実行に失敗しました: ${error}`, (error) => `failed to run dogwood: ${error}`);
+var DOGWOOD_EXITED = msg((code, detail) => `dogwood replay が異常終了しました（exit ${code}）: ${detail}`, (code, detail) => `dogwood replay exited abnormally (exit ${code}): ${detail}`);
+var DOGWOOD_BAD_JSON = msg(() => "dogwood replay の出力を JSON として読めませんでした", () => "could not parse the output of dogwood replay as JSON");
+var DOGWOOD_NO_VERDICT = msg(() => "dogwood replay が verdict を返しませんでした", () => "dogwood replay returned no verdict");
+var DOGWOOD_BAD_VERDICT = msg((verdict) => `dogwood replay の verdict を解釈できませんでした: ${verdict}`, (verdict) => `could not interpret the verdict of dogwood replay: ${verdict}`);
+var GATE_SHARED_RESULT = msg((logpath) => `[gate] 同じ実行が他のエージェントで走っていたため、その結果を受け取りました（実行側のログ: ${logpath}）`, (logpath) => `[gate] The same run was in progress in another agent, so its result was taken over (log of the running side: ${logpath})`);
+var GATE_TIMEOUT = msg((seconds) => `[gate] タイムアウト（${seconds}秒）で強制終了しました。無限ループやハングの可能性があります。`, (seconds) => `[gate] Killed after the timeout (${seconds}s). The command may be in an infinite loop or hung.`);
+var GATE_FAILED_OUTPUT_HEADER = msg(() => "--- 失敗したコマンドの出力 ---", () => "--- output of the failed commands ---");
+var GATE_NESTED_PARALLEL = msg((label) => `=== [gate] (${label}) parallel の中に parallel はネストできません。失敗扱いにします。 ===`, (label) => `=== [gate] (${label}) parallel cannot be nested inside parallel. Treated as a failure. ===`);
+var GATE_DEFERRED_NO_CWD = msg((label, cwd) => `=== [gate] (${label}) cwd が存在しません: ${cwd}。この控えを破棄します。 ===`, (label, cwd) => `=== [gate] (${label}) cwd does not exist: ${cwd}. Dropping this deferred entry. ===`);
+var GATE_CANNOT_READ_YAML = msg((path) => `gate.yaml を読めません: ${path}`, (path) => `cannot read gate.yaml: ${path}`);
+var GATE_AND_MORE = msg((n) => ` ほか${n}件`, (n) => ` and ${n} more`);
+var GATE_SKIP_UNMATCHED = msg((files) => `[gate] skip: ${files} (どのルールにもマッチしません)`, (files) => `[gate] skip: ${files} (matches no rule)`);
+var GATE_BAD_PER_FILE_DIR = msg((value) => `=== [gate] per_file_dir の値が不正です: ${value}（true / "file" / "pattern_root" のいずれかを指定してください）。このルールをスキップします。 ===`, (value) => `=== [gate] Invalid per_file_dir value: ${value} (use true / "file" / "pattern_root"). Skipping this rule. ===`);
+var GATE_SKIP_BAD_PER_FILE_DIR = msg(() => "[skip: per_file_dir不正]", () => "[skip: invalid per_file_dir]");
+var GATE_ROOT_NO_CWD = msg((label, cwd) => `=== [gate] (${label}) cwd が存在しません: ${cwd}。このルートをスキップします。 ===`, (label, cwd) => `=== [gate] (${label}) cwd does not exist: ${cwd}. Skipping this root. ===`);
+var GATE_RULE_NO_CWD = msg((label, cwd) => `=== [gate] (${label}) cwd が存在しません: ${cwd}。このルールをスキップします。 ===`, (label, cwd) => `=== [gate] (${label}) cwd does not exist: ${cwd}. Skipping this rule. ===`);
+var GATE_CHECK_NO_CWD = msg((name, cwd) => `=== [gate] (check:${name}) cwd が存在しません: ${cwd}。このチェックをスキップします。 ===`, (name, cwd) => `=== [gate] (check:${name}) cwd does not exist: ${cwd}. Skipping this check. ===`);
+var GATE_SKIP_NO_CWD = msg(() => "[skip: cwd無し]", () => "[skip: no cwd]");
+var GATE_NOTE_NO_CWD = msg(() => "(cwd が存在しません)", () => "(cwd does not exist)");
+var GATE_WORKTREE_NOT_FOUND = msg((root) => `=== [gate] worktree が見つかりません: ${root}。対象から外します。 ===`, (root) => `=== [gate] worktree not found: ${root}. Excluding it. ===`);
+var GATE_RULES_FAILED = msg(() => "[gate] rules フェーズの検証に失敗しました（会話は止まりません）。上のエラーを見て修正してください。", () => "[gate] The rules phase failed (the conversation is not stopped). See the errors above and fix them.");
+var GATE_RULES_PASSED = msg((body) => `[gate] rules フェーズ成功:
+${body}`, (body) => `[gate] rules phase passed:
+${body}`);
+var GATE_CHECK_NOT_FOUND = msg((name) => `=== [gate] consistency_checks に "${name}" が見つかりません。スキップします。 ===`, (name) => `=== [gate] "${name}" was not found in consistency_checks. Skipping. ===`);
+var GATE_CHECK_NOT_FOUND_SUMMARY = msg((name) => `(check:${name}) 見つかりません、スキップ`, (name) => `(check:${name}) not found, skipped`);
+var GATE_SKIP_CHECK_UNDEFINED = msg((name) => `[gate] skip: check:${name} (consistency_checks に定義がありません)`, (name) => `[gate] skip: check:${name} (not defined in consistency_checks)`);
+var GATE_NOTHING_TO_RUN = msg(() => "（対象なし）", () => "(nothing to run)");
+var GATE_ALL_PASSED = msg((labels) => `[gate] 検証がすべて通りました: ${labels}。この結果をユーザーに報告して終了してください。`, (labels) => `[gate] All checks passed: ${labels}. Report this result to the user and finish.`);
+var GATE_DEFERRED_TITLE = msg(() => "後回しにした検証コマンド", () => "deferred verification commands");
+var GATE_CHECKS_PASSED = msg((title, body) => `[gate] ${title} 成功:
+${body}`, (title, body) => `[gate] ${title} passed:
+${body}`);
+var GATE_CHECKS_GAVE_UP_STDERR = msg((max) => `consistency checks が ${max} 回連続失敗。ループを打ち切ります。手動確認を。`, (max) => `consistency checks failed ${max} times in a row. Giving up the loop; please check manually.`);
+var GATE_CHECKS_GAVE_UP = msg((max) => `[gate] consistency checks が${max}回連続で失敗したため打ち切りました。` + "対象ファイルは未検証のまま CHANGED へ戻しました。" + "手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか " + "/clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。", (max) => `[gate] Gave up because consistency checks failed ${max} times in a row. ` + "The target files were returned to CHANGED unverified. " + "Please check them manually. To clear this now, start a new session or " + "run /clear (reset-gate on SessionStart removes the state files).");
+var GATE_CHECKS_FAILED = msg((attempt, max) => `consistency checks 失敗（試行 ${attempt}/${max}）。上のエラーを見て修正を継続してください。`, (attempt, max) => `consistency checks failed (attempt ${attempt}/${max}). See the errors above and keep fixing.`);
+var GATE_YML_TYPO = msg(() => "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。", () => "[gate] .claude/gate.yaml was not found but .claude/gate.yml exists. Check whether the extension is yml instead of yaml.");
+var GATE_POLICY_UNEVALUATED = msg((label, reason, cmd) => `=== [gate] (${label}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［${reason}］ $ ${cmd} ===`, (label, reason, cmd) => `=== [gate] (${label}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [${reason}] $ ${cmd} ===`);
+var GATE_POLICY_SKIPPED = msg((label, cmd) => `=== [gate] (${label}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ ${cmd} ===`, (label, cmd) => `=== [gate] (${label}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ ${cmd} ===`);
+var GATE_NOTE_POLICY_SKIPPED = msg(() => "(ポリシー判定で見送り。控えに積んだので後で自動実行)", () => "(deferred by the policy verdict; queued to run automatically later)");
+var GATE_NOTE_POLICY_UNEVALUATED = msg((reason) => `(ポリシーを評価できず見送り。控えに積んだので後で自動実行: ${reason})`, (reason) => `(deferred because the policy could not be evaluated; queued to run automatically later: ${reason})`);
+var GATE_INTERNAL_ERROR = msg(() => "[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。", () => "[gate] An internal error occurred, so the checks were skipped (work continues). See stderr for details.");
 
 // src/pyutil.ts
 function truthy(v) {
@@ -64,7 +223,6 @@ var isDict = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 // src/agent-launch-guard.ts
 var ASK_AGENT_TYPES = ["code-implementer"];
 var ALLOW_RECIPIENTS = ["git-operator"];
-var CHECKLIST = "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件";
 var ask = (reason) => ok(`${JSON.stringify({
   hookSpecificOutput: {
     hookEventName: "PreToolUse",
@@ -73,7 +231,8 @@ var ask = (reason) => ok(`${JSON.stringify({
   }
 })}
 `);
-function agentLaunchGuard(payload) {
+function agentLaunchGuard(payload, lang) {
+  const t = tr(lang);
   const tool = jqStr(payload.tool_name);
   const input = isDict(payload.tool_input) ? payload.tool_input : {};
   if (tool === "Agent") {
@@ -81,20 +240,20 @@ function agentLaunchGuard(payload) {
     if (agentType === "")
       return ok();
     if (ASK_AGENT_TYPES.includes(agentType)) {
-      return ask(`${agentType} に送るプロンプト:
+      return ask(`${t(LAUNCH_PROMPT_TO, agentType)}
 
 ${jqStr(input.prompt)}
 
-${CHECKLIST}`);
+${t(LAUNCH_CHECKLIST)}`);
     }
   } else if (tool === "SendMessage") {
     const recipient = jqStr(input.to);
     if (!ALLOW_RECIPIENTS.includes(recipient)) {
-      return ask(`${recipient || "宛先不明"} に送るメッセージ:
+      return ask(`${t(LAUNCH_MESSAGE_TO, recipient || t(LAUNCH_UNKNOWN_RECIPIENT))}
 
 ${jqStr(input.message)}
 
-${CHECKLIST}`);
+${t(LAUNCH_CHECKLIST)}`);
     }
   }
   return ok();
@@ -6498,7 +6657,7 @@ function projectFeedbackDir(io, projectDir) {
 }
 var violationsLogPath = (io) => join(feedbackDir(io), ".violations.jsonl");
 var FRONTMATTER_RE = /^---\s*\n([\s\S]*?\n)---\s*\n?/;
-var BODY_STOP_RE = /\*\*(Why|言い訳|How to apply)[:：]?\*\*/;
+var BODY_STOP_RE = /\*\*(Why|言い訳|Excuse|How to apply)[:：]?\*\*/;
 var loadYamlText = (text) => parseYaml(text);
 var DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 var DAY_MS = 86400000;
@@ -6708,7 +6867,7 @@ async function evalPreBash(io, rules, command, projectDir) {
         continue;
       const checkCmd = entry.check;
       if (truthy(checkCmd)) {
-        io.progress?.(`[feedback-guard] 評価中: ${rule.name}`);
+        io.progress?.(tr(io.lang)(GUARD_EVALUATING, rule.name));
         const r = await io.run([...SHELL, String(checkCmd)], { cwd: dir, env: { CLAUDE_PROJECT_DIR: dir }, timeoutMs: 1e4 });
         if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
           continue;
@@ -6833,7 +6992,7 @@ async function evalPostEdit(io, rules, filePath, projectDir) {
         details.push(`content matched: ${String(when)}`);
       }
       if (truthy(checkCmd)) {
-        io.progress?.(`[feedback-post-edit] 検査中: ${rule.name} (${absPath})`);
+        io.progress?.(tr(io.lang)(POST_EDIT_CHECKING, rule.name, absPath));
         const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: dir, FILE: absPath }, timeoutMs: 15000 });
         if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
           continue;
@@ -6948,7 +7107,7 @@ async function evalStopCheck(io, rules, projectDir, changedFiles) {
             bad = true;
         }
         if (truthy(checkCmd)) {
-          io.progress?.(`[feedback-stop-check] 検査中: ${rule.name} (${absPath})`);
+          io.progress?.(tr(io.lang)(STOP_CHECK_CHECKING, rule.name, absPath));
           const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: projectDir, FILE: absPath }, timeoutMs: 15000 });
           if (r.exitCode !== 0 || r.timedOut || r.error !== undefined)
             bad = true;
@@ -7013,13 +7172,13 @@ async function main(io, payload) {
   }
   const attempts = await bumpAttempts(io, ap);
   if (attempts >= MAX_ATTEMPTS) {
-    stderr += `[feedback-stop-check] ${MAX_ATTEMPTS} 回連続でブロックしました。ループを打ち切ります。手動確認を。
+    stderr += `${tr(io.lang)(STOP_CHECK_GAVE_UP, MAX_ATTEMPTS)}
 `;
     await io.removeFiles([ap]);
     return ok("", stderr);
   }
   const lines = blocking.map((v) => `[feedback-stop-check] ${v.rule} (count: ${v.count}): ${v.message} (${v.detail})`);
-  lines.push(`[feedback-stop-check] 上記を修正してください（試行 ${attempts}/${MAX_ATTEMPTS}）。`);
+  lines.push(tr(io.lang)(STOP_CHECK_FIX_ABOVE, attempts, MAX_ATTEMPTS));
   stderr += lines.map((l) => `${l}
 `).join("");
   const stdout = `${JSON.stringify({ decision: "block", reason: lines.join(`
@@ -7117,16 +7276,17 @@ async function which(io, name) {
 
 // src/notification.ts
 var LABELS = {
-  notify: { label: "確認待ち", fallback: "確認を待っています" },
-  stop: { label: "完了", fallback: "応答が完了しました" }
+  notify: { label: NOTIFY_WAITING, fallback: NOTIFY_WAITING_FALLBACK },
+  stop: { label: NOTIFY_DONE, fallback: NOTIFY_DONE_FALLBACK }
 };
 var FRONT_WINDOW_SCRIPT = 'tell application "System Events" to tell (first process whose frontmost is true) to get name of (first window whose value of attribute "AXMain" is true)';
 async function notification(io, type, payload) {
   const kind = LABELS[type];
   if (!kind)
     return ok();
+  const t = tr(io.lang);
   const cwd = jqStr(payload.cwd) || io.cwd;
-  const message = jqStr(payload.message) || kind.fallback;
+  const message = jqStr(payload.message) || t(kind.fallback);
   const top = await io.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"]);
   const gitRoot = top.exitCode === 0 ? top.stdout.replace(/\n+$/, "") : "";
   const target = gitRoot || cwd;
@@ -7173,7 +7333,7 @@ async function notification(io, type, payload) {
     "-title",
     "Claude Code",
     "-subtitle",
-    `\uD83D\uDCC1 ${project} · ${kind.label}`,
+    `\uD83D\uDCC1 ${project} · ${t(kind.label)}`,
     "-message",
     message,
     "-group",
@@ -7243,27 +7403,27 @@ function cutCmd(text, room) {
 }
 var markOf = (e) => e.result === "ok" ? "✓" : "✗";
 var doneText = (e, now) => `${e.name ?? foldCmd(e.cmd)} ${markOf(e)} (${(((e.ended ?? now) - e.started) / 1000).toFixed(1)}s)`;
-function runningLine(e, now) {
+function runningLine(e, now, lang) {
   if (e.result)
     return `${INDENT}${doneText(e, now)}`;
   const seconds = Math.max(0, Math.floor((now - e.started) / 1000));
   const head = e.name ? `${INDENT}${e.name} $ ` : INDENT;
-  const tail = `${e.waiting ? " 待機中" : ""} (${seconds}s)`;
+  const tail = `${e.waiting ? ` ${tr(lang)(BAND_WAITING)}` : ""} (${seconds}s)`;
   return `${head}${cutCmd(foldCmd(e.cmd), BAND_LINE_MAX - head.length - tail.length)}${tail}`;
 }
-function runningLines(entries, now) {
-  return ["[gate] 実行中:", ...entries.map((e) => runningLine(e, now))];
+function runningLines(entries, now, lang) {
+  return [tr(lang)(BAND_RUNNING), ...entries.map((e) => runningLine(e, now, lang))];
 }
-function runningBand(entries, now) {
+function runningBand(entries, now, lang) {
   if (!entries.some((e) => !e.result))
     return;
   return {
     type: "Box",
     props: { flexDirection: "column" },
-    children: runningLines(entries, now).map((line) => ({ type: "Text", children: [line] }))
+    children: runningLines(entries, now, lang).map((line) => ({ type: "Text", children: [line] }))
   };
 }
-function finishedSummary(entries) {
+function finishedSummary(entries, lang) {
   if (entries.length === 0 || entries.some((e) => !e.result))
     return;
   const passed = entries.filter((e) => e.result === "ok").length;
@@ -7271,7 +7431,7 @@ function finishedSummary(entries) {
   const counts = [passed > 0 ? `✓ ${passed}` : "", failed > 0 ? `✗ ${failed}` : ""].filter((s) => s !== "").join(" / ");
   const first = Math.min(...entries.map((e) => e.started));
   const last = Math.max(...entries.map((e) => e.ended ?? e.started));
-  return `[gate] 完了: ${counts} (${((last - first) / 1000).toFixed(1)}s)`;
+  return tr(lang)(BAND_DONE, counts, ((last - first) / 1000).toFixed(1));
 }
 var summaryFile = (io, sessionId) => join(gateStatusDir(io), `summary.${sessionId}.txt`);
 var saveSummary = (io, sessionId, text) => io.writeFile(summaryFile(io, sessionId), text);
@@ -7527,17 +7687,18 @@ function summarizeCmds(cmds) {
   }
   return parts.join(" ; ");
 }
-function tailOutput(out, limit = FAIL_TAIL_LINES) {
+function tailOutput(lang, out, limit = FAIL_TAIL_LINES) {
   const lines = out.trimEnd().split(/\r?\n/);
   if (lines.length <= limit)
     return lines.join(`
 `);
-  return [`…（先頭 ${lines.length - limit} 行省略）`, ...lines.slice(-limit)].join(`
+  return [tr(lang)(GATE_HEAD_OMITTED, lines.length - limit), ...lines.slice(-limit)].join(`
 `);
 }
-function failureDetails(failures) {
+function failureDetails(lang, failures) {
   if (failures.length === 0)
     return "";
+  const t = tr(lang);
   let text = "";
   let used = 0;
   let omitted = 0;
@@ -7549,13 +7710,13 @@ function failureDetails(failures) {
     }
     if (used + d.length + 1 > FAIL_DETAIL_MAX)
       d = `${d.slice(0, FAIL_DETAIL_MAX)}
-…（以降省略）`;
+${t(GATE_REST_OMITTED)}`;
     text += `${d}
 `;
     used += d.length + 1;
   }
   if (omitted)
-    text += `…（残り ${omitted} 件の失敗は省略。各 [gate] log のパスを見てください）
+    text += `${t(GATE_FAILURES_OMITTED, omitted)}
 `;
   return text.trimEnd();
 }
@@ -7581,6 +7742,7 @@ class PolicyState {
 
 class Gate {
   io;
+  t;
   projectDir;
   sessionId;
   agentId;
@@ -7615,6 +7777,7 @@ class Gate {
   executedLabels = [];
   constructor(io, opts = {}) {
     this.io = io;
+    this.t = tr(io.lang);
     this.projectDir = io.projectDir || io.cwd;
     this.sessionId = opts.sessionId || "unknown";
     this.agentId = opts.agentId || "";
@@ -7837,7 +8000,7 @@ class Gate {
     const policy = isDefault ? this.defaultPolicy : this.resolvePolicyPath(rootDir, value);
     if (!policy || !await this.io.exists(policy)) {
       if (!isDefault && policy && logs) {
-        logs.push(`=== [gate] policy に指定されたファイルが見つかりません: ${policy}。ポリシー判定を行わず実行します。 ===`);
+        logs.push(this.t(GATE_POLICY_NOT_FOUND, policy));
       }
       return null;
     }
@@ -7847,7 +8010,7 @@ class Gate {
   async dogwoodVerdict(policy, schema, rootDir, name, cmd) {
     const binpath = await this.resolveDogwood();
     if (!binpath)
-      return [null, "dogwood バイナリが見つかりません（DOGWOOD_BIN / PATH / ~/.cargo/bin を確認してください）"];
+      return [null, this.t(DOGWOOD_NOT_FOUND)];
     const history = await this.readTrace(rootDir);
     const lastTs = history.length > 0 ? Number(history[history.length - 1]?.ts) || 0 : 0;
     const now = await this.io.now();
@@ -7865,12 +8028,12 @@ class Gate {
       await this.rm(tracefile);
     }
     if (r.error !== undefined || r.timedOut) {
-      return [null, `dogwood の実行に失敗しました: ${r.error ?? "timed out"}`];
+      return [null, this.t(DOGWOOD_RUN_FAILED, r.error ?? "timed out")];
     }
     if (r.exitCode !== 0) {
       const detail = (r.stderr || r.stdout || "").trim().replaceAll(`
 `, " ").slice(0, 200);
-      return [null, `dogwood replay が異常終了しました（exit ${r.exitCode}）: ${detail}`];
+      return [null, this.t(DOGWOOD_EXITED, r.exitCode, detail)];
     }
     let verdicts;
     try {
@@ -7878,14 +8041,14 @@ class Gate {
       const v = isDict(parsed) ? parsed.verdicts : undefined;
       verdicts = Array.isArray(v) ? v : [];
     } catch {
-      return [null, "dogwood replay の出力を JSON として読めませんでした"];
+      return [null, this.t(DOGWOOD_BAD_JSON)];
     }
     if (verdicts.length === 0)
-      return [null, "dogwood replay が verdict を返しませんでした"];
+      return [null, this.t(DOGWOOD_NO_VERDICT)];
     const last = verdicts[verdicts.length - 1];
     const verdict = String((isDict(last) ? last.verdict : "") || "").toLowerCase();
     if (verdict !== "allow" && verdict !== "deny")
-      return [null, `dogwood replay の verdict を解釈できませんでした: ${pyRepr(verdict)}`];
+      return [null, this.t(DOGWOOD_BAD_VERDICT, pyRepr(verdict))];
     return [verdict, null];
   }
   async makePolicyContext(cfg, owner, rootDir, state, logs) {
@@ -7936,7 +8099,7 @@ class Gate {
     const uid = `${Math.floor(await this.io.now() / 1000)}-${logSeq++}`;
     const logpath = join(this.logDir, `${slug(name || cmd)}.${uid}.log`);
     const header = `$ ${cmd}  (cwd: ${cwd})
-[gate] 同じ実行が他のエージェントで走っていたため、その結果を受け取りました（実行側のログ: ${r.outcome.logpath}）
+${this.t(GATE_SHARED_RESULT, r.outcome.logpath)}
 `;
     await this.io.writeFile(logpath, header + r.outcome.out).catch(() => {
       return;
@@ -7969,7 +8132,7 @@ class Gate {
         if (this.running.every((r) => r.result))
           this.stopTicker();
         await this.publishAndRedraw();
-        const summary = finishedSummary(await listRunning(this.io, this.sessionId));
+        const summary = finishedSummary(await listRunning(this.io, this.sessionId), this.io.lang);
         if (summary !== undefined) {
           this.io.result?.(summary);
           await saveSummary(this.io, this.sessionId, summary);
@@ -8012,10 +8175,10 @@ class Gate {
     const detail = [chunk.lines[0]];
     if (out) {
       chunk.lines.push(out.trimEnd());
-      detail.push(tailOutput(out));
+      detail.push(tailOutput(this.io.lang, out));
     }
     if (timedOut) {
-      const msg = `[gate] タイムアウト（${timeout}秒）で強制終了しました。無限ループやハングの可能性があります。`;
+      const msg = this.t(GATE_TIMEOUT, timeout);
       chunk.lines.push(msg);
       detail.push(msg);
     }
@@ -8032,10 +8195,10 @@ class Gate {
       this.failures.push(chunk.detail);
   }
   withDetails(prefix) {
-    const details = failureDetails(this.failures);
+    const details = failureDetails(this.io.lang, this.failures);
     return prefix + (details ? `
 
---- 失敗したコマンドの出力 ---
+${this.t(GATE_FAILED_OUTPUT_HEADER)}
 ${details}` : "");
   }
   async runParallel(label, items, cwd, defaultTimeout, logs, policy, extraEnv, root = policy?.rootDir ?? this.projectDir) {
@@ -8043,7 +8206,7 @@ ${details}` : "");
     const tasks = [];
     for (const item of items) {
       if (isParallel(item)) {
-        logs.push(`=== [gate] (${label}) parallel の中に parallel はネストできません。失敗扱いにします。 ===`);
+        logs.push(this.t(GATE_NESTED_PARALLEL, label));
         failed = true;
         continue;
       }
@@ -8101,7 +8264,7 @@ ${details}` : "");
         continue;
       const label = `deferred:${entry.label || "."}`;
       if ((await this.io.stat(cwd))?.kind !== "dir") {
-        logs.push(`=== [gate] (${label}) cwd が存在しません: ${cwd}。この控えを破棄します。 ===`);
+        logs.push(this.t(GATE_DEFERRED_NO_CWD, label, cwd));
         continue;
       }
       const name = entry.name || slug(cmd);
@@ -8165,7 +8328,7 @@ ${details}` : "");
   async loadAction(path) {
     const text = await this.io.readFile(path);
     if (text === undefined)
-      throw new Error(`gate.yaml を読めません: ${path}`);
+      throw new Error(this.t(GATE_CANNOT_READ_YAML, path));
     return parseYaml(text);
   }
   noteUnmatchedFiles(rels, triggered) {
@@ -8177,8 +8340,8 @@ ${details}` : "");
     if (unmatched.length === 0)
       return;
     const shown = unmatched.slice(0, UNMATCHED_SHOWN).join(", ");
-    const more = unmatched.length > UNMATCHED_SHOWN ? ` ほか${unmatched.length - UNMATCHED_SHOWN}件` : "";
-    this.status.push(`[gate] skip: ${shown}${more} (どのルールにもマッチしません)`);
+    const more = unmatched.length > UNMATCHED_SHOWN ? this.t(GATE_AND_MORE, unmatched.length - UNMATCHED_SHOWN) : "";
+    this.status.push(this.t(GATE_SKIP_UNMATCHED, `${shown}${more}`));
   }
   async runRules(cfg, rels, logs, rootDir, policyState) {
     const rules = cfg?.rules || [];
@@ -8217,8 +8380,8 @@ ${details}` : "");
       if (truthy(rawPerFileDir)) {
         const mode = normalizePerFileDirMode(rawPerFileDir);
         if (mode === null) {
-          logs.push(`=== [gate] per_file_dir の値が不正です: ${pyRepr(rawPerFileDir)}（true / "file" / "pattern_root" のいずれかを指定してください）。このルールをスキップします。 ===`);
-          summary.push(`${summarizeCmds(cmds)}  [skip: per_file_dir不正]`);
+          logs.push(this.t(GATE_BAD_PER_FILE_DIR, pyRepr(rawPerFileDir)));
+          summary.push(`${summarizeCmds(cmds)}  ${this.t(GATE_SKIP_BAD_PER_FILE_DIR)}`);
           failed = true;
           for (const f of ruleFiles)
             failFiles.add(f);
@@ -8230,9 +8393,9 @@ ${details}` : "");
           const label = d || ".";
           const dirFiles = matched.filter((rp) => rootsByRel[rp] === d);
           if ((await this.io.stat(cwd))?.kind !== "dir") {
-            logs.push(`=== [gate] (${label}) cwd が存在しません: ${cwd}。このルートをスキップします。 ===`);
-            summary.push(`(${label}) ${summarizeCmds(cmds)}  [skip: cwd無し]`);
-            this.note("skip", label, summarizeCmds(cmds), "(cwd が存在しません)");
+            logs.push(this.t(GATE_ROOT_NO_CWD, label, cwd));
+            summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t(GATE_SKIP_NO_CWD)}`);
+            this.note("skip", label, summarizeCmds(cmds), this.t(GATE_NOTE_NO_CWD));
             continue;
           }
           summary.push(`(${label}) ${summarizeCmds(cmds)}`);
@@ -8249,9 +8412,9 @@ ${details}` : "");
         const cwd = rule.dir ? join(rootDir, rule.dir) : rootDir;
         const label = rule.dir ?? ".";
         if ((await this.io.stat(cwd))?.kind !== "dir") {
-          logs.push(`=== [gate] (${label}) cwd が存在しません: ${cwd}。このルールをスキップします。 ===`);
-          summary.push(`(${label}) ${summarizeCmds(cmds)}  [skip: cwd無し]`);
-          this.note("skip", label, summarizeCmds(cmds), "(cwd が存在しません)");
+          logs.push(this.t(GATE_RULE_NO_CWD, label, cwd));
+          summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t(GATE_SKIP_NO_CWD)}`);
+          this.note("skip", label, summarizeCmds(cmds), this.t(GATE_NOTE_NO_CWD));
           continue;
         }
         summary.push(`(${label}) ${summarizeCmds(cmds)}`);
@@ -8281,7 +8444,7 @@ ${details}` : "");
       if (rels.length === 0)
         continue;
       if (root !== this.projectDir && (await this.io.stat(root))?.kind !== "dir") {
-        logs.push(`=== [gate] worktree が見つかりません: ${root}。対象から外します。 ===`);
+        logs.push(this.t(GATE_WORKTREE_NOT_FOUND, root));
         for (const rp of rels)
           consumedKeys.add(mk(root, rp));
         continue;
@@ -8402,15 +8565,14 @@ ${details}` : "");
       this.writeErr(`${[...this.status, ...logs].join(`
 `)}
 `);
-      this.writeErr(`[gate] rules フェーズの検証に失敗しました（会話は止まりません）。上のエラーを見て修正してください。
+      this.writeErr(`${this.t(GATE_RULES_FAILED)}
 `);
       return 2;
     }
     if (summary.length > 0 || this.status.length > 0) {
       const body = this.statusBlock(summary.map((s) => `✓ ${s}`).join(`
 `));
-      this.print({ systemMessage: `[gate] rules フェーズ成功:
-${body}` });
+      this.print({ systemMessage: this.t(GATE_RULES_PASSED, body) });
     }
     return 0;
   }
@@ -8420,18 +8582,18 @@ ${body}` });
     for (const name of [...names].sort()) {
       const check = checksByName.get(name);
       if (!check) {
-        logs.push(`=== [gate] consistency_checks に "${name}" が見つかりません。スキップします。 ===`);
-        summary.push(`(check:${name}) 見つかりません、スキップ`);
-        this.status.push(`[gate] skip: check:${name} (consistency_checks に定義がありません)`);
+        logs.push(this.t(GATE_CHECK_NOT_FOUND, name));
+        summary.push(this.t(GATE_CHECK_NOT_FOUND_SUMMARY, name));
+        this.status.push(this.t(GATE_SKIP_CHECK_UNDEFINED, name));
         continue;
       }
       const cwd = check.dir ? join(rootDir, check.dir) : rootDir;
       const cmds = check.run || [];
       const timeout = check.timeout || DEFAULT_TIMEOUT;
       if ((await this.io.stat(cwd))?.kind !== "dir") {
-        logs.push(`=== [gate] (check:${name}) cwd が存在しません: ${cwd}。このチェックをスキップします。 ===`);
-        summary.push(`(check:${name}) ${summarizeCmds(cmds)}  [skip: cwd無し]`);
-        this.note("skip", `check:${name}`, summarizeCmds(cmds), "(cwd が存在しません)");
+        logs.push(this.t(GATE_CHECK_NO_CWD, name, cwd));
+        summary.push(`(check:${name}) ${summarizeCmds(cmds)}  ${this.t(GATE_SKIP_NO_CWD)}`);
+        this.note("skip", `check:${name}`, summarizeCmds(cmds), this.t(GATE_NOTE_NO_CWD));
         continue;
       }
       summary.push(`(check:${name}) ${summarizeCmds(cmds)}`);
@@ -8512,7 +8674,7 @@ ${body}` });
     const droppedRoots = new Set;
     for (const [root, checksMap] of Object.entries(pending)) {
       if (root !== this.projectDir && (await this.io.stat(root))?.kind !== "dir") {
-        logs.push(`=== [gate] worktree が見つかりません: ${root}。対象から外します。 ===`);
+        logs.push(this.t(GATE_WORKTREE_NOT_FOUND, root));
         droppedRoots.add(root);
         continue;
       }
@@ -8537,19 +8699,18 @@ ${body}` });
       await this.confirmPending(activePending);
       await this.cleanup([this.count, this.pending]);
       const body = this.statusBlock(summary.length > 0 ? summary.map((s) => `✓ ${s}`).join(`
-`) : "（対象なし）");
+`) : this.t(GATE_NOTHING_TO_RUN));
       if (this.executedLabels.length > 0 && !this.stopHookActive && mainCfg?.report_success !== false) {
         await this.io.writeFile(this.reported, `1
 `);
-        const reason = `[gate] 検証がすべて通りました: ${this.executedLabels.map((l) => `${l} ✓`).join(" / ")}。この結果をユーザーに報告して終了してください。`;
+        const reason = this.t(GATE_ALL_PASSED, this.executedLabels.map((l) => `${l} ✓`).join(" / "));
         this.writeErr(`${reason}
 `);
         this.print({ decision: "block", reason });
         return 2;
       }
-      const title = Object.keys(pending).length > 0 ? "consistency checks" : "後回しにした検証コマンド";
-      this.print({ systemMessage: `[gate] ${title} 成功:
-${body}` });
+      const title = Object.keys(pending).length > 0 ? "consistency checks" : this.t(GATE_DEFERRED_TITLE);
+      this.print({ systemMessage: this.t(GATE_CHECKS_PASSED, title, body) });
       return 0;
     }
     this.writeErr(`${[...this.status, ...logs].join(`
@@ -8566,17 +8727,17 @@ ${body}` });
     if (attempts >= MAX_ATTEMPTS2) {
       await this.requeuePendingToChanged(activePending);
       await this.cleanup([this.count, this.pending]);
-      this.writeErr(`consistency checks が ${MAX_ATTEMPTS2} 回連続失敗。ループを打ち切ります。手動確認を。
+      this.writeErr(`${this.t(GATE_CHECKS_GAVE_UP_STDERR, MAX_ATTEMPTS2)}
 `);
-      const msg = `[gate] consistency checks が${MAX_ATTEMPTS2}回連続で失敗したため打ち切りました。` + "対象ファイルは未検証のまま CHANGED へ戻しました。" + "手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか " + `/clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。
-` + summary.map((s) => `✗ ${s}`).join(`
-`) + this.withDetails("");
+      const msg = `${this.t(GATE_CHECKS_GAVE_UP, MAX_ATTEMPTS2)}
+${summary.map((s) => `✗ ${s}`).join(`
+`)}${this.withDetails("")}`;
       this.print({ systemMessage: msg });
       return 0;
     }
-    const reason = `consistency checks 失敗（試行 ${attempts}/${MAX_ATTEMPTS2}）。上のエラーを見て修正を継続してください。
-` + summary.map((s) => `✗ ${s}`).join(`
-`) + this.withDetails("");
+    const reason = `${this.t(GATE_CHECKS_FAILED, attempts, MAX_ATTEMPTS2)}
+${summary.map((s) => `✗ ${s}`).join(`
+`)}${this.withDetails("")}`;
     this.writeErr(`${reason}
 `);
     this.print({ decision: "block", reason });
@@ -8585,9 +8746,7 @@ ${body}` });
   async main() {
     await this.pruneLogs();
     if (!await this.io.exists(this.action) && await this.io.exists(this.gateYml)) {
-      this.print({
-        systemMessage: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
-      });
+      this.print({ systemMessage: this.t(GATE_YML_TYPO) });
     }
     if (!await this.io.exists(this.action)) {
       await this.cleanup();
@@ -8618,7 +8777,7 @@ class PolicyContext {
     const pname = name || slug(cmd);
     const [verdict, reason] = await this.gate.dogwoodVerdict(this.policy, this.schema, this.rootDir, pname, cmd);
     if (verdict === null) {
-      logs.push(`=== [gate] (${label}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［${reason}］ $ ${cmd} ===`);
+      logs.push(this.gate.t(GATE_POLICY_UNEVALUATED, label, reason ?? "", cmd));
     } else {
       await this.gate.appendTrace(this.rootDir, cwd, pname, cmd, "request");
       if (verdict === "allow") {
@@ -8627,9 +8786,9 @@ class PolicyContext {
         this.state.allowedThisRun.add(`${this.rootDir}\x00${cwd}\x00${cmd}`);
         return true;
       }
-      logs.push(`=== [gate] (${label}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ ${cmd} ===`);
+      logs.push(this.gate.t(GATE_POLICY_SKIPPED, label, cmd));
     }
-    this.gate.note("skip", label, cmd, verdict ? "(ポリシー判定で見送り。控えに積んだので後で自動実行)" : `(ポリシーを評価できず見送り。控えに積んだので後で自動実行: ${reason})`);
+    this.gate.note("skip", label, cmd, verdict ? this.gate.t(GATE_NOTE_POLICY_SKIPPED) : this.gate.t(GATE_NOTE_POLICY_UNEVALUATED, reason ?? ""));
     this.state.deferredThisRun.add(`${this.rootDir}\x00${cwd}\x00${cmd}`);
     await this.gate.deferCmd(this.rootDir, cwd, pname, cmd, timeout, label, extraEnv);
     return false;
@@ -8647,7 +8806,7 @@ async function runGate(io, opts = {}) {
     gate.stderr += `[gate] internal error:
 ${e instanceof Error ? e.stack ?? e.message : String(e)}
 `;
-    gate.stdout += `${JSON.stringify({ systemMessage: "[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。" })}
+    gate.stdout += `${JSON.stringify({ systemMessage: tr(io.lang)(GATE_INTERNAL_ERROR) })}
 `;
     exitCode = 0;
   } finally {
@@ -8661,9 +8820,7 @@ async function stopTestGate(io, phase, payload) {
   const projectDir = io.projectDir || io.cwd;
   if (!await io.exists(join(projectDir, ".claude", "gate.yaml"))) {
     if (await io.exists(join(projectDir, ".claude", "gate.yml"))) {
-      return ok(`${JSON.stringify({
-        systemMessage: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
-      })}
+      return ok(`${JSON.stringify({ systemMessage: tr(io.lang)(GATE_YML_TYPO) })}
 `);
     }
     return ok();
@@ -8913,37 +9070,22 @@ function aggregateViolations(entries, now, windowMs) {
   }
   return stats;
 }
-var ENFORCE_TEMPLATE = `enforce:
-  - event: pre_bash
-    when: '正規表現'
-    unless: '正規表現'
-    message: '違反時に出す指示文'
-  - event: pre_edit
-    path: 'glob'
-    when: '正規表現'
-    message: '違反時に出す指示文'
-  - event: post_edit
-    path: 'glob'
-    when: '正規表現'
-    message: '違反時に出す指示文'
-  - event: stop_check
-    changed: 'glob'
-    check: 'shell cmd'
-    message: '違反時に出す指示文'`;
+var enforceTemplate = (lang) => tr(lang)(CORRECT_ENFORCE_TEMPLATE);
 var oneLine2 = (s, max = 60) => {
   const flat = s.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 };
 var countsText = (rec) => Object.entries(rec).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(", ");
-function inactiveReason(rule, now) {
+function inactiveReason(rule, now, lang) {
+  const t = tr(lang);
   if (rule.expires !== undefined && now > rule.expires)
-    return `expires（${new Date(rule.expires).toISOString().slice(0, 10)}）を過ぎている`;
+    return t(CORRECT_EXPIRED, new Date(rule.expires).toISOString().slice(0, 10));
   const parts = [];
   if (rule.projects.length > 0)
     parts.push("projects");
   if (rule.whenExists.length > 0)
     parts.push("when_exists");
-  return `${parts.join(" / ") || "条件"} がこのプロジェクトに一致せず無効`;
+  return t(CORRECT_NOT_MATCHING, parts.join(" / ") || t(CORRECT_CONDITIONS));
 }
 function buildProposals(rules, inactive, stats, opts) {
   const bumps = [];
@@ -8951,10 +9093,12 @@ function buildProposals(rules, inactive, stats, opts) {
   const stales = [];
   const expireds = [];
   const label = windowLabel(opts.window);
+  const t = tr(opts.lang);
   for (const rule of rules) {
     const s = stats.get(rule.name);
     const n = s?.inWindow ?? 0;
     if (n >= opts.min && s) {
+      const top = s.topDetail ? t(CORRECT_TOP_DETAIL, oneLine2(s.topDetail)) : "";
       if (rule.count < 3) {
         bumps.push({
           kind: "bump",
@@ -8963,7 +9107,7 @@ function buildProposals(rules, inactive, stats, opts) {
           from: rule.count,
           to: 3,
           n,
-          reason: `直近 ${label} で ${n} 回違反（${countsText(s.bySeverity)}）。確定ルールへ昇格${s.topDetail ? `。最多: ${oneLine2(s.topDetail)}` : ""}`
+          reason: t(CORRECT_BUMP_TO_CONFIRMED, label, n, countsText(s.bySeverity), top)
         });
       } else if (rule.count < 5) {
         const strong = (s.bySeverity.ask ?? 0) + (s.bySeverity.block ?? 0);
@@ -8975,7 +9119,7 @@ function buildProposals(rules, inactive, stats, opts) {
             from: rule.count,
             to: 5,
             n,
-            reason: `直近 ${label} で ask / block が ${strong} 回（${countsText(s.bySeverity)}）。deny へ引き上げ${s.topDetail ? `。最多: ${oneLine2(s.topDetail)}` : ""}`
+            reason: t(CORRECT_BUMP_TO_DENY, label, strong, countsText(s.bySeverity), top)
           });
         }
       }
@@ -8985,8 +9129,8 @@ function buildProposals(rules, inactive, stats, opts) {
         kind: "enforce",
         rule: rule.name,
         path: rule.path,
-        reason: `count ${rule.count} の確定ルールだが enforce が無く、hook が検知できない（違反ログにも出ない）`,
-        template: ENFORCE_TEMPLATE
+        reason: t(CORRECT_NO_ENFORCE, rule.count),
+        template: enforceTemplate(opts.lang)
       });
     }
     if (rule.count >= 3 && rule.enforce.length > 0 && n === 0 && (s?.total ?? 0) === 0) {
@@ -8994,23 +9138,24 @@ function buildProposals(rules, inactive, stats, opts) {
         kind: "stale",
         rule: rule.name,
         path: rule.path,
-        reason: `enforce ありで違反ログに一度も出ていない。enforce が効いているか、ルールが古くなっていないか確認`
+        reason: t(CORRECT_STALE)
       });
     }
   }
   for (const rule of inactive) {
-    expireds.push({ kind: "expired", rule: rule.name, path: rule.path, reason: `${inactiveReason(rule, opts.now)}。削除または更新を検討` });
+    expireds.push({ kind: "expired", rule: rule.name, path: rule.path, reason: t(CORRECT_EXPIRED_ACTION, inactiveReason(rule, opts.now, opts.lang)) });
   }
   bumps.sort((a, b) => b.to - a.to || b.n - a.n);
   return [...bumps.map(({ n: _n, ...p }) => p), ...enforces, ...stales, ...expireds];
 }
 function formatReport(proposals, stats, opts, rulesCount, applied) {
+  const t = tr(opts.lang);
   let violations = 0;
   for (const s of stats.values())
     violations += s.inWindow;
-  const lines = [`[correct] 直近 ${windowLabel(opts.window)}: ルール ${rulesCount} 件 / 違反 ${violations} 件`];
+  const lines = [t(CORRECT_REPORT_HEADER, windowLabel(opts.window), rulesCount, violations)];
   if (proposals.length === 0) {
-    lines.push("提案はありません。");
+    lines.push(t(CORRECT_NO_PROPOSALS));
   } else {
     for (const p of proposals) {
       const head = p.kind === "bump" ? `${p.rule}: count ${p.from} → ${p.to}` : p.rule;
@@ -9018,11 +9163,11 @@ function formatReport(proposals, stats, opts, rulesCount, applied) {
     }
   }
   if (opts.apply) {
-    lines.push(!applied || applied.length === 0 ? "apply: 書き換えたファイルはありません。" : "apply: count を書き換えました。");
+    lines.push(t(!applied || applied.length === 0 ? CORRECT_APPLY_NONE : CORRECT_APPLY_DONE));
     for (const a of applied ?? [])
       lines.push(`  - ${a.path} (count ${a.from} → ${a.to})`);
   } else {
-    lines.push("`/correct apply` で bump の count 引き上げをファイルに書き込みます（enforce は提案のみ）。");
+    lines.push(t(CORRECT_APPLY_HINT));
   }
   return lines.join(`
 `);
@@ -9049,18 +9194,13 @@ async function applyCountBumps(io, proposals) {
   }
   return applied;
 }
-function buildContext(proposals, applied) {
+function buildContext(proposals, applied, lang) {
   if (proposals.length === 0)
     return [];
-  const lines = [
-    "/correct の結果です。ユーザーに上記の提案を提示してください。",
-    "- enforce の追加は、対象ルールの本文から正規表現 / glob を起こして具体案を提案する（雛形は rules/feedback_rules.md の enforce 節）。",
-    "- ファイルを書き換える前に、必ずユーザーに確認する（rules/feedback_rules.md のルールどおり）。",
-    "- stale / expired は、ルールを残すか更新・削除するかをユーザーに尋ねる。"
-  ];
-  if (applied.length > 0) {
-    lines.push(`- apply により次のファイルの count をすでに書き換えた。その事実をユーザーに伝えること: ${applied.map((a) => `${a.path} (${a.from} → ${a.to})`).join(", ")}`);
-  }
+  const t = tr(lang);
+  const lines = [t(CORRECT_CONTEXT)];
+  if (applied.length > 0)
+    lines.push(t(CORRECT_CONTEXT_APPLIED, applied.map((a) => `${a.path} (${a.from} → ${a.to})`).join(", ")));
   return [lines.join(`
 `)];
 }
@@ -9089,12 +9229,12 @@ async function correctCommand(io, args) {
     const rules = await listRules(io);
     const inactive = await listInactive(io, rules);
     const stats = aggregateViolations(await readViolations(io), now, parsed.window);
-    const opts = { window: parsed.window, min: parsed.min, now };
+    const opts = { window: parsed.window, min: parsed.min, now, lang: io.lang };
     const proposals = buildProposals(rules, inactive, stats, opts);
     const applied = parsed.apply ? await applyCountBumps(io, proposals) : undefined;
     return {
-      text: formatReport(proposals, stats, { window: parsed.window, apply: parsed.apply }, rules.length, applied),
-      context: buildContext(proposals, applied ?? [])
+      text: formatReport(proposals, stats, { window: parsed.window, apply: parsed.apply, lang: io.lang }, rules.length, applied),
+      context: buildContext(proposals, applied ?? [], io.lang)
     };
   } catch (e) {
     return { text: `[correct] internal error: ${e instanceof Error ? e.message : String(e)}`, context: [] };
@@ -9104,18 +9244,23 @@ async function correctCommand(io, args) {
 // src/engine-io.ts
 var errorText = (e) => e instanceof Error ? e.message : String(e);
 async function readEnv($) {
-  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier] = await Promise.all([
+  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG] = await Promise.all([
     $.env.get("HOME"),
     $.env.get("PATH"),
     $.env.get("CLAUDE_FEEDBACK_DIR"),
     $.env.get("DOGWOOD_BIN"),
     $.env.get("TERM_PROGRAM"),
-    $.env.get("__CFBundleIdentifier")
+    $.env.get("__CFBundleIdentifier"),
+    $.env.get("FEEDBACK_GATE_LANG"),
+    $.env.get("LC_ALL"),
+    $.env.get("LC_MESSAGES"),
+    $.env.get("LANG")
   ]);
-  return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier };
+  return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG };
 }
-async function createIo($) {
+async function createIo($, options = {}) {
   const [env, projectDir, cwd] = await Promise.all([readEnv($), $.session.root(), $.session.cwd()]);
+  const lang = resolveLang(env, options.language);
   const stat = async (path) => {
     try {
       const s = await $.fs.stat(path);
@@ -9146,6 +9291,7 @@ async function createIo($) {
   };
   return {
     env,
+    lang,
     projectDir,
     cwd,
     pluginRoot: $.plugin.root,
@@ -9280,12 +9426,8 @@ async function feedbackGuard(io, payload) {
 }
 
 // src/feedback-inject.ts
-var HEADER = `# 確定フィードバックルール（count >= 3）
-これらは繰り返し指摘された確定ルール。違反すると hook がブロックする。
-
-`;
 async function formatFull(io, rule) {
-  const lines = [`■ ${rule.name} (これまで ${rule.count} 回指摘されています)`, rule.description];
+  const lines = [tr(io.lang)(INJECT_RULE_TITLE, rule.name, rule.count), rule.description];
   const intro = await loadBodyIntro(io, rule.path);
   if (intro)
     lines.push(intro);
@@ -9297,7 +9439,7 @@ async function buildOutput(io, rules) {
   const blocks = [];
   for (const r of [...rules].sort(byCountThenName))
     blocks.push(await formatFull(io, r));
-  return HEADER + blocks.join(`
+  return tr(io.lang)(INJECT_HEADER) + blocks.join(`
 
 `);
 }
@@ -9504,11 +9646,12 @@ async function resetGate(io, payload) {
 
 // src/rules-file.ts
 var DEFAULT_RULES_FILE = "~/.claude/feedback-gate/feedback_rules.md";
+var bundledRulesName = (lang) => lang === "en" ? "feedback_rules.en.md" : "feedback_rules.md";
 async function loadRules(io, rulesFile) {
   const home = io.env.HOME;
   const configured = typeof rulesFile === "string" && rulesFile !== "" ? rulesFile : DEFAULT_RULES_FILE;
   const custom = configured.startsWith("~") ? home ? `${home}${configured.slice(1)}` : undefined : configured;
-  const bundled = join(io.pluginRoot, "rules", "feedback_rules.md");
+  const bundled = join(io.pluginRoot, "rules", bundledRulesName(io.lang));
   for (const path of [custom, bundled]) {
     if (path && await io.exists(path))
       return (await io.readFile(path) ?? "").trim();
@@ -9519,9 +9662,9 @@ async function loadRules(io, rulesFile) {
 // src/register.ts
 var PROGRESS_DELAY_MS = 3000;
 var str = (v) => typeof v === "string" ? v : "";
-async function runSteps($, event, steps) {
+async function runSteps($, options, event, steps) {
   let acc = {};
-  const base = await createIo($);
+  const base = await createIo($, options);
   const sessionId = await $.session.id();
   let shown = false;
   let pending;
@@ -9570,25 +9713,26 @@ async function withNext(next, e, mine) {
 export const register = (on, options) => {
   on("session.start", async ($, e, next) => {
     try {
+      const io = await createIo($, options);
       await $.command.register({
         name: "correct",
-        description: "feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する",
+        description: tr(io.lang)(CORRECT_DESCRIPTION),
         argumentHint: "[--window 30d] [--min 2] [apply]"
       });
     } catch {}
     return next(e);
   });
-  on("command.run", { command: "correct" }, async ($, e) => correctCommand(await createIo($), String(e.args ?? "")));
+  on("command.run", { command: "correct" }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? "")));
   on("classic.SessionStart", async ($, e, next) => {
-    const mine = await runSteps($, "SessionStart", [(io) => resetGate(io, e)]);
+    const mine = await runSteps($, options, "SessionStart", [(io) => resetGate(io, e)]);
     return withNext(next, e, mine);
   });
   on("classic.UserPromptSubmit", async ($, e, next) => {
     const mine = {};
-    const text = await createIo($).then((io) => loadRules(io, options.rulesFile));
+    const text = await createIo($, options).then((io) => loadRules(io, options.rulesFile));
     if (text !== "")
       mine.additionalContext = [text];
-    const inject = await runSteps($, "UserPromptSubmit", [(io) => feedbackInject(io)]);
+    const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io)]);
     return withNext(next, e, merge2(mine, inject));
   });
   on("classic.PreToolUse", async ($, e, next) => {
@@ -9607,39 +9751,43 @@ export const register = (on, options) => {
     };
     if (typeof agentId === "string" && agentId !== "")
       payload.agent_id = agentId;
-    const step = guardsAgents ? async () => agentLaunchGuard(payload) : (io) => feedbackGuard(io, payload);
+    const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
     const steps = tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
-    const mine = await runSteps($, "PreToolUse", steps);
+    const mine = await runSteps($, options, "PreToolUse", steps);
     if (decided(mine))
       return mine;
     return withNext(next, e, mine);
   });
   on("classic.PostToolUse", async ($, e, next) => {
     if (str(e.tool_name) === "Bash") {
-      const mine = await runSteps($, "PostToolUse", [(io) => bashChanges(io, e)]);
+      const mine = await runSteps($, options, "PostToolUse", [(io) => bashChanges(io, e)]);
       return withNext(next, e, mine);
     }
     if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name)))
       return next(e);
-    const mine = await runSteps($, "PostToolUse", [(io) => recordChanges(io, e), (io) => feedbackPostEdit(io, e), (io) => stopTestGate(io, "rules", e)]);
+    const mine = await runSteps($, options, "PostToolUse", [
+      (io) => recordChanges(io, e),
+      (io) => feedbackPostEdit(io, e),
+      (io) => stopTestGate(io, "rules", e)
+    ]);
     return withNext(next, e, mine);
   });
   on("classic.Notification", async ($, e, next) => {
-    await runSteps($, "Notification", [(io) => notification(io, "notify", e)]);
+    await runSteps($, options, "Notification", [(io) => notification(io, "notify", e)]);
     return next(e);
   });
   on("classic.Stop", async ($, e, next) => {
-    const mine = await runSteps($, "Stop", [(io) => allStop(io, e)]);
+    const mine = await runSteps($, options, "Stop", [(io) => allStop(io, e)]);
     return withNext(next, e, mine);
   });
   on("classic.SubagentStop", async ($, e, next) => {
-    const mine = await runSteps($, "SubagentStop", [(io) => stopTestGate(io, "checks", e), (io) => feedbackStopCheck(io, e)]);
+    const mine = await runSteps($, options, "SubagentStop", [(io) => stopTestGate(io, "checks", e), (io) => feedbackStopCheck(io, e)]);
     return withNext(next, e, mine);
   });
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (e.props.hasSurvey)
       return next(e);
-    const io = await createIo($);
-    return runningBand(await listRunning(io, await $.session.id()), await io.now()) ?? next(e);
+    const io = await createIo($, options);
+    return runningBand(await listRunning(io, await $.session.id()), await io.now(), io.lang) ?? next(e);
   });
 };
