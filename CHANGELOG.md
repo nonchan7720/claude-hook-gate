@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.5.0...v0.5.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* key the Bash start time by tool_use_id so subagent Bash edits reach the gate ([#24](https://github.com/nonchan7720/claude-hook-gate/issues/24)) ([85a8587](https://github.com/nonchan7720/claude-hook-gate/commit/85a8587c462cbc4c70a8f65d331ea55013da1afc))
+
 ## [0.5.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.4.1...v0.5.0) (2026-10-10)
 
 
