@@ -10,7 +10,6 @@
 // どちらにも該当しなければ何も出力せず、通常のパーミッション判定に委ねる。
 import { type Lang, tr } from './i18n.ts'
 import { ok, type ScriptResult } from './io.ts'
-import { LAUNCH_CHECKLIST, LAUNCH_MESSAGE_TO, LAUNCH_PROMPT_TO, LAUNCH_UNKNOWN_RECIPIENT } from './messages.ts'
 import { type Dict, isDict, jqStr } from './pyutil.ts'
 
 export const ASK_AGENT_TYPES = ['code-implementer']
@@ -37,12 +36,12 @@ export function agentLaunchGuard(payload: Dict, lang: Lang): ScriptResult {
     const agentType = jqStr(input.subagent_type)
     if (agentType === '') return ok()
     if (ASK_AGENT_TYPES.includes(agentType)) {
-      return ask(`${t(LAUNCH_PROMPT_TO, agentType)}\n\n${jqStr(input.prompt)}\n\n${t(LAUNCH_CHECKLIST)}`)
+      return ask(`${t('launch.promptTo', { agentType })}\n\n${jqStr(input.prompt)}\n\n${t('launch.checklist')}`)
     }
   } else if (tool === 'SendMessage') {
     const recipient = jqStr(input.to)
     if (!ALLOW_RECIPIENTS.includes(recipient)) {
-      return ask(`${t(LAUNCH_MESSAGE_TO, recipient || t(LAUNCH_UNKNOWN_RECIPIENT))}\n\n${jqStr(input.message)}\n\n${t(LAUNCH_CHECKLIST)}`)
+      return ask(`${t('launch.messageTo', { recipient: recipient || t('launch.unknownRecipient') })}\n\n${jqStr(input.message)}\n\n${t('launch.checklist')}`)
     }
   }
   return ok()

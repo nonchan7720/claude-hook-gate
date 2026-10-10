@@ -10,7 +10,6 @@ import { feedbackPostEdit } from './feedback-post-edit.ts'
 import { feedbackStopCheck } from './feedback-stop-check.ts'
 import { tr } from './i18n.ts'
 import type { Io, ScriptResult } from './io.ts'
-import { CORRECT_DESCRIPTION } from './messages.ts'
 import { notification } from './notification.ts'
 import { decided, merge, type Outcome, toOutcome } from './outcome.ts'
 import type { Dict } from './pyutil.ts'
@@ -86,7 +85,7 @@ export const register: Register = (on, options) => {
       const io = await createIo($, options)
       await $.command.register({
         name: 'correct',
-        description: tr(io.lang)(CORRECT_DESCRIPTION),
+        description: tr(io.lang)('correct.description'),
         argumentHint: '[--window 30d] [--min 2] [apply]',
       })
     } catch {

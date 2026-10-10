@@ -6,7 +6,6 @@
 import type { RenderElement } from 'claude-code'
 import { type Lang, tr } from './i18n.ts'
 import type { Io } from './io.ts'
-import { BAND_DONE, BAND_RUNNING, BAND_WAITING } from './messages.ts'
 import { join } from './path.ts'
 import { isDict } from './pyutil.ts'
 
@@ -103,13 +102,13 @@ function runningLine(e: RunningEntry, now: number, lang: Lang): string {
   if (e.result) return `${INDENT}${doneText(e, now)}`
   const seconds = Math.max(0, Math.floor((now - e.started) / 1000))
   const head = e.name ? `${INDENT}${e.name} $ ` : INDENT
-  const tail = `${e.waiting ? ` ${tr(lang)(BAND_WAITING)}` : ''} (${seconds}s)`
+  const tail = `${e.waiting ? ` ${tr(lang)('band.waiting')}` : ''} (${seconds}s)`
   return `${head}${cutCmd(foldCmd(e.cmd), BAND_LINE_MAX - head.length - tail.length)}${tail}`
 }
 
 /** 帯に描く行: 見出し 1 行 + 1 項目 1 行。完了項目は所要時間を固定し、実行中の項目は now からの経過秒を出す。 */
 export function runningLines(entries: readonly RunningEntry[], now: number, lang: Lang): string[] {
-  return [tr(lang)(BAND_RUNNING), ...entries.map((e) => runningLine(e, now, lang))]
+  return [tr(lang)('band.running'), ...entries.map((e) => runningLine(e, now, lang))]
 }
 
 /** 実行中・完了待ちの項目が 1 つでもある間だけ帯の木を返す。全部終わっていれば undefined（帯を譲る）。 */
@@ -133,7 +132,7 @@ export function finishedSummary(entries: readonly RunningEntry[], lang: Lang): s
   const counts = [passed > 0 ? `✓ ${passed}` : '', failed > 0 ? `✗ ${failed}` : ''].filter((s) => s !== '').join(' / ')
   const first = Math.min(...entries.map((e) => e.started))
   const last = Math.max(...entries.map((e) => e.ended ?? e.started))
-  return tr(lang)(BAND_DONE, counts, ((last - first) / 1000).toFixed(1))
+  return tr(lang)('band.done', { counts, seconds: ((last - first) / 1000).toFixed(1) })
 }
 
 // 完了サマリは gate が終わると一覧（running/）から消えるので、次の gate コマンドが走り始めるまで残すために

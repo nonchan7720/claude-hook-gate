@@ -3,7 +3,6 @@
 import { runGate } from './gate.ts'
 import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
-import { GATE_YML_TYPO } from './messages.ts'
 import { join } from './path.ts'
 import { type Dict, jqStr } from './pyutil.ts'
 
@@ -11,7 +10,7 @@ export async function stopTestGate(io: Io, phase: string | undefined, payload: D
   const projectDir = io.projectDir || io.cwd
   if (!(await io.exists(join(projectDir, '.claude', 'gate.yaml')))) {
     if (await io.exists(join(projectDir, '.claude', 'gate.yml'))) {
-      return ok(`${JSON.stringify({ systemMessage: tr(io.lang)(GATE_YML_TYPO) })}\n`)
+      return ok(`${JSON.stringify({ systemMessage: tr(io.lang)('gate.ymlTypo') })}\n`)
     }
     return ok()
   }

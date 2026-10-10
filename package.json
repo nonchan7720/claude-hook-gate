@@ -1,10 +1,19 @@
 {
   "name": "claude-hook-gate",
   "version": "0.4.1",
-  "private": true,
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@types/bun": "1.4.2",
+    "@types/node": "26.6.3",
+    "@types/picomatch": "4.0.3",
+    "i18next": "26.4.2",
+    "picomatch": "4.0.7",
+    "typescript": "7.0.2",
+    "yaml": "2.9.1"
+  },
   "description": "feedback-gate: Claude Code function hooks for feedback rules and per-project quality gates",
   "license": "MIT",
-  "type": "module",
+  "private": true,
   "scripts": {
     "lint": "biome check .",
     "format": "biome check --write .",
@@ -13,13 +22,5 @@
     "test:plugin": "bun run build && claude plugin test .",
     "build": "bun scripts/build.ts"
   },
-  "devDependencies": {
-    "@biomejs/biome": "2.5.14",
-    "@types/bun": "1.4.2",
-    "@types/node": "26.6.3",
-    "@types/picomatch": "4.0.3",
-    "picomatch": "4.0.7",
-    "typescript": "7.0.2",
-    "yaml": "2.9.1"
-  }
+  "type": "module"
 }

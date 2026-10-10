@@ -5,25 +5,6 @@
 import { FRONTMATTER_RE, feedbackDir, isRuleActive, listRules, projectFeedbackDir, type Rule, violationsLogPath } from './feedback-rules.ts'
 import { type Lang, tr } from './i18n.ts'
 import type { Io } from './io.ts'
-import {
-  CORRECT_APPLY_DONE,
-  CORRECT_APPLY_HINT,
-  CORRECT_APPLY_NONE,
-  CORRECT_BUMP_TO_CONFIRMED,
-  CORRECT_BUMP_TO_DENY,
-  CORRECT_CONDITIONS,
-  CORRECT_CONTEXT,
-  CORRECT_CONTEXT_APPLIED,
-  CORRECT_ENFORCE_TEMPLATE,
-  CORRECT_EXPIRED,
-  CORRECT_EXPIRED_ACTION,
-  CORRECT_NO_ENFORCE,
-  CORRECT_NO_PROPOSALS,
-  CORRECT_NOT_MATCHING,
-  CORRECT_REPORT_HEADER,
-  CORRECT_STALE,
-  CORRECT_TOP_DETAIL,
-} from './messages.ts'
 
 const HOUR_MS = 3_600_000
 const DAY_MS = 86_400_000
@@ -174,7 +155,7 @@ export function aggregateViolations(entries: ViolationEntry[], now: number, wind
 }
 
 /** rules/feedback_rules.md の enforce 節と同じ 4 イベントの雛形。 */
-export const enforceTemplate = (lang: Lang): string => tr(lang)(CORRECT_ENFORCE_TEMPLATE)
+export const enforceTemplate = (lang: Lang): string => tr(lang)('correct.enforceTemplate')
 
 const oneLine = (s: string, max = 60): string => {
   const flat = s.replace(/\s+/g, ' ').trim()
@@ -189,11 +170,11 @@ const countsText = (rec: Record<string, number>): string =>
 
 function inactiveReason(rule: Rule, now: number, lang: Lang): string {
   const t = tr(lang)
-  if (rule.expires !== undefined && now > rule.expires) return t(CORRECT_EXPIRED, new Date(rule.expires).toISOString().slice(0, 10))
+  if (rule.expires !== undefined && now > rule.expires) return t('correct.expired', { date: new Date(rule.expires).toISOString().slice(0, 10) })
   const parts: string[] = []
   if (rule.projects.length > 0) parts.push('projects')
   if (rule.whenExists.length > 0) parts.push('when_exists')
-  return t(CORRECT_NOT_MATCHING, parts.join(' / ') || t(CORRECT_CONDITIONS))
+  return t('correct.notMatching', { what: parts.join(' / ') || t('correct.conditions') })
 }
 
 /** 提案を作る。並びは bump（to 降順、違反数降順）→ enforce → stale → expired。 */
@@ -209,7 +190,7 @@ export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<strin
     const s = stats.get(rule.name)
     const n = s?.inWindow ?? 0
     if (n >= opts.min && s) {
-      const top = s.topDetail ? t(CORRECT_TOP_DETAIL, oneLine(s.topDetail)) : ''
+      const top = s.topDetail ? t('correct.topDetail', { detail: oneLine(s.topDetail) }) : ''
       if (rule.count < 3) {
         bumps.push({
           kind: 'bump',
@@ -218,7 +199,7 @@ export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<strin
           from: rule.count,
           to: 3,
           n,
-          reason: t(CORRECT_BUMP_TO_CONFIRMED, label, n, countsText(s.bySeverity), top),
+          reason: t('correct.bumpToConfirmed', { window: label, n, counts: countsText(s.bySeverity), top }),
         })
       } else if (rule.count < 5) {
         const strong = (s.bySeverity.ask ?? 0) + (s.bySeverity.block ?? 0)
@@ -230,7 +211,7 @@ export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<strin
             from: rule.count,
             to: 5,
             n,
-            reason: t(CORRECT_BUMP_TO_DENY, label, strong, countsText(s.bySeverity), top),
+            reason: t('correct.bumpToDeny', { window: label, strong, counts: countsText(s.bySeverity), top }),
           })
         }
       }
@@ -240,7 +221,7 @@ export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<strin
         kind: 'enforce',
         rule: rule.name,
         path: rule.path,
-        reason: t(CORRECT_NO_ENFORCE, rule.count),
+        reason: t('correct.noEnforce', { count: rule.count }),
         template: enforceTemplate(opts.lang),
       })
     }
@@ -249,12 +230,17 @@ export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<strin
         kind: 'stale',
         rule: rule.name,
         path: rule.path,
-        reason: t(CORRECT_STALE),
+        reason: t('correct.stale'),
       })
     }
   }
   for (const rule of inactive) {
-    expireds.push({ kind: 'expired', rule: rule.name, path: rule.path, reason: t(CORRECT_EXPIRED_ACTION, inactiveReason(rule, opts.now, opts.lang)) })
+    expireds.push({
+      kind: 'expired',
+      rule: rule.name,
+      path: rule.path,
+      reason: t('correct.expiredAction', { reason: inactiveReason(rule, opts.now, opts.lang) }),
+    })
   }
 
   bumps.sort((a, b) => b.to - a.to || b.n - a.n)
@@ -272,9 +258,9 @@ export function formatReport(
   const t = tr(opts.lang)
   let violations = 0
   for (const s of stats.values()) violations += s.inWindow
-  const lines = [t(CORRECT_REPORT_HEADER, windowLabel(opts.window), rulesCount, violations)]
+  const lines = [t('correct.reportHeader', { window: windowLabel(opts.window), rules: rulesCount, violations })]
   if (proposals.length === 0) {
-    lines.push(t(CORRECT_NO_PROPOSALS))
+    lines.push(t('correct.noProposals'))
   } else {
     for (const p of proposals) {
       const head = p.kind === 'bump' ? `${p.rule}: count ${p.from} → ${p.to}` : p.rule
@@ -282,10 +268,10 @@ export function formatReport(
     }
   }
   if (opts.apply) {
-    lines.push(t(!applied || applied.length === 0 ? CORRECT_APPLY_NONE : CORRECT_APPLY_DONE))
+    lines.push(t(!applied || applied.length === 0 ? 'correct.applyNone' : 'correct.applyDone'))
     for (const a of applied ?? []) lines.push(`  - ${a.path} (count ${a.from} → ${a.to})`)
   } else {
-    lines.push(t(CORRECT_APPLY_HINT))
+    lines.push(t('correct.applyHint'))
   }
   return lines.join('\n')
 }
@@ -317,8 +303,8 @@ export async function applyCountBumps(io: Io, proposals: Proposal[]): Promise<Ap
 export function buildContext(proposals: Proposal[], applied: Applied[], lang: Lang): string[] {
   if (proposals.length === 0) return []
   const t = tr(lang)
-  const lines = [t(CORRECT_CONTEXT)]
-  if (applied.length > 0) lines.push(t(CORRECT_CONTEXT_APPLIED, applied.map((a) => `${a.path} (${a.from} → ${a.to})`).join(', ')))
+  const lines = [t('correct.context')]
+  if (applied.length > 0) lines.push(t('correct.contextApplied', { list: applied.map((a) => `${a.path} (${a.from} → ${a.to})`).join(', ') }))
   return [lines.join('\n')]
 }
 

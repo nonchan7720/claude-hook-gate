@@ -98,52 +98,6 @@ import { matchPatterns, type PatternPair } from './glob.ts'
 import { type Lang, type Translate, tr } from './i18n.ts'
 import type { Io, ScriptResult } from './io.ts'
 import { parseYaml } from './load-yaml.ts'
-import {
-  DOGWOOD_BAD_JSON,
-  DOGWOOD_BAD_VERDICT,
-  DOGWOOD_EXITED,
-  DOGWOOD_NO_VERDICT,
-  DOGWOOD_NOT_FOUND,
-  DOGWOOD_RUN_FAILED,
-  GATE_ALL_PASSED,
-  GATE_AND_MORE,
-  GATE_BAD_PER_FILE_DIR,
-  GATE_CANNOT_READ_YAML,
-  GATE_CHECK_NO_CWD,
-  GATE_CHECK_NOT_FOUND,
-  GATE_CHECK_NOT_FOUND_SUMMARY,
-  GATE_CHECKS_FAILED,
-  GATE_CHECKS_GAVE_UP,
-  GATE_CHECKS_GAVE_UP_STDERR,
-  GATE_CHECKS_PASSED,
-  GATE_DEFERRED_NO_CWD,
-  GATE_DEFERRED_TITLE,
-  GATE_FAILED_OUTPUT_HEADER,
-  GATE_FAILURES_OMITTED,
-  GATE_HEAD_OMITTED,
-  GATE_INTERNAL_ERROR,
-  GATE_NESTED_PARALLEL,
-  GATE_NOTE_NO_CWD,
-  GATE_NOTE_POLICY_SKIPPED,
-  GATE_NOTE_POLICY_UNEVALUATED,
-  GATE_NOTHING_TO_RUN,
-  GATE_POLICY_NOT_FOUND,
-  GATE_POLICY_SKIPPED,
-  GATE_POLICY_UNEVALUATED,
-  GATE_REST_OMITTED,
-  GATE_ROOT_NO_CWD,
-  GATE_RULE_NO_CWD,
-  GATE_RULES_FAILED,
-  GATE_RULES_PASSED,
-  GATE_SHARED_RESULT,
-  GATE_SKIP_BAD_PER_FILE_DIR,
-  GATE_SKIP_CHECK_UNDEFINED,
-  GATE_SKIP_NO_CWD,
-  GATE_SKIP_UNMATCHED,
-  GATE_TIMEOUT,
-  GATE_WORKTREE_NOT_FOUND,
-  GATE_YML_TYPO,
-} from './messages.ts'
 import { basename, dirname, expandUser, isAbsolute, join, normpath, relpath } from './path.ts'
 import { type Dict, isDict, pyRepr, truthy } from './pyutil.ts'
 import { splitRoot as splitRootOf } from './roots.ts'
@@ -346,7 +300,7 @@ export function summarizeCmds(cmds: RunItem[]): string {
 export function tailOutput(lang: Lang, out: string, limit = FAIL_TAIL_LINES): string {
   const lines = out.trimEnd().split(/\r?\n/)
   if (lines.length <= limit) return lines.join('\n')
-  return [tr(lang)(GATE_HEAD_OMITTED, lines.length - limit), ...lines.slice(-limit)].join('\n')
+  return [tr(lang)('gate.headOmitted', { n: lines.length - limit }), ...lines.slice(-limit)].join('\n')
 }
 
 /** 失敗詳細を1つの文字列にまとめる。全体が上限を超えたら残りは省略して log を見るよう促す。 */
@@ -362,11 +316,11 @@ export function failureDetails(lang: Lang, failures: string[]): string {
       omitted = failures.length - i
       break
     }
-    if (used + d.length + 1 > FAIL_DETAIL_MAX) d = `${d.slice(0, FAIL_DETAIL_MAX)}\n${t(GATE_REST_OMITTED)}`
+    if (used + d.length + 1 > FAIL_DETAIL_MAX) d = `${d.slice(0, FAIL_DETAIL_MAX)}\n${t('gate.restOmitted')}`
     text += `${d}\n`
     used += d.length + 1
   }
-  if (omitted) text += `${t(GATE_FAILURES_OMITTED, omitted)}\n`
+  if (omitted) text += `${t('gate.failuresOmitted', { n: omitted })}\n`
   return text.trimEnd()
 }
 
@@ -705,7 +659,7 @@ export class Gate {
     const policy = isDefault ? this.defaultPolicy : this.resolvePolicyPath(rootDir, value)
     if (!policy || !(await this.io.exists(policy))) {
       if (!isDefault && policy && logs) {
-        logs.push(this.t(GATE_POLICY_NOT_FOUND, policy))
+        logs.push(this.t('gate.policyNotFound', { policy }))
       }
       return null
     }
@@ -720,7 +674,7 @@ export class Gate {
    */
   async dogwoodVerdict(policy: string, schema: string, rootDir: string, name: string, cmd: string): Promise<[string | null, string | null]> {
     const binpath = await this.resolveDogwood()
-    if (!binpath) return [null, this.t(DOGWOOD_NOT_FOUND)]
+    if (!binpath) return [null, this.t('dogwood.notFound')]
     const history = await this.readTrace(rootDir)
     const lastTs = history.length > 0 ? Number(history[history.length - 1]?.ts) || 0 : 0
     const now = await this.io.now()
@@ -737,11 +691,11 @@ export class Gate {
       await this.rm(tracefile)
     }
     if (r.error !== undefined || r.timedOut) {
-      return [null, this.t(DOGWOOD_RUN_FAILED, r.error ?? 'timed out')]
+      return [null, this.t('dogwood.runFailed', { error: r.error ?? 'timed out' })]
     }
     if (r.exitCode !== 0) {
       const detail = (r.stderr || r.stdout || '').trim().replaceAll('\n', ' ').slice(0, 200)
-      return [null, this.t(DOGWOOD_EXITED, r.exitCode, detail)]
+      return [null, this.t('dogwood.exited', { code: r.exitCode, detail })]
     }
     let verdicts: unknown[]
     try {
@@ -749,12 +703,12 @@ export class Gate {
       const v = isDict(parsed) ? parsed.verdicts : undefined
       verdicts = Array.isArray(v) ? v : []
     } catch {
-      return [null, this.t(DOGWOOD_BAD_JSON)]
+      return [null, this.t('dogwood.badJson')]
     }
-    if (verdicts.length === 0) return [null, this.t(DOGWOOD_NO_VERDICT)]
+    if (verdicts.length === 0) return [null, this.t('dogwood.noVerdict')]
     const last = verdicts[verdicts.length - 1]
     const verdict = String((isDict(last) ? last.verdict : '') || '').toLowerCase()
-    if (verdict !== 'allow' && verdict !== 'deny') return [null, this.t(DOGWOOD_BAD_VERDICT, pyRepr(verdict))]
+    if (verdict !== 'allow' && verdict !== 'deny') return [null, this.t('dogwood.badVerdict', { verdict: pyRepr(verdict) })]
     return [verdict, null]
   }
 
@@ -833,7 +787,7 @@ export class Gate {
     if (!r.shared) return r.outcome
     const uid = `${Math.floor((await this.io.now()) / 1000)}-${logSeq++}`
     const logpath = join(this.logDir, `${slug(name || cmd)}.${uid}.log`)
-    const header = `$ ${cmd}  (cwd: ${cwd})\n${this.t(GATE_SHARED_RESULT, r.outcome.logpath)}\n`
+    const header = `$ ${cmd}  (cwd: ${cwd})\n${this.t('gate.sharedResult', { logpath: r.outcome.logpath })}\n`
     await this.io.writeFile(logpath, header + r.outcome.out).catch(() => undefined)
     return { ...r.outcome, logpath }
   }
@@ -930,7 +884,7 @@ export class Gate {
       detail.push(tailOutput(this.io.lang, out))
     }
     if (timedOut) {
-      const msg = this.t(GATE_TIMEOUT, timeout)
+      const msg = this.t('gate.timeout', { seconds: timeout })
       chunk.lines.push(msg)
       detail.push(msg)
     }
@@ -948,7 +902,7 @@ export class Gate {
 
   withDetails(prefix: string): string {
     const details = failureDetails(this.io.lang, this.failures)
-    return prefix + (details ? `\n\n${this.t(GATE_FAILED_OUTPUT_HEADER)}\n${details}` : '')
+    return prefix + (details ? `\n\n${this.t('gate.failedOutputHeader')}\n${details}` : '')
   }
 
   /** parallel ブロック内のコマンドを並行実行。ログは定義順で出力。失敗があれば true。 */
@@ -966,7 +920,7 @@ export class Gate {
     const tasks: Array<[string, number, string | null, ExecScope]> = []
     for (const item of items) {
       if (isParallel(item)) {
-        logs.push(this.t(GATE_NESTED_PARALLEL, label))
+        logs.push(this.t('gate.nestedParallel', { label }))
         failed = true
         continue
       }
@@ -1030,7 +984,7 @@ export class Gate {
       if (!cmd) continue
       const label = `deferred:${entry.label || '.'}`
       if ((await this.io.stat(cwd))?.kind !== 'dir') {
-        logs.push(this.t(GATE_DEFERRED_NO_CWD, label, cwd))
+        logs.push(this.t('gate.deferredNoCwd', { label, cwd }))
         continue
       }
       const name = entry.name || slug(cmd)
@@ -1104,7 +1058,7 @@ export class Gate {
 
   async loadAction(path: string): Promise<GateConfig | null> {
     const text = await this.io.readFile(path)
-    if (text === undefined) throw new Error(this.t(GATE_CANNOT_READ_YAML, path))
+    if (text === undefined) throw new Error(this.t('gate.cannotReadYaml', { path }))
     return parseYaml(text) as GateConfig | null
   }
 
@@ -1116,8 +1070,8 @@ export class Gate {
     const unmatched = [...new Set(rels)].filter((r) => !covered.has(r)).sort()
     if (unmatched.length === 0) return
     const shown = unmatched.slice(0, UNMATCHED_SHOWN).join(', ')
-    const more = unmatched.length > UNMATCHED_SHOWN ? this.t(GATE_AND_MORE, unmatched.length - UNMATCHED_SHOWN) : ''
-    this.status.push(this.t(GATE_SKIP_UNMATCHED, `${shown}${more}`))
+    const more = unmatched.length > UNMATCHED_SHOWN ? this.t('gate.andMore', { n: unmatched.length - UNMATCHED_SHOWN }) : ''
+    this.status.push(this.t('gate.skipUnmatched', { files: `${shown}${more}` }))
   }
 
   /**
@@ -1161,8 +1115,8 @@ export class Gate {
       if (truthy(rawPerFileDir)) {
         const mode = normalizePerFileDirMode(rawPerFileDir)
         if (mode === null) {
-          logs.push(this.t(GATE_BAD_PER_FILE_DIR, pyRepr(rawPerFileDir)))
-          summary.push(`${summarizeCmds(cmds)}  ${this.t(GATE_SKIP_BAD_PER_FILE_DIR)}`)
+          logs.push(this.t('gate.badPerFileDir', { value: pyRepr(rawPerFileDir) }))
+          summary.push(`${summarizeCmds(cmds)}  ${this.t('gate.skipBadPerFileDir')}`)
           failed = true
           for (const f of ruleFiles) failFiles.add(f)
           continue
@@ -1176,9 +1130,9 @@ export class Gate {
           const label = d || '.'
           const dirFiles = matched.filter((rp) => rootsByRel[rp] === d)
           if ((await this.io.stat(cwd))?.kind !== 'dir') {
-            logs.push(this.t(GATE_ROOT_NO_CWD, label, cwd))
-            summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t(GATE_SKIP_NO_CWD)}`)
-            this.note('skip', label, summarizeCmds(cmds), this.t(GATE_NOTE_NO_CWD))
+            logs.push(this.t('gate.rootNoCwd', { label, cwd }))
+            summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t('gate.skipNoCwd')}`)
+            this.note('skip', label, summarizeCmds(cmds), this.t('gate.noteNoCwd'))
             continue
           }
           summary.push(`(${label}) ${summarizeCmds(cmds)}`)
@@ -1193,9 +1147,9 @@ export class Gate {
         const cwd = rule.dir ? join(rootDir, rule.dir) : rootDir
         const label = rule.dir ?? '.'
         if ((await this.io.stat(cwd))?.kind !== 'dir') {
-          logs.push(this.t(GATE_RULE_NO_CWD, label, cwd))
-          summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t(GATE_SKIP_NO_CWD)}`)
-          this.note('skip', label, summarizeCmds(cmds), this.t(GATE_NOTE_NO_CWD))
+          logs.push(this.t('gate.ruleNoCwd', { label, cwd }))
+          summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t('gate.skipNoCwd')}`)
+          this.note('skip', label, summarizeCmds(cmds), this.t('gate.noteNoCwd'))
           continue
         }
         summary.push(`(${label}) ${summarizeCmds(cmds)}`)
@@ -1231,7 +1185,7 @@ export class Gate {
       const rels = relsByRoot.get(root) || []
       if (rels.length === 0) continue
       if (root !== this.projectDir && (await this.io.stat(root))?.kind !== 'dir') {
-        logs.push(this.t(GATE_WORKTREE_NOT_FOUND, root))
+        logs.push(this.t('gate.worktreeNotFound', { root }))
         for (const rp of rels) consumedKeys.add(mk(root, rp))
         continue
       }
@@ -1357,12 +1311,12 @@ export class Gate {
 
     if (failed) {
       this.writeErr(`${[...this.status, ...logs].join('\n')}\n`)
-      this.writeErr(`${this.t(GATE_RULES_FAILED)}\n`)
+      this.writeErr(`${this.t('gate.rulesFailed')}\n`)
       return 2
     }
     if (summary.length > 0 || this.status.length > 0) {
       const body = this.statusBlock(summary.map((s) => `✓ ${s}`).join('\n'))
-      this.print({ systemMessage: this.t(GATE_RULES_PASSED, body) })
+      this.print({ systemMessage: this.t('gate.rulesPassed', { body }) })
     }
     return 0
   }
@@ -1383,18 +1337,18 @@ export class Gate {
     for (const name of [...names].sort()) {
       const check = checksByName.get(name)
       if (!check) {
-        logs.push(this.t(GATE_CHECK_NOT_FOUND, name))
-        summary.push(this.t(GATE_CHECK_NOT_FOUND_SUMMARY, name))
-        this.status.push(this.t(GATE_SKIP_CHECK_UNDEFINED, name))
+        logs.push(this.t('gate.checkNotFound', { name }))
+        summary.push(this.t('gate.checkNotFoundSummary', { name }))
+        this.status.push(this.t('gate.skipCheckUndefined', { name }))
         continue
       }
       const cwd = check.dir ? join(rootDir, check.dir) : rootDir
       const cmds = check.run || []
       const timeout = check.timeout || DEFAULT_TIMEOUT
       if ((await this.io.stat(cwd))?.kind !== 'dir') {
-        logs.push(this.t(GATE_CHECK_NO_CWD, name, cwd))
-        summary.push(`(check:${name}) ${summarizeCmds(cmds)}  ${this.t(GATE_SKIP_NO_CWD)}`)
-        this.note('skip', `check:${name}`, summarizeCmds(cmds), this.t(GATE_NOTE_NO_CWD))
+        logs.push(this.t('gate.checkNoCwd', { name, cwd }))
+        summary.push(`(check:${name}) ${summarizeCmds(cmds)}  ${this.t('gate.skipNoCwd')}`)
+        this.note('skip', `check:${name}`, summarizeCmds(cmds), this.t('gate.noteNoCwd'))
         continue
       }
       summary.push(`(check:${name}) ${summarizeCmds(cmds)}`)
@@ -1494,7 +1448,7 @@ export class Gate {
     const droppedRoots = new Set<string>()
     for (const [root, checksMap] of Object.entries(pending)) {
       if (root !== this.projectDir && (await this.io.stat(root))?.kind !== 'dir') {
-        logs.push(this.t(GATE_WORKTREE_NOT_FOUND, root))
+        logs.push(this.t('gate.worktreeNotFound', { root }))
         droppedRoots.add(root)
         continue
       }
@@ -1522,17 +1476,17 @@ export class Gate {
     if (!failed) {
       await this.confirmPending(activePending)
       await this.cleanup([this.count, this.pending])
-      const body = this.statusBlock(summary.length > 0 ? summary.map((s) => `✓ ${s}`).join('\n') : this.t(GATE_NOTHING_TO_RUN))
+      const body = this.statusBlock(summary.length > 0 ? summary.map((s) => `✓ ${s}`).join('\n') : this.t('gate.nothingToRun'))
       if (this.executedLabels.length > 0 && !this.stopHookActive && mainCfg?.report_success !== false) {
         // 失敗ブロック後の続きではない（stop_hook_active でない）ときだけ、成功をエージェントへ 1 回届ける。
         await this.io.writeFile(this.reported, '1\n')
-        const reason = this.t(GATE_ALL_PASSED, this.executedLabels.map((l) => `${l} ✓`).join(' / '))
+        const reason = this.t('gate.allPassed', { labels: this.executedLabels.map((l) => `${l} ✓`).join(' / ') })
         this.writeErr(`${reason}\n`)
         this.print({ decision: 'block', reason })
         return 2
       }
-      const title = Object.keys(pending).length > 0 ? 'consistency checks' : this.t(GATE_DEFERRED_TITLE)
-      this.print({ systemMessage: this.t(GATE_CHECKS_PASSED, title, body) })
+      const title = Object.keys(pending).length > 0 ? 'consistency checks' : this.t('gate.deferredTitle')
+      this.print({ systemMessage: this.t('gate.checksPassed', { title, body }) })
       return 0
     }
 
@@ -1549,13 +1503,13 @@ export class Gate {
     if (attempts >= MAX_ATTEMPTS) {
       await this.requeuePendingToChanged(activePending)
       await this.cleanup([this.count, this.pending])
-      this.writeErr(`${this.t(GATE_CHECKS_GAVE_UP_STDERR, MAX_ATTEMPTS)}\n`)
-      const msg = `${this.t(GATE_CHECKS_GAVE_UP, MAX_ATTEMPTS)}\n${summary.map((s) => `✗ ${s}`).join('\n')}${this.withDetails('')}`
+      this.writeErr(`${this.t('gate.checksGaveUpStderr', { max: MAX_ATTEMPTS })}\n`)
+      const msg = `${this.t('gate.checksGaveUp', { max: MAX_ATTEMPTS })}\n${summary.map((s) => `✗ ${s}`).join('\n')}${this.withDetails('')}`
       this.print({ systemMessage: msg })
       return 0
     }
 
-    const reason = `${this.t(GATE_CHECKS_FAILED, attempts, MAX_ATTEMPTS)}\n${summary.map((s) => `✗ ${s}`).join('\n')}${this.withDetails('')}`
+    const reason = `${this.t('gate.checksFailed', { attempt: attempts, max: MAX_ATTEMPTS })}\n${summary.map((s) => `✗ ${s}`).join('\n')}${this.withDetails('')}`
     this.writeErr(`${reason}\n`)
     // stdout が空だと harness 側の判定で exit 2 が non-blocking 扱いになる不具合があるため、stderr の内容に関わらず必ず JSON を出す。
     this.print({ decision: 'block', reason })
@@ -1565,7 +1519,7 @@ export class Gate {
   async main(): Promise<number> {
     await this.pruneLogs()
     if (!(await this.io.exists(this.action)) && (await this.io.exists(this.gateYml))) {
-      this.print({ systemMessage: this.t(GATE_YML_TYPO) })
+      this.print({ systemMessage: this.t('gate.ymlTypo') })
     }
     if (!(await this.io.exists(this.action))) {
       await this.cleanup()
@@ -1597,7 +1551,7 @@ export class PolicyContext {
     const pname = name || slug(cmd)
     const [verdict, reason] = await this.gate.dogwoodVerdict(this.policy, this.schema, this.rootDir, pname, cmd)
     if (verdict === null) {
-      logs.push(this.gate.t(GATE_POLICY_UNEVALUATED, label, reason ?? '', cmd))
+      logs.push(this.gate.t('gate.policyUnevaluated', { label, reason: reason ?? '', cmd }))
     } else {
       await this.gate.appendTrace(this.rootDir, cwd, pname, cmd, 'request')
       if (verdict === 'allow') {
@@ -1606,9 +1560,9 @@ export class PolicyContext {
         this.state.allowedThisRun.add(`${this.rootDir}\0${cwd}\0${cmd}`)
         return true
       }
-      logs.push(this.gate.t(GATE_POLICY_SKIPPED, label, cmd))
+      logs.push(this.gate.t('gate.policySkipped', { label, cmd }))
     }
-    this.gate.note('skip', label, cmd, verdict ? this.gate.t(GATE_NOTE_POLICY_SKIPPED) : this.gate.t(GATE_NOTE_POLICY_UNEVALUATED, reason ?? ''))
+    this.gate.note('skip', label, cmd, verdict ? this.gate.t('gate.notePolicySkipped') : this.gate.t('gate.notePolicyUnevaluated', { reason: reason ?? '' }))
     this.state.deferredThisRun.add(`${this.rootDir}\0${cwd}\0${cmd}`)
     await this.gate.deferCmd(this.rootDir, cwd, pname, cmd, timeout, label, extraEnv)
     return false
@@ -1627,7 +1581,7 @@ export async function runGate(io: Io, opts: { sessionId?: string; agentId?: stri
     exitCode = await gate.main()
   } catch (e) {
     gate.stderr += `[gate] internal error:\n${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`
-    gate.stdout += `${JSON.stringify({ systemMessage: tr(io.lang)(GATE_INTERNAL_ERROR) })}\n`
+    gate.stdout += `${JSON.stringify({ systemMessage: tr(io.lang)('gate.internalError') })}\n`
     exitCode = 0
   } finally {
     await gate.finishProgress()

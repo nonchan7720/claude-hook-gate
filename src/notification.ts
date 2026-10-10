@@ -1,16 +1,16 @@
 // Notification / Stop 時のデスクトップ通知（macOS の terminal-notifier）。
 // type: notify（確認待ち）| stop（完了）。それ以外は何もしない。
-import { type Msg, tr } from './i18n.ts'
+import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
-import { NOTIFY_DONE, NOTIFY_DONE_FALLBACK, NOTIFY_WAITING, NOTIFY_WAITING_FALLBACK } from './messages.ts'
 import { basename } from './path.ts'
 import { type Dict, jqStr } from './pyutil.ts'
 import { shellQuote } from './shell.ts'
 import { which } from './which.ts'
 
-const LABELS: Record<string, { label: Msg<[]>; fallback: Msg<[]> }> = {
-  notify: { label: NOTIFY_WAITING, fallback: NOTIFY_WAITING_FALLBACK },
-  stop: { label: NOTIFY_DONE, fallback: NOTIFY_DONE_FALLBACK },
+/** 通知の種類ごとの、見出しと本文の既定（locales/*.yaml のキー）。 */
+const LABELS: Record<string, { label: string; fallback: string }> = {
+  notify: { label: 'notify.waiting', fallback: 'notify.waitingFallback' },
+  stop: { label: 'notify.done', fallback: 'notify.doneFallback' },
 }
 
 const FRONT_WINDOW_SCRIPT =

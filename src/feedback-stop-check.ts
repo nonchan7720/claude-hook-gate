@@ -13,7 +13,6 @@
 import { evalStopCheck, getChangedFiles, listRules, logViolation } from './feedback-rules.ts'
 import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
-import { STOP_CHECK_FIX_ABOVE, STOP_CHECK_GAVE_UP } from './messages.ts'
 import { join } from './path.ts'
 import { type Dict, truthy } from './pyutil.ts'
 
@@ -68,13 +67,13 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
 
   const attempts = await bumpAttempts(io, ap)
   if (attempts >= MAX_ATTEMPTS) {
-    stderr += `${tr(io.lang)(STOP_CHECK_GAVE_UP, MAX_ATTEMPTS)}\n`
+    stderr += `${tr(io.lang)('stopCheck.gaveUp', { max: MAX_ATTEMPTS })}\n`
     await io.removeFiles([ap])
     return ok('', stderr)
   }
 
   const lines = blocking.map((v) => `[feedback-stop-check] ${v.rule} (count: ${v.count}): ${v.message} (${v.detail})`)
-  lines.push(tr(io.lang)(STOP_CHECK_FIX_ABOVE, attempts, MAX_ATTEMPTS))
+  lines.push(tr(io.lang)('stopCheck.fixAbove', { attempt: attempts, max: MAX_ATTEMPTS }))
   stderr += lines.map((l) => `${l}\n`).join('')
   const stdout = `${JSON.stringify({ decision: 'block', reason: lines.join('\n') })}\n`
   return { exitCode: 2, stdout, stderr }

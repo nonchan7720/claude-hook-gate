@@ -43,7 +43,7 @@ Everything the hooks print (the feedback rules injected into the context, the bl
 - `auto` (default): follow the OS language. The hooks read `FEEDBACK_GATE_LANG` (a plugin-specific override, `ja` or `en`), then `LC_ALL`, `LC_MESSAGES` and `LANG`, and use the first one that has a value: Japanese when it starts with `ja` (e.g. `ja_JP.UTF-8`), English for anything else (`en_US.UTF-8`, `C`, `POSIX`, ...). When none of them is set, English.
 - `ja` / `en`: always that language, whatever the environment.
 
-The resolution lives in `src/i18n.ts` and the texts in `src/messages.ts`. The examples below show the English texts; with Japanese you get the Japanese ones (e.g. `[gate] 実行中:` for `[gate] running:` and `[gate] 完了:` for `[gate] done:`). Your own `rulesFile` and the `message` of your feedback rules are shown as you wrote them, in any language.
+The texts live in `locales/ja.yaml` and `locales/en.yaml` (one key per message, `{{name}}` for the values filled in at runtime; both files must have the same keys, which a test checks) and are looked up with [i18next](https://www.i18next.com/); the language resolution is in `src/i18n.ts`. To change a wording, edit the YAML. The examples below show the English texts; with Japanese you get the Japanese ones (e.g. `[gate] 実行中:` for `[gate] running:` and `[gate] 完了:` for `[gate] done:`). Your own `rulesFile` and the `message` of your feedback rules are shown as you wrote them, in any language.
 
 ```mermaid
 flowchart LR
@@ -149,7 +149,7 @@ When the `checks` phase (Stop / SubagentStop) actually ran at least one command 
 
 ## Development
 
-Requires [Bun](https://bun.sh). The hook module runs inside Claude Code, which only resolves relative imports and `claude-code`; so the source in `src/` (plus the `yaml` package) is bundled into `hooks/register.js`. `hooks/hooks.json` points at that bundle. All file and process access goes through the engine's `$` API (`$.fs`, `$.process`, `$.env`, `$.session`), wrapped by the `Io` interface in `src/io.ts`; the tests run the same code against Node's `fs` / `child_process`.
+Requires [Bun](https://bun.sh). The hook module runs inside Claude Code, which only resolves relative imports and `claude-code`; so the source in `src/` (plus the `yaml` and `i18next` packages, and the `locales/*.yaml` message files, imported as text) is bundled into `hooks/register.js`. `hooks/hooks.json` points at that bundle. All file and process access goes through the engine's `$` API (`$.fs`, `$.process`, `$.env`, `$.session`), wrapped by the `Io` interface in `src/io.ts`; the tests run the same code against Node's `fs` / `child_process`.
 
 ```
 bun install          # install dev dependencies
