@@ -122,7 +122,9 @@ export const register: Register = (on, options) => {
       tool_input: toolInput,
       tool_use_id,
     }
-    // bash_started の状態 ID を PostToolUse（agent_id）と揃える。
+    // エンジンは classic.PreToolUse のイベントにエージェント ID を入れない（tool.call の入力から agentId を落として
+    // tool / tool_use_id を足した形）。入っていたときだけ揃えておく。bash_started は tool_use_id で引くので、
+    // サブエージェントの中でもここに agent_id が無いことは問題にならない（src/bash-changes.ts）。
     if (typeof agentId === 'string' && agentId !== '') payload.agent_id = agentId
     // settings では `|| true` 付きなので、deny 以外（exit 2 以外）は無視していた。
     const step: Step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload)

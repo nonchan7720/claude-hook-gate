@@ -88,7 +88,7 @@ describe('reset-gate by SessionStart source', () => {
     withTmp(async (proj) => {
       const dir = path.join(proj, '.claude', '.gate-status')
       fs.mkdirSync(dir, { recursive: true })
-      const files = ['bash_started.sess1.json', 'bash_started.sess1--agent1.json'].map((n) => path.join(dir, n))
+      const files = ['bash_started.sess1.json', 'bash_started.sess1--agent1.json', 'bash_started.sess1--toolu_01.json'].map((n) => path.join(dir, n))
       for (const f of files) fs.writeFileSync(f, '{"tool_use_id":"t","started":1}\n')
       await run(proj, 'sess1', 'resume')
       allKept(files)

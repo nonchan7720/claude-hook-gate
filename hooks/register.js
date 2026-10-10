@@ -11451,23 +11451,39 @@ async function allStop(io, payload) {
 // src/bash-changes.ts
 var SKIP_COMMAND_RE = /\bgit\b[^|;&\n]*\b(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/;
 var MTIME_SLACK_MS = 2000;
+var STALE_STARTED_MS = 2 * 60 * 60 * 1000;
 var STATE_DIR = ".gate-status";
 var stateIdOf = (payload) => {
   const sessionId = jqStr(payload.session_id) || "unknown";
   const agentId = jqStr(payload.agent_id);
   return agentId ? `${sessionId}--${agentId}` : sessionId;
 };
-var startedPath = (projectDir, stateId) => join(projectDir, ".claude", STATE_DIR, `bash_started.${stateId}.json`);
+var startedKey = (payload) => {
+  const toolUseId = jqStr(payload.tool_use_id).replace(/[^A-Za-z0-9_.-]/g, "_");
+  if (toolUseId === "")
+    return stateIdOf(payload);
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  return `${sessionId}--${toolUseId}`;
+};
+var startedPath = (projectDir, payload) => join(projectDir, ".claude", STATE_DIR, `bash_started.${startedKey(payload)}.json`);
 async function bashStarted(io, payload) {
   try {
     const projectDir = io.projectDir || io.cwd;
     if (!await io.exists(join(projectDir, ".claude", "gate.yaml")))
       return ok();
     const started = await io.now();
-    await io.writeFile(startedPath(projectDir, stateIdOf(payload)), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}
+    await io.writeFile(startedPath(projectDir, payload), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}
 `);
+    await sweepStale(io, projectDir, jqStr(payload.session_id) || "unknown", started);
   } catch {}
   return ok();
+}
+async function sweepStale(io, projectDir, sessionId, now) {
+  const stateDir = join(projectDir, ".claude", STATE_DIR);
+  const prefix = `bash_started.${sessionId}--`;
+  const stale = (await io.list(stateDir)).filter((e) => e.kind === "file" && e.name.startsWith(prefix) && e.name.endsWith(".json") && e.mtimeMs < now - STALE_STARTED_MS).map((e) => join(stateDir, e.name));
+  if (stale.length > 0)
+    await io.removeFiles(stale);
 }
 async function recordBashChanges(io, payload) {
   try {
@@ -11475,7 +11491,7 @@ async function recordBashChanges(io, payload) {
     if (!await io.exists(join(projectDir, ".claude", "gate.yaml")))
       return [];
     const stateId = stateIdOf(payload);
-    const startedFile = startedPath(projectDir, stateId);
+    const startedFile = startedPath(projectDir, payload);
     const raw = await io.readFile(startedFile);
     if (raw === undefined)
       return [];

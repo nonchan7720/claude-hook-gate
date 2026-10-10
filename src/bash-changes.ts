@@ -3,6 +3,12 @@
 // mtime がコマンド開始以降のものだけを拾う（recordBashChanges）。git の履歴・作業ツリー操作（rebase / checkout など）で
 // 動いたファイルは「変更」ではないので、そのコマンドは最初から記録対象外にする。
 // PJ が .claude/gate.yaml を持つ場合のみ動く（オプトイン）。
+//
+// 開始時刻のファイル（bash_started.<session>--<tool_use_id>.json）は tool_use_id で引く。エンジンが classic.PreToolUse
+// に渡すイベントにはエージェント ID が入らない（tool.call の入力に tool / tool_use_id を足した形で、agentId は落とされる）
+// 一方、classic.PostToolUse は stdin JSON そのままで agent_id を持つ。状態 ID（<session>[--<agent>]）で引くと
+// サブエージェントの中では両者が食い違って開始時刻が見つからず、Bash の変更が一切記録されなかった。tool_use_id は
+// 両方のイベントに同じ値で入るので、これを鍵にする。変更の記録先（changed_files）は PostToolUse 側の状態 ID で決める。
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, isDict, jqStr } from './pyutil.ts'
@@ -14,6 +20,10 @@ export const SKIP_COMMAND_RE = /\bgit\b[^|;&\n]*\b(rebase|checkout|switch|merge|
 // HFS+ の 1 秒粒度と時計ずれの余裕。
 const MTIME_SLACK_MS = 2000
 
+// コマンドが失敗すると PostToolUse は来ない（PostToolUseFailure になる）ので、開始時刻のファイルが残る。
+// 次の Bash の開始時に、同じセッションの古いものを掃く。Bash ツールの最長（バックグラウンド 2h）より古ければ実行中ではない。
+const STALE_STARTED_MS = 2 * 60 * 60 * 1000
+
 const STATE_DIR = '.gate-status'
 
 const stateIdOf = (payload: Dict): string => {
@@ -22,7 +32,15 @@ const stateIdOf = (payload: Dict): string => {
   return agentId ? `${sessionId}--${agentId}` : sessionId
 }
 
-const startedPath = (projectDir: string, stateId: string): string => join(projectDir, '.claude', STATE_DIR, `bash_started.${stateId}.json`)
+/** 開始時刻ファイルの鍵。tool_use_id があれば <session>--<tool_use_id>、無ければ従来どおり状態 ID。 */
+const startedKey = (payload: Dict): string => {
+  const toolUseId = jqStr(payload.tool_use_id).replace(/[^A-Za-z0-9_.-]/g, '_')
+  if (toolUseId === '') return stateIdOf(payload)
+  const sessionId = jqStr(payload.session_id) || 'unknown'
+  return `${sessionId}--${toolUseId}`
+}
+
+const startedPath = (projectDir: string, payload: Dict): string => join(projectDir, '.claude', STATE_DIR, `bash_started.${startedKey(payload)}.json`)
 
 /** PreToolUse(Bash): コマンド開始時刻を控える。常に ok() を返す。 */
 export async function bashStarted(io: Io, payload: Dict): Promise<ScriptResult> {
@@ -30,11 +48,22 @@ export async function bashStarted(io: Io, payload: Dict): Promise<ScriptResult> 
     const projectDir = io.projectDir || io.cwd
     if (!(await io.exists(join(projectDir, '.claude', 'gate.yaml')))) return ok()
     const started = await io.now()
-    await io.writeFile(startedPath(projectDir, stateIdOf(payload)), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}\n`)
+    await io.writeFile(startedPath(projectDir, payload), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}\n`)
+    await sweepStale(io, projectDir, jqStr(payload.session_id) || 'unknown', started)
   } catch {
     // 追跡の失敗で作業を止めない。
   }
   return ok()
+}
+
+/** 同じセッションの bash_started.<session>--*.json のうち、STALE_STARTED_MS より古いものを消す。 */
+async function sweepStale(io: Io, projectDir: string, sessionId: string, now: number): Promise<void> {
+  const stateDir = join(projectDir, '.claude', STATE_DIR)
+  const prefix = `bash_started.${sessionId}--`
+  const stale = (await io.list(stateDir))
+    .filter((e) => e.kind === 'file' && e.name.startsWith(prefix) && e.name.endsWith('.json') && e.mtimeMs < now - STALE_STARTED_MS)
+    .map((e) => join(stateDir, e.name))
+  if (stale.length > 0) await io.removeFiles(stale)
 }
 
 /** PostToolUse(Bash): このコマンドが書き換えたファイルを記録し、新たに記録した絶対パスを返す。 */
@@ -44,7 +73,7 @@ export async function recordBashChanges(io: Io, payload: Dict): Promise<string[]
     if (!(await io.exists(join(projectDir, '.claude', 'gate.yaml')))) return []
 
     const stateId = stateIdOf(payload)
-    const startedFile = startedPath(projectDir, stateId)
+    const startedFile = startedPath(projectDir, payload)
     const raw = await io.readFile(startedFile)
     if (raw === undefined) return []
     try {

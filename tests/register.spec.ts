@@ -301,6 +301,36 @@ describe('PostToolUse', () => {
       expect(fs.readFileSync(path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1.txt'), 'utf8')).toBe(`${path.join(proj, 'x.py')}\n`)
     }))
 
+  test('Bash in a subagent: PreToolUse carries no agent id, PostToolUse does; the files are recorded under the agent', () =>
+    withMod(async (m, proj) => {
+      for (const args of [
+        ['init', '-q'],
+        ['config', 'user.email', 't@example.com'],
+        ['config', 'user.name', 't'],
+      ])
+        execFileSync('git', args, { cwd: proj })
+      writeGateYaml(proj, { rules: [{ match: '**/*.py', run: ['echo lint-failed; exit 1'] }] })
+      for (const args of [
+        ['add', '.'],
+        ['commit', '-q', '-m', 'init'],
+      ])
+        execFileSync('git', args, { cwd: proj })
+      // エンジンは classic.PreToolUse のイベントからエージェント ID を落とす（tool / tool_use_id と入力だけ）。
+      await m.call('classic.PreToolUse', { tool: 'Bash', command: 'gen', tool_use_id: 'tu1' })
+      fs.writeFileSync(path.join(proj, 'x.py'), 'x = 1\n')
+      const r = (await m.call('classic.PostToolUse', {
+        session_id: 'sess-1',
+        agent_id: 'a1',
+        tool_name: 'Bash',
+        tool_input: { command: 'gen' },
+        tool_response: {},
+        tool_use_id: 'tu1',
+      })) as Out
+      expect(String(r.block)).toContain('lint-failed')
+      expect(fs.readFileSync(path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1--a1.txt'), 'utf8')).toBe(`${path.join(proj, 'x.py')}\n`)
+      expect(exists(path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1.txt'))).toBe(false)
+    }))
+
   test('a post_edit feedback rule blocks on the edited file content', () =>
     withMod(async (m, proj, feedback) => {
       writeRule(feedback, 'no_todo', 4, "enforce:\n  - event: post_edit\n    path: '**/*.py'\n    when: 'TODO'\n    message: 'TODO を残さない'\n")
