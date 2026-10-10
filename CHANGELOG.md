@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.4.1...v0.5.0) (2026-10-10)
+
+
+### Features
+
+* add /correct command that proposes count bumps and enforce entries ([#21](https://github.com/nonchan7720/claude-hook-gate/issues/21)) ([89dc5a6](https://github.com/nonchan7720/claude-hook-gate/commit/89dc5a65c971b9cf9e942685d536140d3d63e122))
+* switch the language of hook messages between Japanese and English ([#23](https://github.com/nonchan7720/claude-hook-gate/issues/23)) ([3813db5](https://github.com/nonchan7720/claude-hook-gate/commit/3813db53912e831e8b5ba014ae72dec86e74f329))
+
 ## [0.4.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.4.0...v0.4.1) (2026-10-09)
 
 
