@@ -1,14 +1,16 @@
 // Notification / Stop 時のデスクトップ通知（macOS の terminal-notifier）。
 // type: notify（確認待ち）| stop（完了）。それ以外は何もしない。
+import { type Msg, tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
+import { NOTIFY_DONE, NOTIFY_DONE_FALLBACK, NOTIFY_WAITING, NOTIFY_WAITING_FALLBACK } from './messages.ts'
 import { basename } from './path.ts'
 import { type Dict, jqStr } from './pyutil.ts'
 import { shellQuote } from './shell.ts'
 import { which } from './which.ts'
 
-const LABELS: Record<string, { label: string; fallback: string }> = {
-  notify: { label: '確認待ち', fallback: '確認を待っています' },
-  stop: { label: '完了', fallback: '応答が完了しました' },
+const LABELS: Record<string, { label: Msg<[]>; fallback: Msg<[]> }> = {
+  notify: { label: NOTIFY_WAITING, fallback: NOTIFY_WAITING_FALLBACK },
+  stop: { label: NOTIFY_DONE, fallback: NOTIFY_DONE_FALLBACK },
 }
 
 const FRONT_WINDOW_SCRIPT =
@@ -17,9 +19,10 @@ const FRONT_WINDOW_SCRIPT =
 export async function notification(io: Io, type: string, payload: Dict): Promise<ScriptResult> {
   const kind = LABELS[type]
   if (!kind) return ok()
+  const t = tr(io.lang)
 
   const cwd = jqStr(payload.cwd) || io.cwd
-  const message = jqStr(payload.message) || kind.fallback
+  const message = jqStr(payload.message) || t(kind.fallback)
 
   // エディタのウィンドウはリポジトリルートで開かれていることが多く、サブディレクトリを渡すと既存ウィンドウが
   // そのフォルダを開き直してしまう
@@ -76,7 +79,7 @@ export async function notification(io: Io, type: string, payload: Dict): Promise
     '-title',
     'Claude Code',
     '-subtitle',
-    `📁 ${project} · ${kind.label}`,
+    `📁 ${project} · ${t(kind.label)}`,
     '-message',
     message,
     '-group',

@@ -4,6 +4,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { Lang } from '../../src/i18n.ts'
 import type { DirEntry, EnvVars, Io, RunOptions, RunResult, Stat } from '../../src/io.ts'
 import { mergeRunning, runningBand, runningLines } from '../../src/running-registry.ts'
 
@@ -19,6 +20,8 @@ export type NodeIoOptions = {
   cwd?: string
   pluginRoot?: string
   env?: EnvVars
+  /** メッセージの言語。省略時は ja（テストの期待値は日本語で書かれている）。 */
+  lang?: Lang
   /** 現在時刻（ミリ秒）を差し替える。 */
   now?: () => number
   /** progress() に渡されたテキストを順に記録する。 */
@@ -32,11 +35,11 @@ export type NodeIoOptions = {
 }
 
 /** 共有の実行中一覧のファイルを同期で読み、帯に描かれる内容を返す（redraw の時点の記録用）。 */
-function snapshotBand(projectDir: string, now: number): string | undefined {
+function snapshotBand(projectDir: string, now: number, lang: Lang): string | undefined {
   const dir = path.join(projectDir, '.claude', '.gate-status', 'running')
   const texts = fs.existsSync(dir) ? fs.readdirSync(dir).map((f) => fs.readFileSync(path.join(dir, f), 'utf8')) : []
   const entries = mergeRunning(texts, now)
-  return runningBand(entries, now) ? runningLines(entries, now).join('\n') : undefined
+  return runningBand(entries, now, lang) ? runningLines(entries, now, lang).join('\n') : undefined
 }
 
 const kindOf = (s: fs.Stats): 'file' | 'dir' | 'other' => (s.isFile() ? 'file' : s.isDirectory() ? 'dir' : 'other')
@@ -51,8 +54,10 @@ export function makeIo(opts: NodeIoOptions): Io {
       return undefined
     }
   }
+  const lang = opts.lang ?? 'ja'
   return {
     env,
+    lang,
     projectDir: opts.projectDir,
     cwd: opts.cwd ?? opts.projectDir,
     pluginRoot: opts.pluginRoot ?? REPO_ROOT,
@@ -110,7 +115,7 @@ export function makeIo(opts: NodeIoOptions): Io {
       opts.resultLog?.push(text)
     },
     redraw: () => {
-      opts.bandLog?.push(snapshotBand(opts.projectDir, opts.now ? opts.now() : Date.now()))
+      opts.bandLog?.push(snapshotBand(opts.projectDir, opts.now ? opts.now() : Date.now(), lang))
     },
     every:
       opts.every ??

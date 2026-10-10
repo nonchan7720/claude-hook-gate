@@ -2,9 +2,10 @@ import { describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { feedbackInject } from '../src/feedback-inject.ts'
+import type { Lang } from '../src/i18n.ts'
 import { makeIo, withTmp } from './helpers/node-io.ts'
 
-const runInject = (feedbackDir: string) => feedbackInject(makeIo({ projectDir: feedbackDir, env: { CLAUDE_FEEDBACK_DIR: feedbackDir } }))
+const runInject = (feedbackDir: string, lang?: Lang) => feedbackInject(makeIo({ projectDir: feedbackDir, env: { CLAUDE_FEEDBACK_DIR: feedbackDir }, lang }))
 
 function writeRule(dir: string, name: string, count: number, description = 'desc', extra = ''): void {
   const content = `---\nname: ${name}\ndescription: ${description}\ntype: feedback\ncount: ${count}\n${extra}---\n\n${name} の本文の第一段落。ここが注入される。\n\n**Why:** 理由の説明。\n`
@@ -20,6 +21,22 @@ describe('feedback-inject', () => {
       expect(r.exitCode).toBe(0)
       expect(r.stdout).toContain('high')
       expect(r.stdout).not.toContain('low')
+    }))
+
+  test('the header and the rule titles follow the language', () =>
+    withTmp(async (tmp) => {
+      writeRule(tmp, 'high', 5)
+      const ja = await runInject(tmp, 'ja')
+      expect(ja.stdout.startsWith('# 確定フィードバックルール（count >= 3）\n')).toBe(true)
+      expect(ja.stdout).toContain('■ high (これまで 5 回指摘されています)')
+      const en = await runInject(tmp, 'en')
+      expect(
+        en.stdout.startsWith(
+          '# Confirmed feedback rules (count >= 3)\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\n\n',
+        ),
+      ).toBe(true)
+      expect(en.stdout).toContain('■ high (pointed out 5 times so far)')
+      expect(en.stdout).toContain('high の本文の第一段落')
     }))
 
   test('sorted by count desc then name asc', () =>

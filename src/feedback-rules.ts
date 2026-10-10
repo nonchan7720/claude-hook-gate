@@ -72,8 +72,10 @@
 // このフィルタは listRules を feedbackDirPath 省略で呼んだとき（グローバル＋プロジェクトのマージ後）にだけ
 // かかる。ディレクトリを明示したときは無加工で返す。
 import { asList, compileGlobs, expandBraces, globExists } from './glob.ts'
+import { tr } from './i18n.ts'
 import type { Io } from './io.ts'
 import { parseYaml } from './load-yaml.ts'
+import { GUARD_EVALUATING, POST_EDIT_CHECKING, STOP_CHECK_CHECKING } from './messages.ts'
 import { basename, dirname, isAbsolute, join, splitext } from './path.ts'
 import { type Dict, isDict, pyRegExp, toCount, truthy } from './pyutil.ts'
 import { splitRoot } from './roots.ts'
@@ -117,7 +119,7 @@ export const violationsLogPath = (io: Io): string => join(feedbackDir(io), '.vio
 
 // ---- frontmatter 読み込み ----
 export const FRONTMATTER_RE = /^---\s*\n([\s\S]*?\n)---\s*\n?/
-const BODY_STOP_RE = /\*\*(Why|言い訳|How to apply)[:：]?\*\*/
+const BODY_STOP_RE = /\*\*(Why|言い訳|Excuse|How to apply)[:：]?\*\*/
 
 /** frontmatter のテキスト（YAML のサブセット）を読む。 */
 export const loadYamlText = (text: string): unknown => parseYaml(text)
@@ -353,7 +355,7 @@ export async function evalPreBash(io: Io, rules: Rule[], command: string, projec
       if (truthy(unless) && pyRegExp(String(unless)).test(command)) continue
       const checkCmd = entry.check
       if (truthy(checkCmd)) {
-        io.progress?.(`[feedback-guard] 評価中: ${rule.name}`)
+        io.progress?.(tr(io.lang)(GUARD_EVALUATING, rule.name))
         const r = await io.run([...SHELL, String(checkCmd)], { cwd: dir, env: { CLAUDE_PROJECT_DIR: dir }, timeoutMs: 10_000 })
         // 非0終了で違反確定。0終了なら違反ではない。check 自体が動かせない場合は when 一致のみで違反扱いにする。
         if (r.exitCode === 0 && !r.timedOut && r.error === undefined) continue
@@ -472,7 +474,7 @@ export async function evalPostEdit(io: Io, rules: Rule[], filePath: string, proj
         details.push(`content matched: ${String(when)}`)
       }
       if (truthy(checkCmd)) {
-        io.progress?.(`[feedback-post-edit] 検査中: ${rule.name} (${absPath})`)
+        io.progress?.(tr(io.lang)(POST_EDIT_CHECKING, rule.name, absPath))
         const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: dir, FILE: absPath }, timeoutMs: 15_000 })
         // 非0終了（タイムアウト・実行不能を含む）で違反確定。0終了なら違反ではない。
         if (r.exitCode === 0 && !r.timedOut && r.error === undefined) continue
@@ -603,7 +605,7 @@ export async function evalStopCheck(io: Io, rules: Rule[], projectDir: string, c
           if (!any) bad = true
         }
         if (truthy(checkCmd)) {
-          io.progress?.(`[feedback-stop-check] 検査中: ${rule.name} (${absPath})`)
+          io.progress?.(tr(io.lang)(STOP_CHECK_CHECKING, rule.name, absPath))
           const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: projectDir, FILE: absPath }, timeoutMs: 15_000 })
           if (r.exitCode !== 0 || r.timedOut || r.error !== undefined) bad = true
         }

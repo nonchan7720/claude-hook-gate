@@ -6,6 +6,12 @@
     "name": "nonchan7720"
   },
   "userConfig": {
+    "language": {
+      "type": "string",
+      "title": "Language",
+      "description": "Language of the messages the hooks print (feedback, gate results, notifications, /correct). auto follows the OS language (FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG; Japanese when it starts with ja, otherwise English). ja or en forces one.",
+      "default": "auto"
+    },
     "agentLaunchGuard": {
       "type": "boolean",
       "title": "Agent launch guard",

@@ -41,7 +41,7 @@ const rule = (name: string, count: number, over: Partial<Rule> = {}): Rule => ({
   ...over,
 })
 const withEnforce = { enforce: [{ event: 'pre_bash', when: 'x' }] }
-const opts = { window: 30 * DAY, min: 2, now: NOW }
+const opts = { window: 30 * DAY, min: 2, now: NOW, lang: 'ja' as const }
 
 describe('parseCorrectArgs', () => {
   test('defaults', () => {
@@ -166,23 +166,42 @@ describe('buildProposals', () => {
 })
 
 describe('formatReport / buildContext', () => {
+  test('English report, reasons and context when lang is en', () => {
+    const en = { ...opts, lang: 'en' as const }
+    const expired = rule('gone', 3, { expires: NOW - DAY })
+    const ps = buildProposals([rule('a', 2), rule('b', 3)], [expired], aggregate([entry('a', 1), entry('a', 2)], NOW, 30 * DAY), en)
+    expect(ps.map((p) => `${p.kind}:${p.rule}`)).toEqual(['bump:a', 'enforce:b', 'expired:gone'])
+    expect(ps[0]?.reason).toBe('2 violations in the last 30d (warn 2). Promote to a confirmed rule')
+    expect(ps[1]?.reason).toBe('Confirmed rule with count 3 but no enforce, so no hook can detect it (and it never appears in the violation log)')
+    expect((ps[1] as { template: string }).template).toContain("message: 'instruction shown on violation'")
+    expect(ps[2]?.reason).toMatch(/^expires \(\d{4}-\d{2}-\d{2}\) has passed\. Consider deleting or updating it$/)
+    const text = formatReport(ps, aggregate([entry('a', 1), entry('a', 2)], NOW, 30 * DAY), { window: 30 * DAY, lang: 'en' }, 3)
+    expect(text.startsWith('[correct] last 30d: 3 rules / 2 violations\n')).toBe(true)
+    expect(text).toContain('`/correct apply` writes the count bumps')
+    expect(formatReport([], new Map(), { window: 7 * DAY, apply: true, lang: 'en' }, 0)).toContain('apply: no files were rewritten.')
+    const ctx = buildContext(ps, [{ path: '/fb/a.md', from: 2, to: 3 }], 'en')
+    expect(ctx[0]).toContain('This is the result of /correct.')
+    expect(ctx[0]).toContain('- apply has already rewritten count in the following files. Tell the user so: /fb/a.md (2 → 3)')
+    expect(text + ctx[0]).not.toMatch(/[ぁ-んァ-ン一-龥]/)
+  })
+
   test('no proposals', () => {
-    const text = formatReport([], new Map(), { window: 30 * DAY }, 4)
+    const text = formatReport([], new Map(), { window: 30 * DAY, lang: 'ja' }, 4)
     expect(text.startsWith('[correct] 直近 30d: ルール 4 件 / 違反 0 件')).toBe(true)
     expect(text).toContain('提案はありません。')
-    expect(buildContext([], [])).toEqual([])
+    expect(buildContext([], [], 'ja')).toEqual([])
   })
   test('lists proposals and the apply hint; with apply lists the changed files', () => {
     const ps = buildProposals([rule('a', 2)], [], aggregate([entry('a', 1), entry('a', 2)], NOW, 30 * DAY), opts)
-    const text = formatReport(ps, aggregate([entry('a', 1), entry('a', 2)], NOW, 30 * DAY), { window: 30 * DAY }, 1)
+    const text = formatReport(ps, aggregate([entry('a', 1), entry('a', 2)], NOW, 30 * DAY), { window: 30 * DAY, lang: 'ja' }, 1)
     expect(text).toContain('違反 2 件')
     expect(text).toContain('[bump] a: count 2 → 3')
     expect(text).toContain('/correct apply')
     const applied = [{ path: '/fb/a.md', from: 2, to: 3 }]
-    const after = formatReport(ps, new Map(), { window: 7 * DAY, apply: true }, 1, applied)
+    const after = formatReport(ps, new Map(), { window: 7 * DAY, apply: true, lang: 'ja' }, 1, applied)
     expect(after).toContain('直近 7d')
     expect(after).toContain('/fb/a.md (count 2 → 3)')
-    const ctx = buildContext(ps, applied)
+    const ctx = buildContext(ps, applied, 'ja')
     expect(ctx).toHaveLength(1)
     expect(ctx[0]).toContain('確認')
     expect(ctx[0]).toContain('/fb/a.md')

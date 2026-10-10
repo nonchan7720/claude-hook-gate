@@ -1,6 +1,7 @@
 // hook モジュールの実行環境は Node も DOM も持たず、ファイルやプロセスには `$`（エンジン）経由でしか
 // 触れない。ポートしたロジックはすべてこの Io インターフェースだけに依存し、実環境では
 // engine-io.ts が `$` から、テストでは tests/helpers/node-io.ts が Node から実装する。
+import type { Lang } from './i18n.ts'
 
 export type EnvVars = {
   HOME?: string
@@ -9,6 +10,11 @@ export type EnvVars = {
   DOGWOOD_BIN?: string
   TERM_PROGRAM?: string
   __CFBundleIdentifier?: string
+  /** メッセージの言語の判定に使う（i18n.ts）。FEEDBACK_GATE_LANG はこのプラグイン専用の上書き。 */
+  FEEDBACK_GATE_LANG?: string
+  LC_ALL?: string
+  LC_MESSAGES?: string
+  LANG?: string
 }
 
 export type DirEntry = { name: string; kind: 'file' | 'dir' | 'other'; mtimeMs: number }
@@ -35,6 +41,8 @@ export type RunResult = {
 export interface Io {
   /** フックが参照する環境変数のスナップショット。 */
   readonly env: Readonly<EnvVars>
+  /** hook が出すメッセージの言語（プラグイン設定の language と OS の言語設定から resolveLang が決める）。 */
+  readonly lang: Lang
   /** CLAUDE_PROJECT_DIR 相当（セッションのルート）。 */
   readonly projectDir: string
   /** セッションの作業ディレクトリ。 */

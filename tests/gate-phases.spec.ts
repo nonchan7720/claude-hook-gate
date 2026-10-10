@@ -554,6 +554,17 @@ describe('checks phase reports success once', () => {
       expect(exists(reportedPath(proj, 'sess1'))).toBe(true)
     }))
 
+  test('the success report is in English when the language is en', () =>
+    withTmp(async (proj) => {
+      setupNamed(proj)
+      ok(await rules(proj, 'sess1', { lang: 'en' }))
+      const r = await checks(proj, 'sess1', { lang: 'en' })
+      expect(r.exitCode).toBe(2)
+      const body = JSON.parse(r.stdout.trim().split('\n').at(-1) as string)
+      expect(body.reason).toBe('[gate] All checks passed: lint ✓ / typecheck ✓. Report this result to the user and finish.')
+      expect(r.stderr).not.toMatch(/[ぁ-んァ-ン一-龥]/)
+    }))
+
   test('does not block when stop_hook_active is true', () =>
     withTmp(async (proj) => {
       setupNamed(proj)

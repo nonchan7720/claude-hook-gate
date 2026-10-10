@@ -8,15 +8,15 @@
 // - SendMessage: ALLOW_RECIPIENTS 以外の宛先への送信を ask
 //
 // どちらにも該当しなければ何も出力せず、通常のパーミッション判定に委ねる。
+import { type Lang, tr } from './i18n.ts'
 import { ok, type ScriptResult } from './io.ts'
+import { LAUNCH_CHECKLIST, LAUNCH_MESSAGE_TO, LAUNCH_PROMPT_TO, LAUNCH_UNKNOWN_RECIPIENT } from './messages.ts'
 import { type Dict, isDict, jqStr } from './pyutil.ts'
 
 export const ASK_AGENT_TYPES = ['code-implementer']
 
 /** 確認なしで送ってよい宛先（エージェント名）。 */
 export const ALLOW_RECIPIENTS = ['git-operator']
-
-const CHECKLIST = '--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件'
 
 const ask = (reason: string): ScriptResult =>
   ok(
@@ -29,19 +29,20 @@ const ask = (reason: string): ScriptResult =>
     })}\n`,
   )
 
-export function agentLaunchGuard(payload: Dict): ScriptResult {
+export function agentLaunchGuard(payload: Dict, lang: Lang): ScriptResult {
+  const t = tr(lang)
   const tool = jqStr(payload.tool_name)
   const input = isDict(payload.tool_input) ? payload.tool_input : {}
   if (tool === 'Agent') {
     const agentType = jqStr(input.subagent_type)
     if (agentType === '') return ok()
     if (ASK_AGENT_TYPES.includes(agentType)) {
-      return ask(`${agentType} に送るプロンプト:\n\n${jqStr(input.prompt)}\n\n${CHECKLIST}`)
+      return ask(`${t(LAUNCH_PROMPT_TO, agentType)}\n\n${jqStr(input.prompt)}\n\n${t(LAUNCH_CHECKLIST)}`)
     }
   } else if (tool === 'SendMessage') {
     const recipient = jqStr(input.to)
     if (!ALLOW_RECIPIENTS.includes(recipient)) {
-      return ask(`${recipient || '宛先不明'} に送るメッセージ:\n\n${jqStr(input.message)}\n\n${CHECKLIST}`)
+      return ask(`${t(LAUNCH_MESSAGE_TO, recipient || t(LAUNCH_UNKNOWN_RECIPIENT))}\n\n${jqStr(input.message)}\n\n${t(LAUNCH_CHECKLIST)}`)
     }
   }
   return ok()

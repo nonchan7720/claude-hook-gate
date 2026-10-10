@@ -85,30 +85,46 @@ describe('runningLines', () => {
         { cmd: 'exit 1', started: T0 },
       ],
       T0 + 3000,
+      'ja',
     )
     expect(lines).toEqual(['[gate] 実行中:', '  a $ sleep 1 (3s)', '  b ✓ (0.5s)', '  c ✗ (1.2s)', '  d $ z 待機中 (2s)', '  exit 1 (3s)'])
   })
 
   test('a finished entry keeps its duration on later renders', () => {
     const e = { name: 'b', cmd: 'x', started: T0, result: 'ok' as const, ended: T0 + 600 }
-    expect(runningLines([e], T0 + 600)).toEqual(runningLines([e], T0 + 60_000))
+    expect(runningLines([e], T0 + 600, 'ja')).toEqual(runningLines([e], T0 + 60_000, 'ja'))
   })
 
   test('a long cmd is cut at a word boundary with " ..." so the line stays within the limit', () => {
     const cmd = "find scripts/renovate -name '*_test.sh' -print0 | xargs -0 -P0 -n1 bash -c 'echo hello world'"
-    const [, line] = runningLines([{ name: 'renovate-scripts-test', cmd, started: T0 }], T0 + 12_000)
+    const [, line] = runningLines([{ name: 'renovate-scripts-test', cmd, started: T0 }], T0 + 12_000, 'ja')
     expect(line).toBe("  renovate-scripts-test $ find scripts/renovate -name '*_test.sh' ... (12s)")
     expect((line as string).length).toBeLessThanOrEqual(80)
   })
 
   test('a multi-line cmd is folded into one line', () => {
-    const [, line] = runningLines([{ name: 'm', cmd: 'echo a\n  echo b', started: T0 }], T0)
+    const [, line] = runningLines([{ name: 'm', cmd: 'echo a\n  echo b', started: T0 }], T0, 'ja')
     expect(line).toBe('  m $ echo a ... (0s)')
   })
 
   test('an entry without a name is shown by its folded cmd', () => {
-    const [, line] = runningLines([{ cmd: 'echo a\necho b', started: T0, result: 'fail', ended: T0 + 100 }], T0)
+    const [, line] = runningLines([{ cmd: 'echo a\necho b', started: T0, result: 'fail', ended: T0 + 100 }], T0, 'ja')
     expect(line).toBe('  echo a ... ✗ (0.1s)')
+  })
+})
+
+describe('language', () => {
+  test('heading, waiting marker and summary are English when lang is en', () => {
+    const entries = [
+      { name: 'a', cmd: 'sleep 1', started: T0 },
+      { name: 'd', cmd: 'z', started: T0 + 1000, waiting: true },
+    ]
+    expect(runningLines(entries, T0 + 3000, 'en')).toEqual(['[gate] running:', '  a $ sleep 1 (3s)', '  d $ z waiting (2s)'])
+    const done = [
+      { name: 'a', cmd: 'x', started: T0, result: 'ok' as const, ended: T0 + 500 },
+      { name: 'b', cmd: 'x', started: T0, result: 'fail' as const, ended: T0 + 1200 },
+    ]
+    expect(finishedSummary(done, 'en')).toBe('[gate] done: ✓ 1 / ✗ 1 (1.2s)')
   })
 })
 
@@ -117,7 +133,7 @@ describe('runningBand', () => {
   const running: RunningEntry = { name: 'b', cmd: 'sleep 9', started: T0 }
 
   test('is a column of one Text per line while something is unfinished', () => {
-    expect(runningBand([done, running], T0 + 8000)).toEqual({
+    expect(runningBand([done, running], T0 + 8000, 'ja')).toEqual({
       type: 'Box',
       props: { flexDirection: 'column' },
       children: ['[gate] 実行中:', '  a ✓ (0.7s)', '  b $ sleep 9 (8s)'].map((line) => ({ type: 'Text', children: [line] })),
@@ -125,8 +141,8 @@ describe('runningBand', () => {
   })
 
   test('is absent when nothing is listed or everything has finished', () => {
-    expect(runningBand([], T0)).toBeUndefined()
-    expect(runningBand([done], T0)).toBeUndefined()
+    expect(runningBand([], T0, 'ja')).toBeUndefined()
+    expect(runningBand([done], T0, 'ja')).toBeUndefined()
   })
 })
 
@@ -140,7 +156,7 @@ describe('finishedSummary', () => {
       { name: 'e', cmd: 'x', started: T0, result: 'ok', ended: T0 + 500 },
       { name: 'f', cmd: 'x', started: T0, result: 'fail', ended: T0 + 81_000 },
     ]
-    expect(finishedSummary(entries)).toBe('[gate] 完了: ✓ 5 / ✗ 1 (81.0s)')
+    expect(finishedSummary(entries, 'ja')).toBe('[gate] 完了: ✓ 5 / ✗ 1 (81.0s)')
   })
 
   test('omits the failure count when nothing failed', () => {
@@ -148,7 +164,7 @@ describe('finishedSummary', () => {
       { name: 'a', cmd: 'x', started: T0, result: 'ok', ended: T0 + 700 },
       { name: 'b', cmd: 'x', started: T0, result: 'ok', ended: T0 + 81_000 },
     ]
-    expect(finishedSummary(entries)).toBe('[gate] 完了: ✓ 2 (81.0s)')
+    expect(finishedSummary(entries, 'ja')).toBe('[gate] 完了: ✓ 2 (81.0s)')
   })
 
   test('omits the success count when nothing passed', () => {
@@ -156,7 +172,7 @@ describe('finishedSummary', () => {
       { name: 'a', cmd: 'x', started: T0, result: 'fail', ended: T0 + 12_300 },
       { name: 'b', cmd: 'x', started: T0, result: 'fail', ended: T0 + 100 },
     ]
-    expect(finishedSummary(entries)).toBe('[gate] 完了: ✗ 2 (12.3s)')
+    expect(finishedSummary(entries, 'ja')).toBe('[gate] 完了: ✗ 2 (12.3s)')
   })
 
   test('the seconds span the first start to the last end, not the sum of the checks', () => {
@@ -165,11 +181,11 @@ describe('finishedSummary', () => {
       { name: 'b', cmd: 'x', started: T0 + 2000, result: 'ok', ended: T0 + 12_000 },
       { name: 'c', cmd: 'x', started: T0 + 5000, result: 'ok', ended: T0 + 8000 },
     ]
-    expect(finishedSummary(entries)).toBe('[gate] 完了: ✓ 3 (12.0s)')
+    expect(finishedSummary(entries, 'ja')).toBe('[gate] 完了: ✓ 3 (12.0s)')
   })
 
   test('is absent while something is unfinished or when nothing ran', () => {
-    expect(finishedSummary([])).toBeUndefined()
-    expect(finishedSummary([{ name: 'a', cmd: 'x', started: T0 }])).toBeUndefined()
+    expect(finishedSummary([], 'ja')).toBeUndefined()
+    expect(finishedSummary([{ name: 'a', cmd: 'x', started: T0 }], 'ja')).toBeUndefined()
   })
 })
