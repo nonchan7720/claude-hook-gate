@@ -116,8 +116,62 @@ describe('recordBashChanges', () => {
       await bashStarted(io, payload({ tool_use_id: 'other' }))
       expect(await recordBashChanges(io, payload())).toEqual([])
       expect(exists(changedPath(proj, 'sess-1'))).toBe(false)
-      // 不一致でも開始時刻のファイルは片付く
+      // 別の tool_use_id の開始時刻は別のファイルなので、残ったまま（次の Bash の開始時か、セッション開始時に掃かれる）
+      expect(exists(statePath(proj, 'bash_started', 'sess-1--other', 'json'))).toBe(true)
+      expect(exists(statePath(proj, 'bash_started', 'sess-1--tu1', 'json'))).toBe(false)
+    }))
+
+  test('keys the start time by tool_use_id and removes it once used', () =>
+    withTmp(async (proj) => {
+      initRepo(proj)
+      const clock = { t: T0 }
+      const io = ioAt(proj, clock)
+      await bashStarted(io, payload({ tool_use_id: 'toolu_01/AB' }))
+      // ファイル名に使えない文字は _ に置き換える
+      expect(exists(statePath(proj, 'bash_started', 'sess-1--toolu_01_AB', 'json'))).toBe(true)
       expect(exists(statePath(proj, 'bash_started', 'sess-1', 'json'))).toBe(false)
+      fs.writeFileSync(path.join(proj, 'new.txt'), 'new\n')
+      setMtime(path.join(proj, 'new.txt'), T0 + 500)
+      expect(await recordBashChanges(io, payload({ tool_use_id: 'toolu_01/AB' }))).toEqual([path.join(proj, 'new.txt')])
+      expect(exists(statePath(proj, 'bash_started', 'sess-1--toolu_01_AB', 'json'))).toBe(false)
+    }))
+
+  test('falls back to the state id when there is no tool_use_id', () =>
+    withTmp(async (proj) => {
+      initRepo(proj)
+      const clock = { t: T0 }
+      const io = ioAt(proj, clock)
+      const p = payload({ tool_use_id: undefined, agent_id: 'a1' })
+      await bashStarted(io, p)
+      expect(exists(statePath(proj, 'bash_started', 'sess-1--a1', 'json'))).toBe(true)
+      fs.writeFileSync(path.join(proj, 'new.txt'), 'new\n')
+      setMtime(path.join(proj, 'new.txt'), T0 + 500)
+      expect(await recordBashChanges(io, p)).toEqual([path.join(proj, 'new.txt')])
+      expect(exists(statePath(proj, 'bash_started', 'sess-1--a1', 'json'))).toBe(false)
+    }))
+
+  test('sweeps start files of the same session older than 2h, keeping recent ones and other sessions', () =>
+    withTmp(async (proj) => {
+      initRepo(proj)
+      const clock = { t: T0 }
+      const io = ioAt(proj, clock)
+      const old = statePath(proj, 'bash_started', 'sess-1--failed', 'json')
+      const recent = statePath(proj, 'bash_started', 'sess-1--running', 'json')
+      const other = statePath(proj, 'bash_started', 'sess-2--failed', 'json')
+      for (const [f, t] of [
+        [old, T0 - 3 * 60 * 60 * 1000],
+        [recent, T0 - 60 * 1000],
+        [other, T0 - 3 * 60 * 60 * 1000],
+      ] as const) {
+        fs.mkdirSync(path.dirname(f), { recursive: true })
+        fs.writeFileSync(f, '{}\n')
+        setMtime(f, t)
+      }
+      await bashStarted(io, payload())
+      expect(exists(old)).toBe(false)
+      expect(exists(recent)).toBe(true)
+      expect(exists(other)).toBe(true)
+      expect(exists(statePath(proj, 'bash_started', 'sess-1--tu1', 'json'))).toBe(true)
     }))
 
   test('does not record for git history commands', () =>
@@ -165,18 +219,41 @@ describe('recordBashChanges', () => {
       expect(got).toEqual([path.join(proj, 'new.txt')])
     }))
 
-  test('uses the agent-suffixed state id', () =>
+  test('records under the agent-suffixed state id of PostToolUse even when PreToolUse had no agent id', () =>
     withTmp(async (proj) => {
       initRepo(proj)
       const clock = { t: T0 }
       const io = ioAt(proj, clock)
-      const p = payload({ agent_id: 'a1' })
-      await bashStarted(io, p)
-      expect(exists(statePath(proj, 'bash_started', 'sess-1--a1', 'json'))).toBe(true)
+      // エンジンは classic.PreToolUse にエージェント ID を渡さない。PostToolUse（stdin JSON）には agent_id が入る。
+      await bashStarted(io, payload())
+      expect(exists(statePath(proj, 'bash_started', 'sess-1--tu1', 'json'))).toBe(true)
       fs.writeFileSync(path.join(proj, 'new.txt'), 'new\n')
       setMtime(path.join(proj, 'new.txt'), T0 + 500)
-      expect(await recordBashChanges(io, p)).toEqual([path.join(proj, 'new.txt')])
+      expect(await recordBashChanges(io, payload({ agent_id: 'a1' }))).toEqual([path.join(proj, 'new.txt')])
       expect(changedLines(proj, 'sess-1--a1')).toEqual([path.join(proj, 'new.txt')])
+      expect(exists(changedPath(proj, 'sess-1'))).toBe(false)
+    }))
+
+  test('keeps the commands of two agents apart by tool_use_id', () =>
+    withTmp(async (proj) => {
+      initRepo(proj)
+      const clock = { t: T0 }
+      const io = ioAt(proj, clock)
+      await bashStarted(io, payload({ tool_use_id: 'tu-a' }))
+      clock.t = T0 + 10_000
+      await bashStarted(io, payload({ tool_use_id: 'tu-b' }))
+      fs.writeFileSync(path.join(proj, 'a.txt'), 'a\n')
+      setMtime(path.join(proj, 'a.txt'), T0 + 1000)
+      fs.writeFileSync(path.join(proj, 'b.txt'), 'b\n')
+      setMtime(path.join(proj, 'b.txt'), T0 + 11_000)
+      // b の開始（T0+10s）より前に書かれた a.txt は b のものではない
+      expect(await recordBashChanges(io, payload({ tool_use_id: 'tu-b', agent_id: 'b' }))).toEqual([path.join(proj, 'b.txt')])
+      expect((await recordBashChanges(io, payload({ tool_use_id: 'tu-a', agent_id: 'a' }))).sort()).toEqual([
+        path.join(proj, 'a.txt'),
+        path.join(proj, 'b.txt'),
+      ])
+      expect(changedLines(proj, 'sess-1--a').sort()).toEqual([path.join(proj, 'a.txt'), path.join(proj, 'b.txt')])
+      expect(changedLines(proj, 'sess-1--b')).toEqual([path.join(proj, 'b.txt')])
     }))
 
   test('returns nothing outside a git repository', () =>
