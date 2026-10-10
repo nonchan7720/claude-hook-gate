@@ -1,0 +1,122 @@
+# Messages printed by the hooks (English). Has the same keys as ja.yaml (tests/i18n.spec.ts checks the key sets match).
+# {{name}} is i18next interpolation.
+notify:
+  waiting: "Waiting for you"
+  waitingFallback: "Claude is waiting for your input"
+  done: "Done"
+  doneFallback: "The response has finished"
+
+inject:
+  header: "# Confirmed feedback rules (count >= 3)\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\n\n"
+  ruleTitle: "■ {{name}} (pointed out {{count}} times so far)"
+
+guard:
+  evaluating: "[feedback-guard] evaluating: {{rule}}"
+
+postEdit:
+  checking: "[feedback-post-edit] checking: {{rule}} ({{file}})"
+
+stopCheck:
+  checking: "[feedback-stop-check] checking: {{rule}} ({{file}})"
+  gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
+  fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
+
+launch:
+  checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"
+  promptTo: "Prompt to send to {{agentType}}:"
+  messageTo: "Message to send to {{recipient}}:"
+  unknownRecipient: "unknown recipient"
+
+correct:
+  description: "Aggregate the feedback rules and the violation log, and propose count bumps and enforce additions"
+  enforceTemplate: |-
+    enforce:
+      - event: pre_bash
+        when: 'regex'
+        unless: 'regex'
+        message: 'instruction shown on violation'
+      - event: pre_edit
+        path: 'glob'
+        when: 'regex'
+        message: 'instruction shown on violation'
+      - event: post_edit
+        path: 'glob'
+        when: 'regex'
+        message: 'instruction shown on violation'
+      - event: stop_check
+        changed: 'glob'
+        check: 'shell cmd'
+        message: 'instruction shown on violation'
+  expired: "expires ({{date}}) has passed"
+  conditions: "the conditions"
+  notMatching: "{{what}} do not match this project, so the rule is inactive"
+  topDetail: ". Most frequent: {{detail}}"
+  bumpToConfirmed: "{{n}} violations in the last {{window}} ({{counts}}). Promote to a confirmed rule{{top}}"
+  bumpToDeny: "ask / block {{strong}} times in the last {{window}} ({{counts}}). Raise to deny{{top}}"
+  noEnforce: "Confirmed rule with count {{count}} but no enforce, so no hook can detect it (and it never appears in the violation log)"
+  stale: "Has enforce but has never appeared in the violation log. Check that the enforce works and that the rule is not out of date"
+  expiredAction: "{{reason}}. Consider deleting or updating it"
+  reportHeader: "[correct] last {{window}}: {{rules}} rules / {{violations}} violations"
+  noProposals: "No proposals."
+  applyNone: "apply: no files were rewritten."
+  applyDone: "apply: count was rewritten."
+  applyHint: "`/correct apply` writes the count bumps of the bump proposals to the files (enforce is proposal only)."
+  context: |-
+    This is the result of /correct. Present the proposals above to the user.
+    - For an enforce addition, derive a regex / glob from the body of the rule and propose a concrete entry (template: the enforce section of rules/feedback_rules.md).
+    - Always ask the user before rewriting any file (as the rules in rules/feedback_rules.md say).
+    - For stale / expired, ask the user whether to keep, update or delete the rule.
+  contextApplied: "- apply has already rewritten count in the following files. Tell the user so: {{list}}"
+
+band:
+  running: "[gate] running:"
+  waiting: "waiting"
+  done: "[gate] done: {{counts}} ({{seconds}}s)"
+
+dogwood:
+  notFound: "dogwood binary not found (check DOGWOOD_BIN / PATH / ~/.cargo/bin)"
+  runFailed: "failed to run dogwood: {{error}}"
+  exited: "dogwood replay exited abnormally (exit {{code}}): {{detail}}"
+  badJson: "could not parse the output of dogwood replay as JSON"
+  noVerdict: "dogwood replay returned no verdict"
+  badVerdict: "could not interpret the verdict of dogwood replay: {{verdict}}"
+
+gate:
+  headOmitted: "… (first {{n}} lines omitted)"
+  restOmitted: "… (rest omitted)"
+  failuresOmitted: "… ({{n}} more failures omitted; see the [gate] log path of each)"
+  policyNotFound: "=== [gate] The policy file was not found: {{policy}}. Running without policy evaluation. ==="
+  sharedResult: "[gate] The same run was in progress in another agent, so its result was taken over (log of the running side: {{logpath}})"
+  timeout: "[gate] Killed after the timeout ({{seconds}}s). The command may be in an infinite loop or hung."
+  failedOutputHeader: "--- output of the failed commands ---"
+  nestedParallel: "=== [gate] ({{label}}) parallel cannot be nested inside parallel. Treated as a failure. ==="
+  deferredNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Dropping this deferred entry. ==="
+  cannotReadYaml: "cannot read gate.yaml: {{path}}"
+  andMore: " and {{n}} more"
+  skipUnmatched: "[gate] skip: {{files}} (matches no rule)"
+  badPerFileDir: "=== [gate] Invalid per_file_dir value: {{value}} (use true / \"file\" / \"pattern_root\"). Skipping this rule. ==="
+  skipBadPerFileDir: "[skip: invalid per_file_dir]"
+  rootNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this root. ==="
+  ruleNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this rule. ==="
+  checkNoCwd: "=== [gate] (check:{{name}}) cwd does not exist: {{cwd}}. Skipping this check. ==="
+  skipNoCwd: "[skip: no cwd]"
+  noteNoCwd: "(cwd does not exist)"
+  worktreeNotFound: "=== [gate] worktree not found: {{root}}. Excluding it. ==="
+  rulesFailed: "[gate] The rules phase failed (the conversation is not stopped). See the errors above and fix them."
+  rulesPassed: "[gate] rules phase passed:\n{{body}}"
+  checkNotFound: "=== [gate] \"{{name}}\" was not found in consistency_checks. Skipping. ==="
+  checkNotFoundSummary: "(check:{{name}}) not found, skipped"
+  skipCheckUndefined: "[gate] skip: check:{{name}} (not defined in consistency_checks)"
+  nothingToRun: "(nothing to run)"
+  allPassed: "[gate] All checks passed: {{labels}}. Report this result to the user and finish."
+  deferredTitle: "deferred verification commands"
+  checksPassed: "[gate] {{title}} passed:\n{{body}}"
+  checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
+  checksGaveUp: "[gate] Gave up because consistency checks failed {{max}} times in a row. The target files were returned to CHANGED unverified. Please check them manually. To clear this now, start a new session or run /clear (reset-gate on SessionStart removes the state files)."
+  checksFailed: "consistency checks failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
+  ymlTypo: "[gate] .claude/gate.yaml was not found but .claude/gate.yml exists. Check whether the extension is yml instead of yaml."
+  policyUnevaluated: "=== [gate] ({{label}}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [{{reason}}] $ {{cmd}} ==="
+  policySkipped: "=== [gate] ({{label}}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ {{cmd}} ==="
+  notePolicySkipped: "(deferred by the policy verdict; queued to run automatically later)"
+  notePolicyUnevaluated: "(deferred because the policy could not be evaluated; queued to run automatically later: {{reason}})"
+  internalError: "[gate] An internal error occurred, so the checks were skipped (work continues). See stderr for details."

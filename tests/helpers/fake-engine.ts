@@ -31,7 +31,8 @@ export type FakeEngine = {
 }
 
 export function makeEngine(opts: FakeEngineOptions): FakeEngine {
-  const env = { HOME: process.env.HOME ?? '', PATH: process.env.PATH ?? '', ...opts.env } as Record<string, string | undefined>
+  // 既定の言語は日本語（テストの期待値は日本語で書かれている）。opts.env の LANG / options.language で切り替えられる。
+  const env = { HOME: process.env.HOME ?? '', PATH: process.env.PATH ?? '', LANG: 'ja_JP.UTF-8', ...opts.env } as Record<string, string | undefined>
   const io = makeIo({ projectDir: opts.projectDir })
   const $: Engine = {
     plugin: { root: REPO_ROOT },

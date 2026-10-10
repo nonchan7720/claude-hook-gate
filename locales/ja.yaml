@@ -1,0 +1,122 @@
+# hook が出すメッセージ（日本語）。en.yaml と同じキーを持つ（tests/i18n.spec.ts がキーの一致を検査する）。
+# {{name}} は i18next の補間。
+notify:
+  waiting: "確認待ち"
+  waitingFallback: "確認を待っています"
+  done: "完了"
+  doneFallback: "応答が完了しました"
+
+inject:
+  header: "# 確定フィードバックルール（count >= 3）\nこれらは繰り返し指摘された確定ルール。違反すると hook がブロックする。\n\n"
+  ruleTitle: "■ {{name}} (これまで {{count}} 回指摘されています)"
+
+guard:
+  evaluating: "[feedback-guard] 評価中: {{rule}}"
+
+postEdit:
+  checking: "[feedback-post-edit] 検査中: {{rule}} ({{file}})"
+
+stopCheck:
+  checking: "[feedback-stop-check] 検査中: {{rule}} ({{file}})"
+  gaveUp: "[feedback-stop-check] {{max}} 回連続でブロックしました。ループを打ち切ります。手動確認を。"
+  fixAbove: "[feedback-stop-check] 上記を修正してください（試行 {{attempt}}/{{max}}）。"
+
+launch:
+  checklist: "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件"
+  promptTo: "{{agentType}} に送るプロンプト:"
+  messageTo: "{{recipient}} に送るメッセージ:"
+  unknownRecipient: "宛先不明"
+
+correct:
+  description: "feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する"
+  enforceTemplate: |-
+    enforce:
+      - event: pre_bash
+        when: '正規表現'
+        unless: '正規表現'
+        message: '違反時に出す指示文'
+      - event: pre_edit
+        path: 'glob'
+        when: '正規表現'
+        message: '違反時に出す指示文'
+      - event: post_edit
+        path: 'glob'
+        when: '正規表現'
+        message: '違反時に出す指示文'
+      - event: stop_check
+        changed: 'glob'
+        check: 'shell cmd'
+        message: '違反時に出す指示文'
+  expired: "expires（{{date}}）を過ぎている"
+  conditions: "条件"
+  notMatching: "{{what}} がこのプロジェクトに一致せず無効"
+  topDetail: "。最多: {{detail}}"
+  bumpToConfirmed: "直近 {{window}} で {{n}} 回違反（{{counts}}）。確定ルールへ昇格{{top}}"
+  bumpToDeny: "直近 {{window}} で ask / block が {{strong}} 回（{{counts}}）。deny へ引き上げ{{top}}"
+  noEnforce: "count {{count}} の確定ルールだが enforce が無く、hook が検知できない（違反ログにも出ない）"
+  stale: "enforce ありで違反ログに一度も出ていない。enforce が効いているか、ルールが古くなっていないか確認"
+  expiredAction: "{{reason}}。削除または更新を検討"
+  reportHeader: "[correct] 直近 {{window}}: ルール {{rules}} 件 / 違反 {{violations}} 件"
+  noProposals: "提案はありません。"
+  applyNone: "apply: 書き換えたファイルはありません。"
+  applyDone: "apply: count を書き換えました。"
+  applyHint: "`/correct apply` で bump の count 引き上げをファイルに書き込みます（enforce は提案のみ）。"
+  context: |-
+    /correct の結果です。ユーザーに上記の提案を提示してください。
+    - enforce の追加は、対象ルールの本文から正規表現 / glob を起こして具体案を提案する（雛形は rules/feedback_rules.md の enforce 節）。
+    - ファイルを書き換える前に、必ずユーザーに確認する（rules/feedback_rules.md のルールどおり）。
+    - stale / expired は、ルールを残すか更新・削除するかをユーザーに尋ねる。
+  contextApplied: "- apply により次のファイルの count をすでに書き換えた。その事実をユーザーに伝えること: {{list}}"
+
+band:
+  running: "[gate] 実行中:"
+  waiting: "待機中"
+  done: "[gate] 完了: {{counts}} ({{seconds}}s)"
+
+dogwood:
+  notFound: "dogwood バイナリが見つかりません（DOGWOOD_BIN / PATH / ~/.cargo/bin を確認してください）"
+  runFailed: "dogwood の実行に失敗しました: {{error}}"
+  exited: "dogwood replay が異常終了しました（exit {{code}}）: {{detail}}"
+  badJson: "dogwood replay の出力を JSON として読めませんでした"
+  noVerdict: "dogwood replay が verdict を返しませんでした"
+  badVerdict: "dogwood replay の verdict を解釈できませんでした: {{verdict}}"
+
+gate:
+  headOmitted: "…（先頭 {{n}} 行省略）"
+  restOmitted: "…（以降省略）"
+  failuresOmitted: "…（残り {{n}} 件の失敗は省略。各 [gate] log のパスを見てください）"
+  policyNotFound: "=== [gate] policy に指定されたファイルが見つかりません: {{policy}}。ポリシー判定を行わず実行します。 ==="
+  sharedResult: "[gate] 同じ実行が他のエージェントで走っていたため、その結果を受け取りました（実行側のログ: {{logpath}}）"
+  timeout: "[gate] タイムアウト（{{seconds}}秒）で強制終了しました。無限ループやハングの可能性があります。"
+  failedOutputHeader: "--- 失敗したコマンドの出力 ---"
+  nestedParallel: "=== [gate] ({{label}}) parallel の中に parallel はネストできません。失敗扱いにします。 ==="
+  deferredNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。この控えを破棄します。 ==="
+  cannotReadYaml: "gate.yaml を読めません: {{path}}"
+  andMore: " ほか{{n}}件"
+  skipUnmatched: "[gate] skip: {{files}} (どのルールにもマッチしません)"
+  badPerFileDir: "=== [gate] per_file_dir の値が不正です: {{value}}（true / \"file\" / \"pattern_root\" のいずれかを指定してください）。このルールをスキップします。 ==="
+  skipBadPerFileDir: "[skip: per_file_dir不正]"
+  rootNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルートをスキップします。 ==="
+  ruleNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルールをスキップします。 ==="
+  checkNoCwd: "=== [gate] (check:{{name}}) cwd が存在しません: {{cwd}}。このチェックをスキップします。 ==="
+  skipNoCwd: "[skip: cwd無し]"
+  noteNoCwd: "(cwd が存在しません)"
+  worktreeNotFound: "=== [gate] worktree が見つかりません: {{root}}。対象から外します。 ==="
+  rulesFailed: "[gate] rules フェーズの検証に失敗しました（会話は止まりません）。上のエラーを見て修正してください。"
+  rulesPassed: "[gate] rules フェーズ成功:\n{{body}}"
+  checkNotFound: "=== [gate] consistency_checks に \"{{name}}\" が見つかりません。スキップします。 ==="
+  checkNotFoundSummary: "(check:{{name}}) 見つかりません、スキップ"
+  skipCheckUndefined: "[gate] skip: check:{{name}} (consistency_checks に定義がありません)"
+  nothingToRun: "（対象なし）"
+  allPassed: "[gate] 検証がすべて通りました: {{labels}}。この結果をユーザーに報告して終了してください。"
+  deferredTitle: "後回しにした検証コマンド"
+  checksPassed: "[gate] {{title}} 成功:\n{{body}}"
+  checksGaveUpStderr: "consistency checks が {{max}} 回連続失敗。ループを打ち切ります。手動確認を。"
+  checksGaveUp: "[gate] consistency checks が{{max}}回連続で失敗したため打ち切りました。対象ファイルは未検証のまま CHANGED へ戻しました。手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか /clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。"
+  checksFailed: "consistency checks 失敗（試行 {{attempt}}/{{max}}）。上のエラーを見て修正を継続してください。"
+  ymlTypo: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
+  policyUnevaluated: "=== [gate] ({{label}}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［{{reason}}］ $ {{cmd}} ==="
+  policySkipped: "=== [gate] ({{label}}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ {{cmd}} ==="
+  notePolicySkipped: "(ポリシー判定で見送り。控えに積んだので後で自動実行)"
+  notePolicyUnevaluated: "(ポリシーを評価できず見送り。控えに積んだので後で自動実行: {{reason}})"
+  internalError: "[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。"

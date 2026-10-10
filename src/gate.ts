@@ -95,6 +95,7 @@
 // consistency_checks: name/dir/run を持つ名前付きチェック定義集（match は持たない）。checks フェーズでしか
 //              実行されない。
 import { matchPatterns, type PatternPair } from './glob.ts'
+import { type Lang, type Translate, tr } from './i18n.ts'
 import type { Io, ScriptResult } from './io.ts'
 import { parseYaml } from './load-yaml.ts'
 import { basename, dirname, expandUser, isAbsolute, join, normpath, relpath } from './path.ts'
@@ -296,15 +297,16 @@ export function summarizeCmds(cmds: RunItem[]): string {
 }
 
 /** 出力を末尾 limit 行に切り詰める。切ったときは先頭に省略表示を付ける。 */
-export function tailOutput(out: string, limit = FAIL_TAIL_LINES): string {
+export function tailOutput(lang: Lang, out: string, limit = FAIL_TAIL_LINES): string {
   const lines = out.trimEnd().split(/\r?\n/)
   if (lines.length <= limit) return lines.join('\n')
-  return [`…（先頭 ${lines.length - limit} 行省略）`, ...lines.slice(-limit)].join('\n')
+  return [tr(lang)('gate.headOmitted', { n: lines.length - limit }), ...lines.slice(-limit)].join('\n')
 }
 
 /** 失敗詳細を1つの文字列にまとめる。全体が上限を超えたら残りは省略して log を見るよう促す。 */
-export function failureDetails(failures: string[]): string {
+export function failureDetails(lang: Lang, failures: string[]): string {
   if (failures.length === 0) return ''
+  const t = tr(lang)
   let text = ''
   let used = 0
   let omitted = 0
@@ -314,11 +316,11 @@ export function failureDetails(failures: string[]): string {
       omitted = failures.length - i
       break
     }
-    if (used + d.length + 1 > FAIL_DETAIL_MAX) d = `${d.slice(0, FAIL_DETAIL_MAX)}\n…（以降省略）`
+    if (used + d.length + 1 > FAIL_DETAIL_MAX) d = `${d.slice(0, FAIL_DETAIL_MAX)}\n${t('gate.restOmitted')}`
     text += `${d}\n`
     used += d.length + 1
   }
-  if (omitted) text += `…（残り ${omitted} 件の失敗は省略。各 [gate] log のパスを見てください）\n`
+  if (omitted) text += `${t('gate.failuresOmitted', { n: omitted })}\n`
   return text.trimEnd()
 }
 
@@ -356,6 +358,8 @@ export class PolicyState {
 
 export class Gate {
   readonly io: Io
+  /** io.lang で引く翻訳関数。 */
+  readonly t: Translate
   readonly projectDir: string
   readonly sessionId: string
   readonly agentId: string
@@ -399,6 +403,7 @@ export class Gate {
 
   constructor(io: Io, opts: { sessionId?: string; agentId?: string; phase?: string; stopHookActive?: boolean } = {}) {
     this.io = io
+    this.t = tr(io.lang)
     this.projectDir = io.projectDir || io.cwd
     this.sessionId = opts.sessionId || 'unknown'
     this.agentId = opts.agentId || ''
@@ -654,7 +659,7 @@ export class Gate {
     const policy = isDefault ? this.defaultPolicy : this.resolvePolicyPath(rootDir, value)
     if (!policy || !(await this.io.exists(policy))) {
       if (!isDefault && policy && logs) {
-        logs.push(`=== [gate] policy に指定されたファイルが見つかりません: ${policy}。ポリシー判定を行わず実行します。 ===`)
+        logs.push(this.t('gate.policyNotFound', { policy }))
       }
       return null
     }
@@ -669,7 +674,7 @@ export class Gate {
    */
   async dogwoodVerdict(policy: string, schema: string, rootDir: string, name: string, cmd: string): Promise<[string | null, string | null]> {
     const binpath = await this.resolveDogwood()
-    if (!binpath) return [null, 'dogwood バイナリが見つかりません（DOGWOOD_BIN / PATH / ~/.cargo/bin を確認してください）']
+    if (!binpath) return [null, this.t('dogwood.notFound')]
     const history = await this.readTrace(rootDir)
     const lastTs = history.length > 0 ? Number(history[history.length - 1]?.ts) || 0 : 0
     const now = await this.io.now()
@@ -686,11 +691,11 @@ export class Gate {
       await this.rm(tracefile)
     }
     if (r.error !== undefined || r.timedOut) {
-      return [null, `dogwood の実行に失敗しました: ${r.error ?? 'timed out'}`]
+      return [null, this.t('dogwood.runFailed', { error: r.error ?? 'timed out' })]
     }
     if (r.exitCode !== 0) {
       const detail = (r.stderr || r.stdout || '').trim().replaceAll('\n', ' ').slice(0, 200)
-      return [null, `dogwood replay が異常終了しました（exit ${r.exitCode}）: ${detail}`]
+      return [null, this.t('dogwood.exited', { code: r.exitCode, detail })]
     }
     let verdicts: unknown[]
     try {
@@ -698,12 +703,12 @@ export class Gate {
       const v = isDict(parsed) ? parsed.verdicts : undefined
       verdicts = Array.isArray(v) ? v : []
     } catch {
-      return [null, 'dogwood replay の出力を JSON として読めませんでした']
+      return [null, this.t('dogwood.badJson')]
     }
-    if (verdicts.length === 0) return [null, 'dogwood replay が verdict を返しませんでした']
+    if (verdicts.length === 0) return [null, this.t('dogwood.noVerdict')]
     const last = verdicts[verdicts.length - 1]
     const verdict = String((isDict(last) ? last.verdict : '') || '').toLowerCase()
-    if (verdict !== 'allow' && verdict !== 'deny') return [null, `dogwood replay の verdict を解釈できませんでした: ${pyRepr(verdict)}`]
+    if (verdict !== 'allow' && verdict !== 'deny') return [null, this.t('dogwood.badVerdict', { verdict: pyRepr(verdict) })]
     return [verdict, null]
   }
 
@@ -782,7 +787,7 @@ export class Gate {
     if (!r.shared) return r.outcome
     const uid = `${Math.floor((await this.io.now()) / 1000)}-${logSeq++}`
     const logpath = join(this.logDir, `${slug(name || cmd)}.${uid}.log`)
-    const header = `$ ${cmd}  (cwd: ${cwd})\n[gate] 同じ実行が他のエージェントで走っていたため、その結果を受け取りました（実行側のログ: ${r.outcome.logpath}）\n`
+    const header = `$ ${cmd}  (cwd: ${cwd})\n${this.t('gate.sharedResult', { logpath: r.outcome.logpath })}\n`
     await this.io.writeFile(logpath, header + r.outcome.out).catch(() => undefined)
     return { ...r.outcome, logpath }
   }
@@ -817,7 +822,7 @@ export class Gate {
         entry.waiting = false
         if (this.running.every((r) => r.result)) this.stopTicker()
         await this.publishAndRedraw()
-        const summary = finishedSummary(await listRunning(this.io, this.sessionId))
+        const summary = finishedSummary(await listRunning(this.io, this.sessionId), this.io.lang)
         if (summary !== undefined) {
           this.io.result?.(summary)
           await saveSummary(this.io, this.sessionId, summary)
@@ -876,10 +881,10 @@ export class Gate {
     const detail = [chunk.lines[0] as string]
     if (out) {
       chunk.lines.push(out.trimEnd())
-      detail.push(tailOutput(out))
+      detail.push(tailOutput(this.io.lang, out))
     }
     if (timedOut) {
-      const msg = `[gate] タイムアウト（${timeout}秒）で強制終了しました。無限ループやハングの可能性があります。`
+      const msg = this.t('gate.timeout', { seconds: timeout })
       chunk.lines.push(msg)
       detail.push(msg)
     }
@@ -896,8 +901,8 @@ export class Gate {
   }
 
   withDetails(prefix: string): string {
-    const details = failureDetails(this.failures)
-    return prefix + (details ? `\n\n--- 失敗したコマンドの出力 ---\n${details}` : '')
+    const details = failureDetails(this.io.lang, this.failures)
+    return prefix + (details ? `\n\n${this.t('gate.failedOutputHeader')}\n${details}` : '')
   }
 
   /** parallel ブロック内のコマンドを並行実行。ログは定義順で出力。失敗があれば true。 */
@@ -915,7 +920,7 @@ export class Gate {
     const tasks: Array<[string, number, string | null, ExecScope]> = []
     for (const item of items) {
       if (isParallel(item)) {
-        logs.push(`=== [gate] (${label}) parallel の中に parallel はネストできません。失敗扱いにします。 ===`)
+        logs.push(this.t('gate.nestedParallel', { label }))
         failed = true
         continue
       }
@@ -979,7 +984,7 @@ export class Gate {
       if (!cmd) continue
       const label = `deferred:${entry.label || '.'}`
       if ((await this.io.stat(cwd))?.kind !== 'dir') {
-        logs.push(`=== [gate] (${label}) cwd が存在しません: ${cwd}。この控えを破棄します。 ===`)
+        logs.push(this.t('gate.deferredNoCwd', { label, cwd }))
         continue
       }
       const name = entry.name || slug(cmd)
@@ -1053,7 +1058,7 @@ export class Gate {
 
   async loadAction(path: string): Promise<GateConfig | null> {
     const text = await this.io.readFile(path)
-    if (text === undefined) throw new Error(`gate.yaml を読めません: ${path}`)
+    if (text === undefined) throw new Error(this.t('gate.cannotReadYaml', { path }))
     return parseYaml(text) as GateConfig | null
   }
 
@@ -1065,8 +1070,8 @@ export class Gate {
     const unmatched = [...new Set(rels)].filter((r) => !covered.has(r)).sort()
     if (unmatched.length === 0) return
     const shown = unmatched.slice(0, UNMATCHED_SHOWN).join(', ')
-    const more = unmatched.length > UNMATCHED_SHOWN ? ` ほか${unmatched.length - UNMATCHED_SHOWN}件` : ''
-    this.status.push(`[gate] skip: ${shown}${more} (どのルールにもマッチしません)`)
+    const more = unmatched.length > UNMATCHED_SHOWN ? this.t('gate.andMore', { n: unmatched.length - UNMATCHED_SHOWN }) : ''
+    this.status.push(this.t('gate.skipUnmatched', { files: `${shown}${more}` }))
   }
 
   /**
@@ -1110,10 +1115,8 @@ export class Gate {
       if (truthy(rawPerFileDir)) {
         const mode = normalizePerFileDirMode(rawPerFileDir)
         if (mode === null) {
-          logs.push(
-            `=== [gate] per_file_dir の値が不正です: ${pyRepr(rawPerFileDir)}（true / "file" / "pattern_root" のいずれかを指定してください）。このルールをスキップします。 ===`,
-          )
-          summary.push(`${summarizeCmds(cmds)}  [skip: per_file_dir不正]`)
+          logs.push(this.t('gate.badPerFileDir', { value: pyRepr(rawPerFileDir) }))
+          summary.push(`${summarizeCmds(cmds)}  ${this.t('gate.skipBadPerFileDir')}`)
           failed = true
           for (const f of ruleFiles) failFiles.add(f)
           continue
@@ -1127,9 +1130,9 @@ export class Gate {
           const label = d || '.'
           const dirFiles = matched.filter((rp) => rootsByRel[rp] === d)
           if ((await this.io.stat(cwd))?.kind !== 'dir') {
-            logs.push(`=== [gate] (${label}) cwd が存在しません: ${cwd}。このルートをスキップします。 ===`)
-            summary.push(`(${label}) ${summarizeCmds(cmds)}  [skip: cwd無し]`)
-            this.note('skip', label, summarizeCmds(cmds), '(cwd が存在しません)')
+            logs.push(this.t('gate.rootNoCwd', { label, cwd }))
+            summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t('gate.skipNoCwd')}`)
+            this.note('skip', label, summarizeCmds(cmds), this.t('gate.noteNoCwd'))
             continue
           }
           summary.push(`(${label}) ${summarizeCmds(cmds)}`)
@@ -1144,9 +1147,9 @@ export class Gate {
         const cwd = rule.dir ? join(rootDir, rule.dir) : rootDir
         const label = rule.dir ?? '.'
         if ((await this.io.stat(cwd))?.kind !== 'dir') {
-          logs.push(`=== [gate] (${label}) cwd が存在しません: ${cwd}。このルールをスキップします。 ===`)
-          summary.push(`(${label}) ${summarizeCmds(cmds)}  [skip: cwd無し]`)
-          this.note('skip', label, summarizeCmds(cmds), '(cwd が存在しません)')
+          logs.push(this.t('gate.ruleNoCwd', { label, cwd }))
+          summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t('gate.skipNoCwd')}`)
+          this.note('skip', label, summarizeCmds(cmds), this.t('gate.noteNoCwd'))
           continue
         }
         summary.push(`(${label}) ${summarizeCmds(cmds)}`)
@@ -1182,7 +1185,7 @@ export class Gate {
       const rels = relsByRoot.get(root) || []
       if (rels.length === 0) continue
       if (root !== this.projectDir && (await this.io.stat(root))?.kind !== 'dir') {
-        logs.push(`=== [gate] worktree が見つかりません: ${root}。対象から外します。 ===`)
+        logs.push(this.t('gate.worktreeNotFound', { root }))
         for (const rp of rels) consumedKeys.add(mk(root, rp))
         continue
       }
@@ -1308,12 +1311,12 @@ export class Gate {
 
     if (failed) {
       this.writeErr(`${[...this.status, ...logs].join('\n')}\n`)
-      this.writeErr('[gate] rules フェーズの検証に失敗しました（会話は止まりません）。上のエラーを見て修正してください。\n')
+      this.writeErr(`${this.t('gate.rulesFailed')}\n`)
       return 2
     }
     if (summary.length > 0 || this.status.length > 0) {
       const body = this.statusBlock(summary.map((s) => `✓ ${s}`).join('\n'))
-      this.print({ systemMessage: `[gate] rules フェーズ成功:\n${body}` })
+      this.print({ systemMessage: this.t('gate.rulesPassed', { body }) })
     }
     return 0
   }
@@ -1334,18 +1337,18 @@ export class Gate {
     for (const name of [...names].sort()) {
       const check = checksByName.get(name)
       if (!check) {
-        logs.push(`=== [gate] consistency_checks に "${name}" が見つかりません。スキップします。 ===`)
-        summary.push(`(check:${name}) 見つかりません、スキップ`)
-        this.status.push(`[gate] skip: check:${name} (consistency_checks に定義がありません)`)
+        logs.push(this.t('gate.checkNotFound', { name }))
+        summary.push(this.t('gate.checkNotFoundSummary', { name }))
+        this.status.push(this.t('gate.skipCheckUndefined', { name }))
         continue
       }
       const cwd = check.dir ? join(rootDir, check.dir) : rootDir
       const cmds = check.run || []
       const timeout = check.timeout || DEFAULT_TIMEOUT
       if ((await this.io.stat(cwd))?.kind !== 'dir') {
-        logs.push(`=== [gate] (check:${name}) cwd が存在しません: ${cwd}。このチェックをスキップします。 ===`)
-        summary.push(`(check:${name}) ${summarizeCmds(cmds)}  [skip: cwd無し]`)
-        this.note('skip', `check:${name}`, summarizeCmds(cmds), '(cwd が存在しません)')
+        logs.push(this.t('gate.checkNoCwd', { name, cwd }))
+        summary.push(`(check:${name}) ${summarizeCmds(cmds)}  ${this.t('gate.skipNoCwd')}`)
+        this.note('skip', `check:${name}`, summarizeCmds(cmds), this.t('gate.noteNoCwd'))
         continue
       }
       summary.push(`(check:${name}) ${summarizeCmds(cmds)}`)
@@ -1445,7 +1448,7 @@ export class Gate {
     const droppedRoots = new Set<string>()
     for (const [root, checksMap] of Object.entries(pending)) {
       if (root !== this.projectDir && (await this.io.stat(root))?.kind !== 'dir') {
-        logs.push(`=== [gate] worktree が見つかりません: ${root}。対象から外します。 ===`)
+        logs.push(this.t('gate.worktreeNotFound', { root }))
         droppedRoots.add(root)
         continue
       }
@@ -1473,17 +1476,17 @@ export class Gate {
     if (!failed) {
       await this.confirmPending(activePending)
       await this.cleanup([this.count, this.pending])
-      const body = this.statusBlock(summary.length > 0 ? summary.map((s) => `✓ ${s}`).join('\n') : '（対象なし）')
+      const body = this.statusBlock(summary.length > 0 ? summary.map((s) => `✓ ${s}`).join('\n') : this.t('gate.nothingToRun'))
       if (this.executedLabels.length > 0 && !this.stopHookActive && mainCfg?.report_success !== false) {
         // 失敗ブロック後の続きではない（stop_hook_active でない）ときだけ、成功をエージェントへ 1 回届ける。
         await this.io.writeFile(this.reported, '1\n')
-        const reason = `[gate] 検証がすべて通りました: ${this.executedLabels.map((l) => `${l} ✓`).join(' / ')}。この結果をユーザーに報告して終了してください。`
+        const reason = this.t('gate.allPassed', { labels: this.executedLabels.map((l) => `${l} ✓`).join(' / ') })
         this.writeErr(`${reason}\n`)
         this.print({ decision: 'block', reason })
         return 2
       }
-      const title = Object.keys(pending).length > 0 ? 'consistency checks' : '後回しにした検証コマンド'
-      this.print({ systemMessage: `[gate] ${title} 成功:\n${body}` })
+      const title = Object.keys(pending).length > 0 ? 'consistency checks' : this.t('gate.deferredTitle')
+      this.print({ systemMessage: this.t('gate.checksPassed', { title, body }) })
       return 0
     }
 
@@ -1500,22 +1503,13 @@ export class Gate {
     if (attempts >= MAX_ATTEMPTS) {
       await this.requeuePendingToChanged(activePending)
       await this.cleanup([this.count, this.pending])
-      this.writeErr(`consistency checks が ${MAX_ATTEMPTS} 回連続失敗。ループを打ち切ります。手動確認を。\n`)
-      const msg =
-        `[gate] consistency checks が${MAX_ATTEMPTS}回連続で失敗したため打ち切りました。` +
-        '対象ファイルは未検証のまま CHANGED へ戻しました。' +
-        '手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか ' +
-        '/clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。\n' +
-        summary.map((s) => `✗ ${s}`).join('\n') +
-        this.withDetails('')
+      this.writeErr(`${this.t('gate.checksGaveUpStderr', { max: MAX_ATTEMPTS })}\n`)
+      const msg = `${this.t('gate.checksGaveUp', { max: MAX_ATTEMPTS })}\n${summary.map((s) => `✗ ${s}`).join('\n')}${this.withDetails('')}`
       this.print({ systemMessage: msg })
       return 0
     }
 
-    const reason =
-      `consistency checks 失敗（試行 ${attempts}/${MAX_ATTEMPTS}）。上のエラーを見て修正を継続してください。\n` +
-      summary.map((s) => `✗ ${s}`).join('\n') +
-      this.withDetails('')
+    const reason = `${this.t('gate.checksFailed', { attempt: attempts, max: MAX_ATTEMPTS })}\n${summary.map((s) => `✗ ${s}`).join('\n')}${this.withDetails('')}`
     this.writeErr(`${reason}\n`)
     // stdout が空だと harness 側の判定で exit 2 が non-blocking 扱いになる不具合があるため、stderr の内容に関わらず必ず JSON を出す。
     this.print({ decision: 'block', reason })
@@ -1525,9 +1519,7 @@ export class Gate {
   async main(): Promise<number> {
     await this.pruneLogs()
     if (!(await this.io.exists(this.action)) && (await this.io.exists(this.gateYml))) {
-      this.print({
-        systemMessage: '[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。',
-      })
+      this.print({ systemMessage: this.t('gate.ymlTypo') })
     }
     if (!(await this.io.exists(this.action))) {
       await this.cleanup()
@@ -1559,9 +1551,7 @@ export class PolicyContext {
     const pname = name || slug(cmd)
     const [verdict, reason] = await this.gate.dogwoodVerdict(this.policy, this.schema, this.rootDir, pname, cmd)
     if (verdict === null) {
-      logs.push(
-        `=== [gate] (${label}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［${reason}］ $ ${cmd} ===`,
-      )
+      logs.push(this.gate.t('gate.policyUnevaluated', { label, reason: reason ?? '', cmd }))
     } else {
       await this.gate.appendTrace(this.rootDir, cwd, pname, cmd, 'request')
       if (verdict === 'allow') {
@@ -1570,16 +1560,9 @@ export class PolicyContext {
         this.state.allowedThisRun.add(`${this.rootDir}\0${cwd}\0${cmd}`)
         return true
       }
-      logs.push(
-        `=== [gate] (${label}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ ${cmd} ===`,
-      )
+      logs.push(this.gate.t('gate.policySkipped', { label, cmd }))
     }
-    this.gate.note(
-      'skip',
-      label,
-      cmd,
-      verdict ? '(ポリシー判定で見送り。控えに積んだので後で自動実行)' : `(ポリシーを評価できず見送り。控えに積んだので後で自動実行: ${reason})`,
-    )
+    this.gate.note('skip', label, cmd, verdict ? this.gate.t('gate.notePolicySkipped') : this.gate.t('gate.notePolicyUnevaluated', { reason: reason ?? '' }))
     this.state.deferredThisRun.add(`${this.rootDir}\0${cwd}\0${cmd}`)
     await this.gate.deferCmd(this.rootDir, cwd, pname, cmd, timeout, label, extraEnv)
     return false
@@ -1598,7 +1581,7 @@ export async function runGate(io: Io, opts: { sessionId?: string; agentId?: stri
     exitCode = await gate.main()
   } catch (e) {
     gate.stderr += `[gate] internal error:\n${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`
-    gate.stdout += `${JSON.stringify({ systemMessage: '[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。' })}\n`
+    gate.stdout += `${JSON.stringify({ systemMessage: tr(io.lang)('gate.internalError') })}\n`
     exitCode = 0
   } finally {
     await gate.finishProgress()

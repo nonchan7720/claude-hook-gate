@@ -1,4 +1,4 @@
-import type { Engine, HookEvent, HookResult, Register } from 'claude-code'
+import type { Engine, HookEvent, HookResult, PluginOptions, Register } from 'claude-code'
 import { agentLaunchGuard } from './agent-launch-guard.ts'
 import { allStop } from './all-stop.ts'
 import { bashChanges, bashStarted } from './bash-changes.ts'
@@ -8,6 +8,7 @@ import { feedbackGuard } from './feedback-guard.ts'
 import { feedbackInject } from './feedback-inject.ts'
 import { feedbackPostEdit } from './feedback-post-edit.ts'
 import { feedbackStopCheck } from './feedback-stop-check.ts'
+import { tr } from './i18n.ts'
 import type { Io, ScriptResult } from './io.ts'
 import { notification } from './notification.ts'
 import { decided, merge, type Outcome, toOutcome } from './outcome.ts'
@@ -29,9 +30,9 @@ const PROGRESS_DELAY_MS = 3000
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
-async function runSteps($: Engine, event: string, steps: Step[]): Promise<Outcome> {
+async function runSteps($: Engine, options: PluginOptions, event: string, steps: Step[]): Promise<Outcome> {
   let acc: Outcome = {}
-  const base = await createIo($)
+  const base = await createIo($, options)
   const sessionId = await $.session.id()
   // 処理中の 1 行（progress）を出した hook だけ、終わりに片付ける（毎回のちらつきを避ける）。gate の結果（result）は
   // 次のコマンドが走り始めるまで残すので、消さずに完了サマリへ戻す。
@@ -81,9 +82,10 @@ export const register: Register = (on, options) => {
   // /correct: feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する。
   on('session.start', async ($, e, next) => {
     try {
+      const io = await createIo($, options)
       await $.command.register({
         name: 'correct',
-        description: 'feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する',
+        description: tr(io.lang)('correct.description'),
         argumentHint: '[--window 30d] [--min 2] [apply]',
       })
     } catch {
@@ -92,18 +94,18 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
-  on('command.run', { command: 'correct' }, async ($, e) => correctCommand(await createIo($), String(e.args ?? '')))
+  on('command.run', { command: 'correct' }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? '')))
 
   on('classic.SessionStart', async ($, e, next) => {
-    const mine = await runSteps($, 'SessionStart', [(io) => resetGate(io, e)])
+    const mine = await runSteps($, options, 'SessionStart', [(io) => resetGate(io, e)])
     return withNext(next, e, mine)
   })
 
   on('classic.UserPromptSubmit', async ($, e, next) => {
     const mine: Outcome = {}
-    const text = await createIo($).then((io) => loadRules(io, options.rulesFile))
+    const text = await createIo($, options).then((io) => loadRules(io, options.rulesFile))
     if (text !== '') mine.additionalContext = [text]
-    const inject = await runSteps($, 'UserPromptSubmit', [(io) => feedbackInject(io)])
+    const inject = await runSteps($, options, 'UserPromptSubmit', [(io) => feedbackInject(io)])
     return withNext(next, e, merge(mine, inject))
   })
 
@@ -123,10 +125,10 @@ export const register: Register = (on, options) => {
     // bash_started の状態 ID を PostToolUse（agent_id）と揃える。
     if (typeof agentId === 'string' && agentId !== '') payload.agent_id = agentId
     // settings では `|| true` 付きなので、deny 以外（exit 2 以外）は無視していた。
-    const step: Step = guardsAgents ? async () => agentLaunchGuard(payload) : (io) => feedbackGuard(io, payload)
+    const step: Step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload)
     // Bash は、開始時刻を控えてから guard を評価する（終了後の変更ファイル追跡用）。
     const steps: Step[] = tool === 'Bash' ? [(io) => bashStarted(io, payload), step] : [step]
-    const mine = await runSteps($, 'PreToolUse', steps)
+    const mine = await runSteps($, options, 'PreToolUse', steps)
     if (decided(mine)) return mine as HookResult
     return withNext(next, e, mine)
   })
@@ -134,27 +136,31 @@ export const register: Register = (on, options) => {
   on('classic.PostToolUse', async ($, e, next) => {
     if (str(e.tool_name) === 'Bash') {
       // Bash が実際に書き換えたファイルだけを記録し、あれば rules フェーズを走らせる。
-      const mine = await runSteps($, 'PostToolUse', [(io) => bashChanges(io, e)])
+      const mine = await runSteps($, options, 'PostToolUse', [(io) => bashChanges(io, e)])
       return withNext(next, e, mine)
     }
     if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name))) return next(e)
     // gate の実行より先に、軽い feedback の post_edit 検査を済ませる。
-    const mine = await runSteps($, 'PostToolUse', [(io) => recordChanges(io, e), (io) => feedbackPostEdit(io, e), (io) => stopTestGate(io, 'rules', e)])
+    const mine = await runSteps($, options, 'PostToolUse', [
+      (io) => recordChanges(io, e),
+      (io) => feedbackPostEdit(io, e),
+      (io) => stopTestGate(io, 'rules', e),
+    ])
     return withNext(next, e, mine)
   })
 
   on('classic.Notification', async ($, e, next) => {
-    await runSteps($, 'Notification', [(io) => notification(io, 'notify', e)])
+    await runSteps($, options, 'Notification', [(io) => notification(io, 'notify', e)])
     return next(e)
   })
 
   on('classic.Stop', async ($, e, next) => {
-    const mine = await runSteps($, 'Stop', [(io) => allStop(io, e)])
+    const mine = await runSteps($, options, 'Stop', [(io) => allStop(io, e)])
     return withNext(next, e, mine)
   })
 
   on('classic.SubagentStop', async ($, e, next) => {
-    const mine = await runSteps($, 'SubagentStop', [(io) => stopTestGate(io, 'checks', e), (io) => feedbackStopCheck(io, e)])
+    const mine = await runSteps($, options, 'SubagentStop', [(io) => stopTestGate(io, 'checks', e), (io) => feedbackStopCheck(io, e)])
     return withNext(next, e, mine)
   })
 
@@ -162,7 +168,7 @@ export const register: Register = (on, options) => {
   // アンケートが帯を使っている間は、エンジンの帯に譲る。描き直しは gate が $.ui.invalidate で促す。
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     if (e.props.hasSurvey) return next(e)
-    const io = await createIo($)
-    return runningBand(await listRunning(io, await $.session.id()), await io.now()) ?? next(e)
+    const io = await createIo($, options)
+    return runningBand(await listRunning(io, await $.session.id()), await io.now(), io.lang) ?? next(e)
   })
 }

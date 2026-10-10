@@ -11,6 +11,7 @@
 //
 // 無限ループ防止のため、MAX_ATTEMPTS 回連続でブロックしたら諦めて exit 0 にする。
 import { evalStopCheck, getChangedFiles, listRules, logViolation } from './feedback-rules.ts'
+import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, truthy } from './pyutil.ts'
@@ -66,13 +67,13 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
 
   const attempts = await bumpAttempts(io, ap)
   if (attempts >= MAX_ATTEMPTS) {
-    stderr += `[feedback-stop-check] ${MAX_ATTEMPTS} 回連続でブロックしました。ループを打ち切ります。手動確認を。\n`
+    stderr += `${tr(io.lang)('stopCheck.gaveUp', { max: MAX_ATTEMPTS })}\n`
     await io.removeFiles([ap])
     return ok('', stderr)
   }
 
   const lines = blocking.map((v) => `[feedback-stop-check] ${v.rule} (count: ${v.count}): ${v.message} (${v.detail})`)
-  lines.push(`[feedback-stop-check] 上記を修正してください（試行 ${attempts}/${MAX_ATTEMPTS}）。`)
+  lines.push(tr(io.lang)('stopCheck.fixAbove', { attempt: attempts, max: MAX_ATTEMPTS }))
   stderr += lines.map((l) => `${l}\n`).join('')
   const stdout = `${JSON.stringify({ decision: 'block', reason: lines.join('\n') })}\n`
   return { exitCode: 2, stdout, stderr }

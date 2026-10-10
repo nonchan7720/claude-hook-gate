@@ -23,6 +23,7 @@ const notifyCount = () => runLog.filter((argv) => argv[0] === 'osascript').lengt
 async function withMod<T>(
   body: (m: ReturnType<typeof loadMod>, proj: string, feedback: string, home: string) => Promise<T>,
   options: Record<string, unknown> = {},
+  env: Record<string, string> = {},
 ): Promise<T> {
   const proj = tmpDir()
   const feedback = tmpDir()
@@ -44,7 +45,7 @@ async function withMod<T>(
       commandLog,
       elapsed: () => elapsed,
       stubCommands: ['osascript', 'terminal-notifier'],
-      env: { HOME: home, CLAUDE_FEEDBACK_DIR: feedback, DOGWOOD_BIN: MISSING_DOGWOOD_BIN },
+      env: { HOME: home, CLAUDE_FEEDBACK_DIR: feedback, DOGWOOD_BIN: MISSING_DOGWOOD_BIN, ...env },
     })
     return await body(m, proj, feedback, home)
   } finally {
@@ -84,13 +85,55 @@ describe('/correct', () => {
     withMod(async (m) => {
       await m.call('session.start', {})
       expect(commandLog.map((c) => c.name)).toEqual(['correct'])
+      expect(commandLog[0]?.description).toContain('feedback ルール')
     }))
+
+  test('the command description follows the language', () =>
+    withMod(
+      async (m) => {
+        await m.call('session.start', {})
+        expect(commandLog[0]?.description).toBe('Aggregate the feedback rules and the violation log, and propose count bumps and enforce additions')
+      },
+      { language: 'en' },
+    ))
 
   test('command.run returns the report text', () =>
     withMod(async (m) => {
       const r = (await m.call('command.run', { command: 'correct', args: '' })) as Out
-      expect(String(r.text).startsWith('[correct]')).toBe(true)
+      expect(String(r.text).startsWith('[correct] 直近 30d')).toBe(true)
     }))
+
+  test('command.run reports in English when LANG is not Japanese and language is auto', () =>
+    withMod(
+      async (m) => {
+        const r = (await m.call('command.run', { command: 'correct', args: '' })) as Out
+        expect(String(r.text)).toBe(
+          '[correct] last 30d: 0 rules / 0 violations\nNo proposals.\n`/correct apply` writes the count bumps of the bump proposals to the files (enforce is proposal only).',
+        )
+      },
+      { language: 'auto' },
+      { LANG: 'en_US.UTF-8' },
+    ))
+
+  test('FEEDBACK_GATE_LANG overrides the OS locale when language is auto', () =>
+    withMod(
+      async (m) => {
+        const r = (await m.call('command.run', { command: 'correct', args: '' })) as Out
+        expect(String(r.text).startsWith('[correct] 直近 30d')).toBe(true)
+      },
+      {},
+      { LANG: 'en_US.UTF-8', FEEDBACK_GATE_LANG: 'ja' },
+    ))
+
+  test('language ja wins over an English LANG', () =>
+    withMod(
+      async (m) => {
+        const r = (await m.call('command.run', { command: 'correct', args: '' })) as Out
+        expect(String(r.text).startsWith('[correct] 直近 30d')).toBe(true)
+      },
+      { language: 'ja' },
+      { LANG: 'en_US.UTF-8' },
+    ))
 })
 
 describe('UserPromptSubmit', () => {
@@ -120,6 +163,30 @@ describe('UserPromptSubmit', () => {
       const r = (await m.call('classic.UserPromptSubmit', { prompt: 'hi' })) as { additionalContext: string[] }
       expect(r.additionalContext).not.toContain('LEGACY')
     }))
+
+  test('with language en the bundled English rules and English feedback header are injected', () =>
+    withMod(
+      async (m, _proj, feedback) => {
+        writeRule(feedback, 'confirmed', 3)
+        const r = (await m.call('classic.UserPromptSubmit', { prompt: 'hi' })) as { additionalContext: string[] }
+        const bundled = fs.readFileSync(path.join(import.meta.dir, '..', 'rules', 'feedback_rules.en.md'), 'utf8').trim()
+        expect(r.additionalContext[0]).toBe(bundled)
+        expect(r.additionalContext[1]).toContain('# Confirmed feedback rules (count >= 3)')
+        expect(r.additionalContext[1]).toContain('■ confirmed (pointed out 3 times so far)')
+      },
+      { language: 'en' },
+    ))
+
+  test('a custom rules file is used as is whatever the language', () =>
+    withMod(
+      async (m, _proj, _feedback, home) => {
+        fs.mkdirSync(path.join(home, '.claude', 'feedback-gate'), { recursive: true })
+        fs.writeFileSync(path.join(home, '.claude', 'feedback-gate', 'feedback_rules.md'), 'CUSTOM\n')
+        const r = (await m.call('classic.UserPromptSubmit', { prompt: 'hi' })) as { additionalContext: string[] }
+        expect(r.additionalContext).toEqual(['CUSTOM'])
+      },
+      { language: 'en' },
+    ))
 
   test('rulesFile option points to another path', () =>
     withMod(

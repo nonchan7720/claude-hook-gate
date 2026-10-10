@@ -15,7 +15,7 @@ The hooks are registered in `src/register.ts` (bundled into `hooks/register.js` 
 | Event | Module | Role |
 | --- | --- | --- |
 | SessionStart | `src/reset-gate.ts` | Clears this session's gate state on `startup` / `clear`; keeps it on resume / compact. |
-| UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | Adds the rules file (your `rulesFile` if it exists, otherwise the bundled `rules/feedback_rules.md`) and the confirmed feedback rules (`count >= 3`) to the context. |
+| UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | Adds the rules file (your `rulesFile` if it exists, otherwise the bundled `rules/feedback_rules.md`, or `rules/feedback_rules.en.md` when the language is English) and the confirmed feedback rules (`count >= 3`) to the context. |
 | PreToolUse (Bash / Edit / Write / MultiEdit) | `src/feedback-guard.ts` | Evaluates `pre_bash` / `pre_edit` enforce entries; denies, asks or warns by `count`. |
 | PostToolUse (Write / Edit / MultiEdit) | `src/record-changes.ts`, `src/feedback-post-edit.ts`, then `src/stop-test-gate.ts` (`rules`) | Records changed files, evaluates `post_edit` enforce entries against the edited file as a whole (blocks or warns by `count`), then runs the matching rules of `.claude/gate.yaml` (via `src/gate.ts`). |
 | PreToolUse (Bash) | `src/bash-changes.ts` (`bashStarted`), before `feedback-guard` | Notes when the command started (`bash_started.<id>.json`). |
@@ -35,6 +35,15 @@ The hooks are registered in `src/register.ts` (bundled into `hooks/register.js` 
 Anything else passes through to the normal permission flow. The target agent types and the allowed recipients are the `ASK_AGENT_TYPES` and `ALLOW_RECIPIENTS` arrays at the top of `src/agent-launch-guard.ts`.
 
 To enable it, turn on `agentLaunchGuard` on the settings screen shown when you install the plugin with `/plugin`, or change it later in the `/config` menu (the plugin's `agentLaunchGuard` row).
+
+### Language of the messages
+
+Everything the hooks print (the feedback rules injected into the context, the block / warn reasons, the gate results, the band and the status line, the desktop notifications, the `/correct` report and the bundled rules file) is available in English and Japanese. The `language` option (`userConfig`, set on the `/plugin` install screen or later in `/config`) chooses it:
+
+- `auto` (default): follow the OS language. The hooks read `FEEDBACK_GATE_LANG` (a plugin-specific override, `ja` or `en`), then `LC_ALL`, `LC_MESSAGES` and `LANG`, and use the first one that has a value: Japanese when it starts with `ja` (e.g. `ja_JP.UTF-8`), English for anything else (`en_US.UTF-8`, `C`, `POSIX`, ...). When none of them is set, English.
+- `ja` / `en`: always that language, whatever the environment.
+
+The texts live in `locales/ja.yaml` and `locales/en.yaml` (one key per message, `{{name}}` for the values filled in at runtime; both files must have the same keys, which a test checks) and are looked up with [i18next](https://www.i18next.com/); the language resolution is in `src/i18n.ts`. To change a wording, edit the YAML. The examples below show the English texts; with Japanese you get the Japanese ones (e.g. `[gate] 実行中:` for `[gate] running:` and `[gate] 完了:` for `[gate] done:`). Your own `rulesFile` and the `message` of your feedback rules are shown as you wrote them, in any language.
 
 ```mermaid
 flowchart LR
@@ -95,14 +104,14 @@ Nothing to install: the hooks are plain TypeScript, bundled into one JavaScript 
 
 - `.claude/gate.yaml` in the project (opt-in: without it, the gate does nothing). The format is described by `scripts/gate.schema.json`; the default policy is in `scripts/dogwood/`.
 - `~/.claude/feedback/*.md`: feedback rules with frontmatter (`name`, `description`, `type`, `count`, optional `enforce`, `expires`, `projects`, `when_exists`). Rules with `count >= 3` are injected and enforced. `expires` (`YYYY-MM-DD`, valid through the end of that day in UTC, or an ISO 8601 datetime) turns a rule off after that point; `projects` (a string or list of globs matched against the project directory's absolute path, a leading `~` expands to `HOME`) limits it to matching projects; `when_exists` (a string or list of globs relative to the project root) limits it to projects where at least one exists. A rule is active only when all three that are set are satisfied; an unparsable `expires` is ignored. These filters apply only to the merged global + project lookup, and an expired project rule also hides the global rule of the same name. Override the directory with `CLAUDE_FEEDBACK_DIR`. The project's `.claude/feedback/*.md` is read as well; when a project rule has the same `name` as a global one, the project rule takes precedence.
-- The rules file, added to the context on every prompt. By default the bundled `rules/feedback_rules.md` is used. To replace it entirely, put your own file at the `rulesFile` path (default `~/.claude/feedback-gate/feedback_rules.md`, configurable in the plugin settings; a leading `~` is expanded). If that file exists it is used instead of the bundled one (never both). Avoid `~/.claude/rules/`: Claude Code loads that directory itself, so the rules would be injected twice.
+- The rules file, added to the context on every prompt. By default the bundled `rules/feedback_rules.md` (Japanese) or `rules/feedback_rules.en.md` (English) is used, by the language above. To replace it entirely, put your own file at the `rulesFile` path (default `~/.claude/feedback-gate/feedback_rules.md`, configurable in the plugin settings; a leading `~` is expanded). If that file exists it is used instead of the bundled one (never both, whatever the language). Avoid `~/.claude/rules/`: Claude Code loads that directory itself, so the rules would be injected twice.
 
 State files (changed files, attempt counters, command logs) are written under the project's `.claude/.gate-status/` directory (`gate.yaml` stays directly under `.claude/`). Add `.claude/.gate-status/` to the project's `.gitignore`. State files left by older versions directly under `.claude/` (and `.claude/hooks/logs/`) are removed automatically at session start. `bash_started.*.json` there holds the start time of the Bash command in flight, used to tell which files that command rewrote.
 
 While gate commands run, a band above the prompt shows what is running, one item per line, e.g.
 
 ```
-[gate] 実行中:
+[gate] running:
   typecheck ✓ (0.7s)
   lint ✗ (0.2s)
   test $ bun run test (8s)
@@ -110,9 +119,9 @@ While gate commands run, a band above the prompt shows what is running, one item
 
 Finished commands stay in start order with `✓` for success or `✗` for failure and their fixed duration; a running one shows `name $ cmd` and its elapsed seconds, refreshed every second. A multi-line command is folded to its first line, and a long one is cut with ` ...` so each line stays around 80 characters. The band yields to the engine's own band while a survey is shown.
 
-The band is shared by the agents of one session (the main agent and its subagents): their running commands are merged into one list, e.g. `  lint $ bun lint (3s)` and `  test $ bun test 待機中 (2s)` under `[gate] 実行中:`. `待機中` marks a command that is waiting for the same run in another agent (see below). The band disappears only when every agent of the session has finished; while another agent of the session is still running, its list stays. Other Claude Code sessions open on the same project (for example in another terminal) are not shown, and the one-line summary below is kept per session too.
+The band is shared by the agents of one session (the main agent and its subagents): their running commands are merged into one list, e.g. `  lint $ bun lint (3s)` and `  test $ bun test waiting (2s)` under `[gate] running:`. `waiting` marks a command that is waiting for the same run in another agent (see below). The band disappears only when every agent of the session has finished; while another agent of the session is still running, its list stays. Other Claude Code sessions open on the same project (for example in another terminal) are not shown, and the one-line summary below is kept per session too.
 
-When everything has finished, the band goes away and the result of that round is left on the one-line status line instead, as counts only, e.g. `[gate] 完了: ✓ 5 / ✗ 1 (81.0s)` (`✗` is left out when nothing failed, `✓` when nothing passed; the seconds run from the first start to the last finish, not the sum, since checks run in parallel; check names are not shown, see the Stop hook output for which one failed. The status line cannot hold line breaks or long text, so it stays short). It stays until the next gate command starts running and the band appears again. Feedback checks still use the status line while they run: `[feedback-guard] 評価中: <rule>` or `[feedback-stop-check] 検査中: <rule> (<file>)`, cleared when the hook finishes.
+When everything has finished, the band goes away and the result of that round is left on the one-line status line instead, as counts only, e.g. `[gate] done: ✓ 5 / ✗ 1 (81.0s)` (`✗` is left out when nothing failed, `✓` when nothing passed; the seconds run from the first start to the last finish, not the sum, since checks run in parallel; check names are not shown, see the Stop hook output for which one failed. The status line cannot hold line breaks or long text, so it stays short). It stays until the next gate command starts running and the band appears again. Feedback checks still use the status line while they run: `[feedback-guard] evaluating: <rule>` or `[feedback-stop-check] checking: <rule> (<file>)`, cleared when the hook finishes.
 
 ### Sharing runs between agents
 
@@ -136,11 +145,11 @@ run:
 
 ### Success report
 
-When the `checks` phase (Stop / SubagentStop) actually ran at least one command and all of them passed, the gate blocks the stop once and returns a summary as the reason, e.g. `[gate] 検証がすべて通りました: lint ✓ / typecheck ✓ / test ✓。この結果をユーザーに報告して終了してください。`, so the agent can report the result and finish instead of waiting for you to say it passed. The stop right after such a report (`stop_hook_active`) runs no gate command and passes. Nothing is reported when no command ran, when `stop_hook_active` is true (a continuation after a failure block), or when it is turned off with a top-level `report_success: false` in `.claude/gate.yaml` (default: on). Failures block as before.
+When the `checks` phase (Stop / SubagentStop) actually ran at least one command and all of them passed, the gate blocks the stop once and returns a summary as the reason, e.g. `[gate] All checks passed: lint ✓ / typecheck ✓ / test ✓. Report this result to the user and finish.`, so the agent can report the result and finish instead of waiting for you to say it passed. The stop right after such a report (`stop_hook_active`) runs no gate command and passes. Nothing is reported when no command ran, when `stop_hook_active` is true (a continuation after a failure block), or when it is turned off with a top-level `report_success: false` in `.claude/gate.yaml` (default: on). Failures block as before.
 
 ## Development
 
-Requires [Bun](https://bun.sh). The hook module runs inside Claude Code, which only resolves relative imports and `claude-code`; so the source in `src/` (plus the `yaml` package) is bundled into `hooks/register.js`. `hooks/hooks.json` points at that bundle. All file and process access goes through the engine's `$` API (`$.fs`, `$.process`, `$.env`, `$.session`), wrapped by the `Io` interface in `src/io.ts`; the tests run the same code against Node's `fs` / `child_process`.
+Requires [Bun](https://bun.sh). The hook module runs inside Claude Code, which only resolves relative imports and `claude-code`; so the source in `src/` (plus the `yaml` and `i18next` packages, and the `locales/*.yaml` message files, imported as text) is bundled into `hooks/register.js`. `hooks/hooks.json` points at that bundle. All file and process access goes through the engine's `$` API (`$.fs`, `$.process`, `$.env`, `$.session`), wrapped by the `Io` interface in `src/io.ts`; the tests run the same code against Node's `fs` / `child_process`.
 
 ```
 bun install          # install dev dependencies

@@ -5,7 +5,7 @@ import { expect, mock, test } from 'claude-code/testing'
 
 type Files = Record<string, string>
 
-const BUNDLED = /\/rules\/feedback_rules\.md$/
+const BUNDLED = /\/rules\/feedback_rules(\.en)?\.md$/
 
 // 同梱の rules/ は常に存在し、その内容は BUNDLED_TEXT として読めることにする。
 type Run = { exitCode: number; stdout: string }
@@ -18,7 +18,8 @@ const setup = (on: any, files: Files = {}, env: Record<string, string> = {}, run
   const runs: string[][] = []
   const statuses: (string | undefined)[] = []
   const invalidations: string[] = []
-  mock.env(on, { HOME: '/h', ...env })
+  // 既定の言語は日本語（期待値は日本語で書かれている）。LANG を差し替えるか options.language で切り替える。
+  mock.env(on, { HOME: '/h', LANG: 'ja_JP.UTF-8', ...env })
   on('session.id', () => ({ value: 'sess-1' }))
   on('session.root', () => ({ value: '/proj' }))
   on('session.cwd', () => ({ value: '/proj' }))
@@ -174,6 +175,20 @@ test('PostToolUse: 実行中はステータス行を使わず帯を描き直さ�
   expect(statuses.some((s) => s?.startsWith('[gate] 実行中'))).toBe(false)
   expect(statuses.at(-1)).toBe('[gate] 完了: ✓ 1 (0.0s)')
   expect(invalidations).toContain('ui.render')
+})
+
+test('language: options.language が en なら英語で出す', { options: { language: 'en' } }, async ($, on) => {
+  const files: Files = { '/proj/.claude/gate.yaml': JSON.stringify({ policy: false, rules: [{ match: '**/*.py', run: ['echo linting'] }] }) }
+  const { statuses } = setup(on, files)
+  await $.classic.PostToolUse({ session_id: 'sess-1', tool_name: 'Edit', tool_input: { file_path: 'x.py' }, tool_response: {}, tool_use_id: 't1' })
+  expect(statuses.at(-1)).toBe('[gate] done: ✓ 1 (0.0s)')
+})
+
+test('language: 既定（auto）は環境変数 LANG に従う', async ($, on) => {
+  const files: Files = { '/proj/.claude/gate.yaml': JSON.stringify({ policy: false, rules: [{ match: '**/*.py', run: ['echo linting'] }] }) }
+  const { statuses } = setup(on, files, { LANG: 'en_US.UTF-8' })
+  await $.classic.PostToolUse({ session_id: 'sess-1', tool_name: 'Edit', tool_input: { file_path: 'x.py' }, tool_response: {}, tool_use_id: 't1' })
+  expect(statuses.at(-1)).toBe('[gate] done: ✓ 1 (0.0s)')
 })
 
 const BAND = { surface: 'terminal', component: 'AbovePrompt', requestId: 'r1', props: { hasSurvey: false, isWorking: false } } as const

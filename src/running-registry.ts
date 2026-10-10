@@ -4,6 +4,7 @@
 // 同じプロジェクトを開いた別セッションの分は混ぜない。hook がどのプロセスで動くかに依存しないよう、
 // 共有はファイルで行う。
 import type { RenderElement } from 'claude-code'
+import { type Lang, tr } from './i18n.ts'
 import type { Io } from './io.ts'
 import { join } from './path.ts'
 import { isDict } from './pyutil.ts'
@@ -97,26 +98,26 @@ function cutCmd(text: string, room: number): string {
 const markOf = (e: RunningEntry): string => (e.result === 'ok' ? '✓' : '✗')
 const doneText = (e: RunningEntry, now: number): string => `${e.name ?? foldCmd(e.cmd)} ${markOf(e)} (${(((e.ended ?? now) - e.started) / 1000).toFixed(1)}s)`
 
-function runningLine(e: RunningEntry, now: number): string {
+function runningLine(e: RunningEntry, now: number, lang: Lang): string {
   if (e.result) return `${INDENT}${doneText(e, now)}`
   const seconds = Math.max(0, Math.floor((now - e.started) / 1000))
   const head = e.name ? `${INDENT}${e.name} $ ` : INDENT
-  const tail = `${e.waiting ? ' 待機中' : ''} (${seconds}s)`
+  const tail = `${e.waiting ? ` ${tr(lang)('band.waiting')}` : ''} (${seconds}s)`
   return `${head}${cutCmd(foldCmd(e.cmd), BAND_LINE_MAX - head.length - tail.length)}${tail}`
 }
 
 /** 帯に描く行: 見出し 1 行 + 1 項目 1 行。完了項目は所要時間を固定し、実行中の項目は now からの経過秒を出す。 */
-export function runningLines(entries: readonly RunningEntry[], now: number): string[] {
-  return ['[gate] 実行中:', ...entries.map((e) => runningLine(e, now))]
+export function runningLines(entries: readonly RunningEntry[], now: number, lang: Lang): string[] {
+  return [tr(lang)('band.running'), ...entries.map((e) => runningLine(e, now, lang))]
 }
 
 /** 実行中・完了待ちの項目が 1 つでもある間だけ帯の木を返す。全部終わっていれば undefined（帯を譲る）。 */
-export function runningBand(entries: readonly RunningEntry[], now: number): RenderElement | undefined {
+export function runningBand(entries: readonly RunningEntry[], now: number, lang: Lang): RenderElement | undefined {
   if (!entries.some((e) => !e.result)) return undefined
   return {
     type: 'Box',
     props: { flexDirection: 'column' },
-    children: runningLines(entries, now).map((line) => ({ type: 'Text', children: [line] })),
+    children: runningLines(entries, now, lang).map((line) => ({ type: 'Text', children: [line] })),
   }
 }
 
@@ -124,14 +125,14 @@ export function runningBand(entries: readonly RunningEntry[], now: number): Rend
  * セッション内の全員の実行が終わったときの 1 行サマリ（ステータス行用）。チェック名は出さず件数だけにして、長さを一定に保つ。
  * 所要秒は最初の開始から最後の完了まで（並列なので各項目の合計ではない）。未完了があるか、何も無ければ undefined。
  */
-export function finishedSummary(entries: readonly RunningEntry[]): string | undefined {
+export function finishedSummary(entries: readonly RunningEntry[], lang: Lang): string | undefined {
   if (entries.length === 0 || entries.some((e) => !e.result)) return undefined
   const passed = entries.filter((e) => e.result === 'ok').length
   const failed = entries.length - passed
   const counts = [passed > 0 ? `✓ ${passed}` : '', failed > 0 ? `✗ ${failed}` : ''].filter((s) => s !== '').join(' / ')
   const first = Math.min(...entries.map((e) => e.started))
   const last = Math.max(...entries.map((e) => e.ended ?? e.started))
-  return `[gate] 完了: ${counts} (${((last - first) / 1000).toFixed(1)}s)`
+  return tr(lang)('band.done', { counts, seconds: ((last - first) / 1000).toFixed(1) })
 }
 
 // 完了サマリは gate が終わると一覧（running/）から消えるので、次の gate コマンドが走り始めるまで残すために

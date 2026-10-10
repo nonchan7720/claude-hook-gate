@@ -1,24 +1,31 @@
 // エンジンの `$` から Io を作る。hook モジュールはここ経由でしかファイルやプロセスに触れない。
 import type { Engine } from 'claude-code'
+import { resolveLang } from './i18n.ts'
 import type { DirEntry, EnvVars, Io, RunOptions, RunResult, Stat } from './io.ts'
 
 const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
 /** `$.env.get` は名前をソース上の文字列リテラルで書く必要があるので、参照する変数を1つずつ並べる。 */
 async function readEnv($: Engine): Promise<EnvVars> {
-  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier] = await Promise.all([
+  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG] = await Promise.all([
     $.env.get('HOME'),
     $.env.get('PATH'),
     $.env.get('CLAUDE_FEEDBACK_DIR'),
     $.env.get('DOGWOOD_BIN'),
     $.env.get('TERM_PROGRAM'),
     $.env.get('__CFBundleIdentifier'),
+    $.env.get('FEEDBACK_GATE_LANG'),
+    $.env.get('LC_ALL'),
+    $.env.get('LC_MESSAGES'),
+    $.env.get('LANG'),
   ])
-  return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier }
+  return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG }
 }
 
-export async function createIo($: Engine): Promise<Io> {
+/** options はプラグイン設定（userConfig）。`language` がメッセージの言語を決める（auto なら OS の言語設定）。 */
+export async function createIo($: Engine, options: Readonly<Record<string, unknown>> = {}): Promise<Io> {
   const [env, projectDir, cwd] = await Promise.all([readEnv($), $.session.root(), $.session.cwd()])
+  const lang = resolveLang(env, options.language)
 
   const stat = async (path: string): Promise<Stat | undefined> => {
     try {
@@ -52,6 +59,7 @@ export async function createIo($: Engine): Promise<Io> {
 
   return {
     env,
+    lang,
     projectDir,
     cwd,
     pluginRoot: $.plugin.root,

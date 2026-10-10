@@ -6,12 +6,11 @@
 //
 // hook 自身のバグで作業を止めないよう、例外は握りつぶして exit 0 にする。
 import { listRules, loadBodyIntro, type Rule } from './feedback-rules.ts'
+import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 
-const HEADER = '# 確定フィードバックルール（count >= 3）\nこれらは繰り返し指摘された確定ルール。違反すると hook がブロックする。\n\n'
-
 async function formatFull(io: Io, rule: Rule): Promise<string> {
-  const lines = [`■ ${rule.name} (これまで ${rule.count} 回指摘されています)`, rule.description]
+  const lines = [tr(io.lang)('inject.ruleTitle', { name: rule.name, count: rule.count }), rule.description]
   const intro = await loadBodyIntro(io, rule.path)
   if (intro) lines.push(intro)
   return lines.join('\n')
@@ -22,7 +21,7 @@ const byCountThenName = (a: Rule, b: Rule): number => b.count - a.count || (a.na
 export async function buildOutput(io: Io, rules: Rule[]): Promise<string> {
   const blocks: string[] = []
   for (const r of [...rules].sort(byCountThenName)) blocks.push(await formatFull(io, r))
-  return HEADER + blocks.join('\n\n')
+  return tr(io.lang)('inject.header') + blocks.join('\n\n')
 }
 
 export async function feedbackInject(io: Io): Promise<ScriptResult> {

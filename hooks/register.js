@@ -1,325 +1,2467 @@
-// src/io.ts
-var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
-
-// src/pyutil.ts
-function truthy(v) {
-  if (Array.isArray(v))
-    return v.length > 0;
-  if (v !== null && typeof v === "object")
-    return Object.keys(v).length > 0;
-  return Boolean(v);
-}
-function pyRepr(v) {
-  if (v === null || v === undefined)
-    return "None";
-  if (v === true)
-    return "True";
-  if (v === false)
-    return "False";
-  if (typeof v === "number")
-    return String(v);
-  if (typeof v === "string") {
-    const quote = v.includes("'") && !v.includes('"') ? '"' : "'";
-    const body = v.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
-    return quote + (quote === "'" ? body.replace(/'/g, "\\'") : body) + quote;
-  }
-  if (Array.isArray(v))
-    return `[${v.map(pyRepr).join(", ")}]`;
-  if (typeof v === "object") {
-    return `{${Object.entries(v).map(([k, x]) => `${pyRepr(k)}: ${pyRepr(x)}`).join(", ")}}`;
-  }
-  return String(v);
-}
-function toCount(v) {
-  if (!truthy(v))
-    return 0;
-  if (typeof v === "number")
-    return Math.trunc(v);
-  if (v === true)
-    return 1;
-  if (typeof v === "string" && /^\s*[+-]?\d+\s*$/.test(v))
-    return Number.parseInt(v, 10);
-  return 0;
-}
-function pyRegExp(source, flags = "") {
-  let src = source;
-  let fl = flags;
-  const m = /^\(\?([aiLmsux]+)\)/.exec(src);
-  if (m) {
-    src = src.slice(m[0].length);
-    for (const c of m[1] ?? "")
-      if ("ims".includes(c) && !fl.includes(c))
-        fl += c;
-  }
-  src = src.replace(/\(\?P<([A-Za-z_]\w*)>/g, "(?<$1>").replace(/\(\?P=([A-Za-z_]\w*)\)/g, "\\k<$1>");
-  return new RegExp(src, fl);
-}
-function jqStr(v) {
-  if (v === null || v === undefined || v === false)
+// node_modules/i18next/dist/esm/i18next.js
+var isString = (obj) => typeof obj === "string";
+var defer = () => {
+  let res;
+  let rej;
+  const promise = new Promise((resolve, reject) => {
+    res = resolve;
+    rej = reject;
+  });
+  promise.resolve = res;
+  promise.reject = rej;
+  return promise;
+};
+var makeString = (object) => {
+  if (object == null)
     return "";
-  return typeof v === "string" ? v : JSON.stringify(v);
-}
-var isDict = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-
-// src/agent-launch-guard.ts
-var ASK_AGENT_TYPES = ["code-implementer"];
-var ALLOW_RECIPIENTS = ["git-operator"];
-var CHECKLIST = "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件";
-var ask = (reason) => ok(`${JSON.stringify({
-  hookSpecificOutput: {
-    hookEventName: "PreToolUse",
-    permissionDecision: "ask",
-    permissionDecisionReason: reason
-  }
-})}
-`);
-function agentLaunchGuard(payload) {
-  const tool = jqStr(payload.tool_name);
-  const input = isDict(payload.tool_input) ? payload.tool_input : {};
-  if (tool === "Agent") {
-    const agentType = jqStr(input.subagent_type);
-    if (agentType === "")
-      return ok();
-    if (ASK_AGENT_TYPES.includes(agentType)) {
-      return ask(`${agentType} に送るプロンプト:
-
-${jqStr(input.prompt)}
-
-${CHECKLIST}`);
-    }
-  } else if (tool === "SendMessage") {
-    const recipient = jqStr(input.to);
-    if (!ALLOW_RECIPIENTS.includes(recipient)) {
-      return ask(`${recipient || "宛先不明"} に送るメッセージ:
-
-${jqStr(input.message)}
-
-${CHECKLIST}`);
-    }
-  }
-  return ok();
-}
-
-// src/path.ts
-var isAbsolute = (p) => p.startsWith("/");
-function join(...parts) {
-  let out = "";
-  for (const part of parts) {
-    if (part.startsWith("/"))
-      out = part;
-    else if (out === "" || out.endsWith("/"))
-      out += part;
-    else
-      out += `/${part}`;
-  }
-  return out;
-}
-function normpath(p) {
-  if (p === "")
-    return ".";
-  const abs = p.startsWith("/");
-  const out = [];
-  for (const seg of p.split("/")) {
-    if (seg === "" || seg === ".")
-      continue;
-    if (seg === "..") {
-      const last = out[out.length - 1];
-      if (last !== undefined && last !== "..")
-        out.pop();
-      else if (!abs)
-        out.push("..");
+  return String(object);
+};
+var copy = (a, s, t) => {
+  a.forEach((m) => {
+    if (s[m])
+      t[m] = s[m];
+  });
+};
+var lastOfPathSeparatorRegExp = /###/g;
+var cleanKey = (key) => key && key.includes("###") ? key.replace(lastOfPathSeparatorRegExp, ".") : key;
+var canNotTraverseDeeper = (object) => !object || isString(object);
+var getLastOfPath = (object, path, Empty) => {
+  const stack = !isString(path) ? path : path.split(".");
+  let stackIndex = 0;
+  while (stackIndex < stack.length - 1) {
+    if (canNotTraverseDeeper(object))
+      return {};
+    const key = cleanKey(stack[stackIndex]);
+    if (!object[key] && Empty)
+      object[key] = new Empty;
+    if (Object.prototype.hasOwnProperty.call(object, key)) {
+      object = object[key];
     } else {
-      out.push(seg);
+      object = {};
+    }
+    ++stackIndex;
+  }
+  if (canNotTraverseDeeper(object))
+    return {};
+  return {
+    obj: object,
+    k: cleanKey(stack[stackIndex])
+  };
+};
+var setPath = (object, path, newValue) => {
+  const {
+    obj,
+    k
+  } = getLastOfPath(object, path, Object);
+  if (obj !== undefined || path.length === 1) {
+    obj[k] = newValue;
+    return;
+  }
+  let e = path[path.length - 1];
+  let p = path.slice(0, path.length - 1);
+  let last = getLastOfPath(object, p, Object);
+  while (last.obj === undefined && p.length) {
+    e = `${p[p.length - 1]}.${e}`;
+    p = p.slice(0, p.length - 1);
+    last = getLastOfPath(object, p, Object);
+    if (last?.obj && typeof last.obj[`${last.k}.${e}`] !== "undefined") {
+      last.obj = undefined;
     }
   }
-  const joined = out.join("/");
-  if (abs)
-    return `/${joined}`;
-  return joined === "" ? "." : joined;
-}
-function dirname(p) {
-  const i = p.lastIndexOf("/") + 1;
-  const head = p.slice(0, i);
-  if (head !== "" && head !== "/".repeat(head.length))
-    return head.replace(/\/+$/, "");
-  return head;
-}
-function basename(p) {
-  return p.slice(p.lastIndexOf("/") + 1);
-}
-function splitext(p) {
-  const base = basename(p);
-  const dot = base.lastIndexOf(".");
-  if (dot <= 0 || /^\.+$/.test(base.slice(0, dot)))
-    return [p, ""];
-  const cut = p.length - base.length + dot;
-  return [p.slice(0, cut), p.slice(cut)];
-}
-function relpath(path, start) {
-  const a = normpath(path).split("/").filter(Boolean);
-  const b = normpath(start).split("/").filter(Boolean);
-  let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i])
-    i++;
-  const rel = [...b.slice(i).map(() => ".."), ...a.slice(i)];
-  return rel.length === 0 ? "." : rel.join("/");
-}
-function expandUser(p, home) {
-  if (!home)
-    return p;
-  if (p === "~")
-    return home;
-  if (p.startsWith("~/"))
-    return home.replace(/\/+$/, "") + p.slice(1);
-  return p;
-}
-
-// src/glob.ts
-function splitTopCommas(s) {
-  const parts = [];
-  let depth = 0;
-  let cur = "";
-  for (const c of s) {
-    if (c === "{") {
-      depth++;
-      cur += c;
-    } else if (c === "}") {
-      depth--;
-      cur += c;
-    } else if (c === "," && depth === 0) {
-      parts.push(cur);
-      cur = "";
-    } else {
-      cur += c;
-    }
+  last.obj[`${last.k}.${e}`] = newValue;
+};
+var pushPath = (object, path, newValue, concat) => {
+  const {
+    obj,
+    k
+  } = getLastOfPath(object, path, Object);
+  obj[k] = obj[k] || [];
+  obj[k].push(newValue);
+};
+var getPath = (object, path) => {
+  const {
+    obj,
+    k
+  } = getLastOfPath(object, path);
+  if (!obj)
+    return;
+  if (!Object.prototype.hasOwnProperty.call(obj, k))
+    return;
+  return obj[k];
+};
+var getPathWithDefaults = (data, defaultData, key) => {
+  const value = getPath(data, key);
+  if (value !== undefined) {
+    return value;
   }
-  parts.push(cur);
-  return parts;
-}
-function expandBraces(s) {
-  let depth = 0;
-  let start = -1;
-  for (let i = 0;i < s.length; i++) {
-    const c = s.charAt(i);
-    if (c === "{") {
-      if (depth === 0)
-        start = i;
-      depth++;
-    } else if (c === "}") {
-      depth--;
-      if (depth === 0) {
-        const pre = s.slice(0, start);
-        const inner = s.slice(start + 1, i);
-        const post = s.slice(i + 1);
-        const out = [];
-        for (const part of splitTopCommas(inner))
-          out.push(...expandBraces(pre + part + post));
-        return out;
-      }
-    }
-  }
-  return [s];
-}
-var escapeRegex = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-function globToRegex(pat) {
-  const n = pat.length;
-  let i = 0;
-  let out = "^";
-  while (i < n) {
-    const c = pat.charAt(i);
-    if (c === "*") {
-      let j = i;
-      while (j < n && pat.charAt(j) === "*")
-        j++;
-      if (j - i >= 2) {
-        if (j < n && pat.charAt(j) === "/") {
-          out += "(?:.*/)?";
-          i = j + 1;
+  return getPath(defaultData, key);
+};
+var deepExtend = (target, source, overwrite) => {
+  for (const prop in source) {
+    if (prop !== "__proto__" && prop !== "constructor") {
+      if (Object.prototype.hasOwnProperty.call(target, prop)) {
+        if (isString(target[prop]) || target[prop] instanceof String || isString(source[prop]) || source[prop] instanceof String) {
+          if (overwrite)
+            target[prop] = source[prop];
         } else {
-          out += ".*";
-          i = j;
+          deepExtend(target[prop], source[prop], overwrite);
         }
       } else {
-        out += "[^/]*";
-        i++;
+        target[prop] = source[prop];
       }
-    } else if (c === "?") {
-      out += "[^/]";
-      i++;
-    } else if (c === "[") {
-      let j = i + 1;
-      if (j < n && "!^".includes(pat.charAt(j)))
-        j++;
-      if (j < n && pat.charAt(j) === "]")
-        j++;
-      while (j < n && pat.charAt(j) !== "]")
-        j++;
-      let cls = pat.slice(i, j + 1);
-      if (cls.startsWith("[!"))
-        cls = `[^${cls.slice(2)}`;
-      out += cls;
-      i = j + 1;
-    } else {
-      out += escapeRegex(c);
-      i++;
     }
   }
-  return `${out}$`;
-}
-function matchPatterns(pats) {
-  const pairs = [];
-  for (const pat of pats) {
-    for (const ex of expandBraces(pat))
-      pairs.push([ex, new RegExp(globToRegex(ex))]);
+  return target;
+};
+var regexEscape = (str) => str.replace(/[\-\[\]\/\{\}\(\)\*\+\?\.\\\^\$\|]/g, "\\$&");
+var _entityMap = {
+  "&": "&amp;",
+  "<": "&lt;",
+  ">": "&gt;",
+  '"': "&quot;",
+  "'": "&#39;",
+  "/": "&#x2F;"
+};
+var escape = (data) => {
+  if (isString(data)) {
+    return data.replace(/[&<>"'\/]/g, (s) => _entityMap[s]);
   }
-  return pairs;
+  return data;
+};
+
+class RegExpCache {
+  constructor(capacity) {
+    this.capacity = capacity;
+    this.regExpMap = new Map;
+    this.regExpQueue = [];
+  }
+  getRegExp(pattern) {
+    const regExpFromCache = this.regExpMap.get(pattern);
+    if (regExpFromCache !== undefined) {
+      return regExpFromCache;
+    }
+    const regExpNew = new RegExp(pattern);
+    if (this.regExpQueue.length === this.capacity) {
+      this.regExpMap.delete(this.regExpQueue.shift());
+    }
+    this.regExpMap.set(pattern, regExpNew);
+    this.regExpQueue.push(pattern);
+    return regExpNew;
+  }
 }
-var compileGlobs = (patterns) => matchPatterns(patterns).map(([, rx]) => rx);
-function asList(v) {
-  if (typeof v === "string")
-    return [v];
-  if (Array.isArray(v))
-    return v;
-  return [];
+var chars = [" ", ",", "?", "!", ";"];
+var looksLikeObjectPathRegExpCache = new RegExpCache(20);
+var looksLikeObjectPath = (key, nsSeparator, keySeparator) => {
+  nsSeparator = nsSeparator || "";
+  keySeparator = keySeparator || "";
+  const possibleChars = chars.filter((c) => !nsSeparator.includes(c) && !keySeparator.includes(c));
+  if (possibleChars.length === 0)
+    return true;
+  const r = looksLikeObjectPathRegExpCache.getRegExp(`(${possibleChars.map((c) => c === "?" ? "\\?" : c).join("|")})`);
+  let matched = !r.test(key);
+  if (!matched) {
+    const ki = key.indexOf(keySeparator);
+    if (ki > 0 && !r.test(key.substring(0, ki))) {
+      matched = true;
+    }
+  }
+  return matched;
+};
+var deepFind = (obj, path, keySeparator = ".") => {
+  if (!obj)
+    return;
+  if (obj[path]) {
+    if (!Object.prototype.hasOwnProperty.call(obj, path))
+      return;
+    return obj[path];
+  }
+  const tokens = path.split(keySeparator);
+  let current = obj;
+  for (let i = 0;i < tokens.length; ) {
+    if (!current || typeof current !== "object") {
+      return;
+    }
+    let next;
+    let nextPath = "";
+    for (let j = i;j < tokens.length; ++j) {
+      if (j !== i) {
+        nextPath += keySeparator;
+      }
+      nextPath += tokens[j];
+      next = current[nextPath];
+      if (next !== undefined) {
+        if (["string", "number", "boolean"].includes(typeof next) && j < tokens.length - 1) {
+          continue;
+        }
+        i += j - i + 1;
+        break;
+      }
+    }
+    current = next;
+  }
+  return current;
+};
+var getCleanedCode = (code) => code?.replace(/_/g, "-");
+var consoleLogger = {
+  type: "logger",
+  log(args) {
+    this.output("log", args);
+  },
+  warn(args) {
+    this.output("warn", args);
+  },
+  error(args) {
+    this.output("error", args);
+  },
+  output(type, args) {
+    console?.[type]?.apply?.(console, args);
+  }
+};
+
+class Logger {
+  constructor(concreteLogger, options = {}) {
+    this.init(concreteLogger, options);
+  }
+  init(concreteLogger, options = {}) {
+    this.prefix = options.prefix || "i18next:";
+    this.logger = concreteLogger || consoleLogger;
+    this.options = options;
+    this.debug = options.debug;
+  }
+  log(...args) {
+    return this.forward(args, "log", "", true);
+  }
+  warn(...args) {
+    return this.forward(args, "warn", "", true);
+  }
+  error(...args) {
+    return this.forward(args, "error", "");
+  }
+  deprecate(...args) {
+    return this.forward(args, "warn", "WARNING DEPRECATED: ", true);
+  }
+  forward(args, lvl, prefix, debugOnly) {
+    if (debugOnly && !this.debug)
+      return null;
+    args = args.map((a) => isString(a) ? a.replace(/[\r\n\x00-\x1F\x7F]/g, " ") : a);
+    if (isString(args[0]))
+      args[0] = `${prefix}${this.prefix} ${args[0]}`;
+    return this.logger[lvl](args);
+  }
+  create(moduleName) {
+    return new Logger(this.logger, {
+      ...{
+        prefix: `${this.prefix}:${moduleName}:`
+      },
+      ...this.options
+    });
+  }
+  clone(options) {
+    options = options || this.options;
+    options.prefix = options.prefix || this.prefix;
+    return new Logger(this.logger, options);
+  }
 }
-var hasMagic = (seg) => /[*?[]/.test(seg);
-async function globExists(io, pattern) {
-  const abs = pattern.startsWith("/");
-  const segs = pattern.split("/").filter((s) => s !== "");
-  return walk(io, abs ? "/" : "", segs, 0);
+var baseLogger = new Logger;
+
+class EventEmitter {
+  constructor() {
+    this.observers = {};
+  }
+  on(events, listener) {
+    events.split(" ").forEach((event) => {
+      if (!this.observers[event])
+        this.observers[event] = new Map;
+      const numListeners = this.observers[event].get(listener) || 0;
+      this.observers[event].set(listener, numListeners + 1);
+    });
+    return this;
+  }
+  off(event, listener) {
+    if (!this.observers[event])
+      return;
+    if (!listener) {
+      delete this.observers[event];
+      return;
+    }
+    this.observers[event].delete(listener);
+  }
+  once(event, listener) {
+    const wrapper = (...args) => {
+      listener(...args);
+      this.off(event, wrapper);
+    };
+    this.on(event, wrapper);
+    return this;
+  }
+  emit(event, ...args) {
+    if (this.observers[event]) {
+      const cloned = Array.from(this.observers[event].entries());
+      cloned.forEach(([observer, numTimesAdded]) => {
+        for (let i = 0;i < numTimesAdded; i++) {
+          observer(...args);
+        }
+      });
+    }
+    if (this.observers["*"]) {
+      const cloned = Array.from(this.observers["*"].entries());
+      cloned.forEach(([observer, numTimesAdded]) => {
+        for (let i = 0;i < numTimesAdded; i++) {
+          observer(event, ...args);
+        }
+      });
+    }
+  }
 }
-async function walk(io, dir, segs, i) {
-  if (i >= segs.length)
-    return dir === "" ? true : io.exists(dir);
-  const seg = segs.at(i) ?? "";
-  const here = dir === "" ? "." : dir;
-  if (seg === "**") {
-    if (i === segs.length - 1)
-      return (await io.stat(here))?.kind === "dir";
-    if (await walk(io, dir, segs, i + 1))
-      return true;
-    for (const e of await io.list(here)) {
-      if (e.name.startsWith("."))
-        continue;
-      const sub = join(dir, e.name);
-      if ((await io.stat(sub))?.kind === "dir" && await walk(io, sub, segs, i))
+
+class ResourceStore extends EventEmitter {
+  constructor(data, options = {
+    ns: ["translation"],
+    defaultNS: "translation"
+  }) {
+    super();
+    this.data = data || {};
+    this.options = options;
+    if (this.options.keySeparator === undefined) {
+      this.options.keySeparator = ".";
+    }
+    if (this.options.ignoreJSONStructure === undefined) {
+      this.options.ignoreJSONStructure = true;
+    }
+  }
+  addNamespaces(ns) {
+    if (!this.options.ns.includes(ns)) {
+      this.options.ns.push(ns);
+    }
+  }
+  removeNamespaces(ns) {
+    const index = this.options.ns.indexOf(ns);
+    if (index > -1) {
+      this.options.ns.splice(index, 1);
+    }
+  }
+  getResource(lng, ns, key, options = {}) {
+    const keySeparator = options.keySeparator !== undefined ? options.keySeparator : this.options.keySeparator;
+    const ignoreJSONStructure = options.ignoreJSONStructure !== undefined ? options.ignoreJSONStructure : this.options.ignoreJSONStructure;
+    let path;
+    if (lng.includes(".")) {
+      path = lng.split(".");
+    } else {
+      path = [lng, ns];
+      if (key) {
+        if (Array.isArray(key)) {
+          path.push(...key);
+        } else if (isString(key) && keySeparator) {
+          path.push(...key.split(keySeparator));
+        } else {
+          path.push(key);
+        }
+      }
+    }
+    const result = getPath(this.data, path);
+    if (!result && !ns && !key && lng.includes(".")) {
+      lng = path[0];
+      ns = path[1];
+      key = path.slice(2).join(".");
+    }
+    if (result || !ignoreJSONStructure || !isString(key))
+      return result;
+    return deepFind(this.data?.[lng]?.[ns], key, keySeparator);
+  }
+  addResource(lng, ns, key, value, options = {
+    silent: false
+  }) {
+    const keySeparator = options.keySeparator !== undefined ? options.keySeparator : this.options.keySeparator;
+    let path = [lng, ns];
+    if (key)
+      path = path.concat(keySeparator ? key.split(keySeparator) : key);
+    if (lng.includes(".")) {
+      path = lng.split(".");
+      value = ns;
+      ns = path[1];
+    }
+    this.addNamespaces(ns);
+    setPath(this.data, path, value);
+    if (!options.silent)
+      this.emit("added", lng, ns, key, value);
+  }
+  addResources(lng, ns, resources, options = {
+    silent: false
+  }) {
+    for (const m in resources) {
+      if (isString(resources[m]) || Array.isArray(resources[m]))
+        this.addResource(lng, ns, m, resources[m], {
+          silent: true
+        });
+    }
+    if (!options.silent)
+      this.emit("added", lng, ns, resources);
+  }
+  addResourceBundle(lng, ns, resources, deep, overwrite, options = {
+    silent: false,
+    skipCopy: false
+  }) {
+    let path = [lng, ns];
+    if (lng.includes(".")) {
+      path = lng.split(".");
+      deep = resources;
+      resources = ns;
+      ns = path[1];
+    }
+    this.addNamespaces(ns);
+    let pack = getPath(this.data, path) || {};
+    if (!options.skipCopy)
+      resources = JSON.parse(JSON.stringify(resources));
+    if (deep) {
+      deepExtend(pack, resources, overwrite);
+    } else {
+      pack = {
+        ...pack,
+        ...resources
+      };
+    }
+    setPath(this.data, path, pack);
+    if (!options.silent)
+      this.emit("added", lng, ns, resources);
+  }
+  removeResourceBundle(lng, ns) {
+    if (this.hasResourceBundle(lng, ns)) {
+      delete this.data[lng][ns];
+    }
+    this.removeNamespaces(ns);
+    this.emit("removed", lng, ns);
+  }
+  hasResourceBundle(lng, ns) {
+    return this.getResource(lng, ns) !== undefined;
+  }
+  getResourceBundle(lng, ns) {
+    if (!ns)
+      ns = this.options.defaultNS;
+    return this.getResource(lng, ns);
+  }
+  getDataByLanguage(lng) {
+    return this.data[lng];
+  }
+  hasLanguageSomeTranslations(lng) {
+    const data = this.getDataByLanguage(lng);
+    const n = data && Object.keys(data) || [];
+    return !!n.find((v) => data[v] && Object.keys(data[v]).length > 0);
+  }
+  toJSON() {
+    return this.data;
+  }
+}
+var postProcessor = {
+  processors: {},
+  addPostProcessor(module) {
+    this.processors[module.name] = module;
+  },
+  handle(processors, value, key, options, translator) {
+    processors.forEach((processor) => {
+      value = this.processors[processor]?.process(value, key, options, translator) ?? value;
+    });
+    return value;
+  }
+};
+var PATH_KEY = Symbol("i18next/PATH_KEY");
+function createProxy() {
+  const state = [];
+  const handler = Object.create(null);
+  let proxy;
+  handler.get = (target, key) => {
+    proxy?.revoke?.();
+    if (key === PATH_KEY)
+      return state;
+    state.push(key);
+    proxy = Proxy.revocable(target, handler);
+    return proxy.proxy;
+  };
+  return Proxy.revocable(Object.create(null), handler).proxy;
+}
+function keysFromSelector(selector, opts) {
+  const {
+    [PATH_KEY]: path
+  } = selector(createProxy());
+  const keySeparator = opts?.keySeparator ?? ".";
+  const nsSeparator = opts?.nsSeparator ?? ":";
+  const strict = opts?.enableSelector === "strict";
+  if (path.length > 1 && nsSeparator) {
+    const ns = opts?.ns;
+    const nsList = strict ? Array.isArray(ns) ? ns : ns ? [ns] : null : Array.isArray(ns) ? ns : null;
+    if (nsList) {
+      const candidates = strict ? nsList : nsList.length > 1 ? nsList.slice(1) : [];
+      if (candidates.includes(path[0])) {
+        return `${path[0]}${nsSeparator}${path.slice(1).join(keySeparator)}`;
+      }
+    }
+  }
+  return path.join(keySeparator);
+}
+var shouldHandleAsObject = (res) => !isString(res) && typeof res !== "boolean" && typeof res !== "number";
+
+class Translator extends EventEmitter {
+  constructor(services, options = {}) {
+    super();
+    copy(["resourceStore", "languageUtils", "pluralResolver", "interpolator", "backendConnector", "i18nFormat", "utils"], services, this);
+    this.options = options;
+    if (this.options.keySeparator === undefined) {
+      this.options.keySeparator = ".";
+    }
+    this.logger = baseLogger.create("translator");
+    this.checkedLoadedFor = {};
+  }
+  changeLanguage(lng) {
+    if (lng)
+      this.language = lng;
+  }
+  exists(key, o = {
+    interpolation: {}
+  }) {
+    const opt = {
+      ...o
+    };
+    if (key == null)
+      return false;
+    const resolved = this.resolve(key, opt);
+    if (resolved?.res === undefined)
+      return false;
+    const isObject = shouldHandleAsObject(resolved.res);
+    if (opt.returnObjects === false && isObject) {
+      return false;
+    }
+    return true;
+  }
+  extractFromKey(key, opt) {
+    let nsSeparator = opt.nsSeparator !== undefined ? opt.nsSeparator : this.options.nsSeparator;
+    if (nsSeparator === undefined)
+      nsSeparator = ":";
+    const keySeparator = opt.keySeparator !== undefined ? opt.keySeparator : this.options.keySeparator;
+    let namespaces = opt.ns || this.options.defaultNS || [];
+    const wouldCheckForNsInKey = nsSeparator && key.includes(nsSeparator);
+    const seemsNaturalLanguage = !this.options.userDefinedKeySeparator && !opt.keySeparator && !this.options.userDefinedNsSeparator && !opt.nsSeparator && !looksLikeObjectPath(key, nsSeparator, keySeparator);
+    if (wouldCheckForNsInKey && !seemsNaturalLanguage) {
+      const m = key.match(this.interpolator.nestingRegexp);
+      if (m && m.length > 0) {
+        return {
+          key,
+          namespaces: isString(namespaces) ? [namespaces] : namespaces
+        };
+      }
+      const parts = key.split(nsSeparator);
+      if (nsSeparator !== keySeparator || nsSeparator === keySeparator && this.options.ns.includes(parts[0]))
+        namespaces = parts.shift();
+      key = parts.join(keySeparator);
+    }
+    return {
+      key,
+      namespaces: isString(namespaces) ? [namespaces] : namespaces
+    };
+  }
+  translate(keys, o, lastKey) {
+    let opt = typeof o === "object" ? {
+      ...o
+    } : o;
+    if (typeof opt !== "object" && this.options.overloadTranslationOptionHandler) {
+      opt = this.options.overloadTranslationOptionHandler(arguments);
+    }
+    if (typeof opt === "object")
+      opt = {
+        ...opt
+      };
+    if (!opt)
+      opt = {};
+    if (keys == null)
+      return "";
+    if (typeof keys === "function")
+      keys = keysFromSelector(keys, {
+        ...this.options,
+        ...opt
+      });
+    if (!Array.isArray(keys))
+      keys = [String(keys)];
+    keys = keys.map((k) => typeof k === "function" ? keysFromSelector(k, {
+      ...this.options,
+      ...opt
+    }) : String(k));
+    const returnDetails = opt.returnDetails !== undefined ? opt.returnDetails : this.options.returnDetails;
+    const keySeparator = opt.keySeparator !== undefined ? opt.keySeparator : this.options.keySeparator;
+    const {
+      key,
+      namespaces
+    } = this.extractFromKey(keys[keys.length - 1], opt);
+    const namespace = namespaces[namespaces.length - 1];
+    let nsSeparator = opt.nsSeparator !== undefined ? opt.nsSeparator : this.options.nsSeparator;
+    if (nsSeparator === undefined)
+      nsSeparator = ":";
+    const lng = opt.lng || this.language;
+    const appendNamespaceToCIMode = opt.appendNamespaceToCIMode || this.options.appendNamespaceToCIMode;
+    if (lng?.toLowerCase() === "cimode") {
+      if (appendNamespaceToCIMode) {
+        if (returnDetails) {
+          return {
+            res: `${namespace}${nsSeparator}${key}`,
+            usedKey: key,
+            exactUsedKey: key,
+            usedLng: lng,
+            usedNS: namespace,
+            usedParams: this.getUsedParamsDetails(opt)
+          };
+        }
+        return `${namespace}${nsSeparator}${key}`;
+      }
+      if (returnDetails) {
+        return {
+          res: key,
+          usedKey: key,
+          exactUsedKey: key,
+          usedLng: lng,
+          usedNS: namespace,
+          usedParams: this.getUsedParamsDetails(opt)
+        };
+      }
+      return key;
+    }
+    const resolved = this.resolve(keys, opt);
+    let res = resolved?.res;
+    const resUsedKey = resolved?.usedKey || key;
+    const resExactUsedKey = resolved?.exactUsedKey || key;
+    const noObject = ["[object Number]", "[object Function]", "[object RegExp]"];
+    const joinArrays = opt.joinArrays !== undefined ? opt.joinArrays : this.options.joinArrays;
+    const handleAsObjectInI18nFormat = !this.i18nFormat || this.i18nFormat.handleAsObject;
+    const needsPluralHandling = opt.count !== undefined && !isString(opt.count);
+    const hasDefaultValue = Translator.hasDefaultValue(opt);
+    const defaultValueSuffix = needsPluralHandling ? this.pluralResolver.getSuffix(lng, opt.count, opt) : "";
+    const defaultValueSuffixOrdinalFallback = opt.ordinal && needsPluralHandling ? this.pluralResolver.getSuffix(lng, opt.count, {
+      ordinal: false
+    }) : "";
+    const needsZeroSuffixLookup = needsPluralHandling && !opt.ordinal && opt.count === 0;
+    const defaultValue = needsZeroSuffixLookup && opt[`defaultValue${this.options.pluralSeparator}zero`] || opt[`defaultValue${defaultValueSuffix}`] || opt[`defaultValue${defaultValueSuffixOrdinalFallback}`] || opt.defaultValue;
+    let resForObjHndl = res;
+    if (handleAsObjectInI18nFormat && !res && hasDefaultValue) {
+      resForObjHndl = defaultValue;
+    }
+    const handleAsObject = shouldHandleAsObject(resForObjHndl);
+    const resType = Object.prototype.toString.apply(resForObjHndl);
+    if (handleAsObjectInI18nFormat && resForObjHndl && handleAsObject && !noObject.includes(resType) && !(isString(joinArrays) && Array.isArray(resForObjHndl))) {
+      if (!opt.returnObjects && !this.options.returnObjects) {
+        if (!this.options.returnedObjectHandler) {
+          this.logger.warn("accessing an object - but returnObjects options is not enabled!");
+        }
+        const r = this.options.returnedObjectHandler ? this.options.returnedObjectHandler(resUsedKey, resForObjHndl, {
+          ...opt,
+          ns: namespaces
+        }) : `key '${key} (${this.language})' returned an object instead of string.`;
+        if (returnDetails) {
+          resolved.res = r;
+          resolved.usedParams = this.getUsedParamsDetails(opt);
+          return resolved;
+        }
+        return r;
+      }
+      if (keySeparator) {
+        const resTypeIsArray = Array.isArray(resForObjHndl);
+        const copy = resTypeIsArray ? [] : {};
+        const newKeyToUse = resTypeIsArray ? resExactUsedKey : resUsedKey;
+        for (const m in resForObjHndl) {
+          if (Object.prototype.hasOwnProperty.call(resForObjHndl, m)) {
+            const deepKey = `${newKeyToUse}${keySeparator}${m}`;
+            if (hasDefaultValue && !res) {
+              copy[m] = this.translate(deepKey, {
+                ...opt,
+                defaultValue: shouldHandleAsObject(defaultValue) ? defaultValue[m] : undefined,
+                ...{
+                  joinArrays: false,
+                  ns: namespaces
+                }
+              });
+            } else {
+              copy[m] = this.translate(deepKey, {
+                ...opt,
+                ...{
+                  joinArrays: false,
+                  ns: namespaces
+                }
+              });
+            }
+            if (copy[m] === deepKey)
+              copy[m] = resForObjHndl[m];
+          }
+        }
+        res = copy;
+      }
+    } else if (handleAsObjectInI18nFormat && isString(joinArrays) && Array.isArray(res)) {
+      res = res.join(joinArrays);
+      if (res)
+        res = this.extendTranslation(res, keys, opt, lastKey);
+    } else {
+      let usedDefault = false;
+      let usedKey = false;
+      if (!this.isValidLookup(res) && hasDefaultValue) {
+        usedDefault = true;
+        res = defaultValue;
+      }
+      if (!this.isValidLookup(res)) {
+        usedKey = true;
+        res = key;
+      }
+      const missingKeyNoValueFallbackToKey = opt.missingKeyNoValueFallbackToKey || this.options.missingKeyNoValueFallbackToKey;
+      const resForMissing = missingKeyNoValueFallbackToKey && usedKey ? undefined : res;
+      const updateMissing = hasDefaultValue && defaultValue !== res && this.options.updateMissing;
+      if (usedKey || usedDefault || updateMissing) {
+        this.logger.log(updateMissing ? "updateKey" : "missingKey", lng, namespace, needsPluralHandling && !updateMissing ? `${key}${this.pluralResolver.getSuffix(lng, opt.count, opt)}` : key, updateMissing ? defaultValue : res);
+        if (keySeparator) {
+          const fk = this.resolve(key, {
+            ...opt,
+            keySeparator: false
+          });
+          if (fk && fk.res)
+            this.logger.warn("Seems the loaded translations were in flat JSON format instead of nested. Either set keySeparator: false on init or make sure your translations are published in nested format.");
+        }
+        let lngs = [];
+        const fallbackLngs = this.languageUtils.getFallbackCodes(this.options.fallbackLng, opt.lng || this.language);
+        if (this.options.saveMissingTo === "fallback" && fallbackLngs && fallbackLngs[0]) {
+          for (let i = 0;i < fallbackLngs.length; i++) {
+            lngs.push(fallbackLngs[i]);
+          }
+        } else if (this.options.saveMissingTo === "all") {
+          lngs = this.languageUtils.toResolveHierarchy(opt.lng || this.language);
+        } else {
+          lngs.push(opt.lng || this.language);
+        }
+        const send = (l, k, specificDefaultValue) => {
+          const defaultForMissing = hasDefaultValue && specificDefaultValue !== res ? specificDefaultValue : resForMissing;
+          if (this.options.missingKeyHandler) {
+            this.options.missingKeyHandler(l, namespace, k, defaultForMissing, updateMissing, opt);
+          } else if (this.backendConnector?.saveMissing) {
+            this.backendConnector.saveMissing(l, namespace, k, defaultForMissing, updateMissing, opt);
+          }
+          this.emit("missingKey", l, namespace, k, res);
+        };
+        if (this.options.saveMissing) {
+          if (this.options.saveMissingPlurals && needsPluralHandling) {
+            lngs.forEach((language) => {
+              const suffixes = this.pluralResolver.getSuffixes(language, opt);
+              if (needsZeroSuffixLookup && opt[`defaultValue${this.options.pluralSeparator}zero`] && !suffixes.includes(`${this.options.pluralSeparator}zero`)) {
+                suffixes.push(`${this.options.pluralSeparator}zero`);
+              }
+              suffixes.forEach((suffix) => {
+                send([language], key + suffix, opt[`defaultValue${suffix}`] || defaultValue);
+              });
+            });
+          } else {
+            send(lngs, key, defaultValue);
+          }
+        }
+      }
+      res = this.extendTranslation(res, keys, opt, resolved, lastKey);
+      if (usedKey && res === key && this.options.appendNamespaceToMissingKey) {
+        res = `${namespace}${nsSeparator}${key}`;
+      }
+      if ((usedKey || usedDefault) && this.options.parseMissingKeyHandler) {
+        res = this.options.parseMissingKeyHandler(this.options.appendNamespaceToMissingKey ? `${namespace}${nsSeparator}${key}` : key, usedDefault ? res : undefined, opt);
+      }
+    }
+    if (returnDetails) {
+      resolved.res = res;
+      resolved.usedParams = this.getUsedParamsDetails(opt);
+      return resolved;
+    }
+    return res;
+  }
+  extendTranslation(res, key, opt, resolved, lastKey) {
+    if (this.i18nFormat?.parse) {
+      res = this.i18nFormat.parse(res, {
+        ...this.options.interpolation.defaultVariables,
+        ...opt
+      }, opt.lng || this.language || resolved.usedLng, resolved.usedNS, resolved.usedKey, {
+        resolved
+      });
+    } else if (!opt.skipInterpolation) {
+      if (opt.interpolation)
+        this.interpolator.init({
+          ...opt,
+          ...{
+            interpolation: {
+              ...this.options.interpolation,
+              ...opt.interpolation
+            }
+          }
+        });
+      const skipOnVariables = isString(res) && (opt?.interpolation?.skipOnVariables !== undefined ? opt.interpolation.skipOnVariables : this.options.interpolation.skipOnVariables);
+      let nestBef;
+      if (skipOnVariables) {
+        const nb = res.match(this.interpolator.nestingRegexp);
+        nestBef = nb && nb.length;
+      }
+      let data = opt.replace && !isString(opt.replace) ? opt.replace : opt;
+      if (this.options.interpolation.defaultVariables)
+        data = {
+          ...this.options.interpolation.defaultVariables,
+          ...data
+        };
+      res = this.interpolator.interpolate(res, data, opt.lng || this.language || resolved.usedLng, opt);
+      if (skipOnVariables) {
+        const na = res.match(this.interpolator.nestingRegexp);
+        const nestAft = na && na.length;
+        if (nestBef < nestAft)
+          opt.nest = false;
+      }
+      if (!opt.lng && resolved && resolved.res)
+        opt.lng = this.language || resolved.usedLng;
+      if (opt.nest !== false)
+        res = this.interpolator.nest(res, (...args) => {
+          if (lastKey?.[0] === args[0] && !opt.context) {
+            this.logger.warn(`It seems you are nesting recursively key: ${args[0]} in key: ${key[0]}`);
+            return null;
+          }
+          return this.translate(...args, key);
+        }, opt);
+      if (opt.interpolation)
+        this.interpolator.reset();
+    }
+    const postProcess = opt.postProcess || this.options.postProcess;
+    const postProcessorNames = isString(postProcess) ? [postProcess] : postProcess;
+    if (res != null && postProcessorNames?.length && opt.applyPostProcessor !== false) {
+      res = postProcessor.handle(postProcessorNames, res, key, this.options && this.options.postProcessPassResolved ? {
+        i18nResolved: {
+          ...resolved,
+          usedParams: this.getUsedParamsDetails(opt)
+        },
+        ...opt
+      } : opt, this);
+    }
+    return res;
+  }
+  resolve(keys, opt = {}) {
+    let found;
+    let usedKey;
+    let exactUsedKey;
+    let usedLng;
+    let usedNS;
+    if (isString(keys))
+      keys = [keys];
+    if (Array.isArray(keys))
+      keys = keys.map((k) => typeof k === "function" ? keysFromSelector(k, {
+        ...this.options,
+        ...opt
+      }) : k);
+    keys.forEach((k) => {
+      if (this.isValidLookup(found))
+        return;
+      const extracted = this.extractFromKey(k, opt);
+      const key = extracted.key;
+      usedKey = key;
+      let namespaces = extracted.namespaces;
+      if (this.options.fallbackNS)
+        namespaces = namespaces.concat(this.options.fallbackNS);
+      const needsPluralHandling = opt.count !== undefined && !isString(opt.count);
+      const needsZeroSuffixLookup = needsPluralHandling && !opt.ordinal && opt.count === 0;
+      const needsContextHandling = opt.context !== undefined && (isString(opt.context) || typeof opt.context === "number") && opt.context !== "";
+      const codes = opt.lngs ? opt.lngs : this.languageUtils.toResolveHierarchy(opt.lng || this.language, opt.fallbackLng);
+      namespaces.forEach((ns) => {
+        if (this.isValidLookup(found))
+          return;
+        usedNS = ns;
+        if (!this.checkedLoadedFor[`${codes[0]}-${ns}`] && this.utils?.hasLoadedNamespace && !this.utils?.hasLoadedNamespace(usedNS)) {
+          this.checkedLoadedFor[`${codes[0]}-${ns}`] = true;
+          this.logger.warn(`key "${usedKey}" for languages "${codes.join(", ")}" won't get resolved as namespace "${usedNS}" was not yet loaded`, "This means something IS WRONG in your setup. You access the t function before i18next.init / i18next.loadNamespace / i18next.changeLanguage was done. Wait for the callback or Promise to resolve before accessing it!!!");
+        }
+        codes.forEach((code) => {
+          if (this.isValidLookup(found))
+            return;
+          usedLng = code;
+          const finalKeys = [key];
+          if (this.i18nFormat?.addLookupKeys) {
+            this.i18nFormat.addLookupKeys(finalKeys, key, code, ns, opt);
+          } else {
+            let pluralSuffix;
+            if (needsPluralHandling)
+              pluralSuffix = this.pluralResolver.getSuffix(code, opt.count, opt);
+            const zeroSuffix = `${this.options.pluralSeparator}zero`;
+            const ordinalPrefix = `${this.options.pluralSeparator}ordinal${this.options.pluralSeparator}`;
+            if (needsPluralHandling) {
+              if (opt.ordinal && pluralSuffix.startsWith(ordinalPrefix)) {
+                finalKeys.push(key + pluralSuffix.replace(ordinalPrefix, this.options.pluralSeparator));
+              }
+              finalKeys.push(key + pluralSuffix);
+              if (needsZeroSuffixLookup) {
+                finalKeys.push(key + zeroSuffix);
+              }
+            }
+            if (needsContextHandling) {
+              const contextKey = `${key}${this.options.contextSeparator || "_"}${opt.context}`;
+              finalKeys.push(contextKey);
+              if (needsPluralHandling) {
+                if (opt.ordinal && pluralSuffix.startsWith(ordinalPrefix)) {
+                  finalKeys.push(contextKey + pluralSuffix.replace(ordinalPrefix, this.options.pluralSeparator));
+                }
+                finalKeys.push(contextKey + pluralSuffix);
+                if (needsZeroSuffixLookup) {
+                  finalKeys.push(contextKey + zeroSuffix);
+                }
+              }
+            }
+          }
+          let possibleKey;
+          while (possibleKey = finalKeys.pop()) {
+            if (!this.isValidLookup(found)) {
+              exactUsedKey = possibleKey;
+              found = this.getResource(code, ns, possibleKey, opt);
+            }
+          }
+        });
+      });
+    });
+    return {
+      res: found,
+      usedKey,
+      exactUsedKey,
+      usedLng,
+      usedNS
+    };
+  }
+  isValidLookup(res) {
+    return res !== undefined && !(!this.options.returnNull && res === null) && !(!this.options.returnEmptyString && res === "");
+  }
+  getResource(code, ns, key, options = {}) {
+    if (this.i18nFormat?.getResource)
+      return this.i18nFormat.getResource(code, ns, key, options);
+    return this.resourceStore.getResource(code, ns, key, options);
+  }
+  getUsedParamsDetails(options = {}) {
+    const optionsKeys = ["defaultValue", "ordinal", "context", "replace", "lng", "lngs", "fallbackLng", "ns", "keySeparator", "nsSeparator", "returnObjects", "returnDetails", "joinArrays", "postProcess", "interpolation"];
+    const useOptionsReplaceForData = options.replace && !isString(options.replace);
+    let data = useOptionsReplaceForData ? options.replace : options;
+    if (useOptionsReplaceForData && typeof options.count !== "undefined") {
+      data = {
+        ...data,
+        count: options.count
+      };
+    }
+    if (this.options.interpolation.defaultVariables) {
+      data = {
+        ...this.options.interpolation.defaultVariables,
+        ...data
+      };
+    }
+    if (!useOptionsReplaceForData) {
+      data = {
+        ...data
+      };
+      for (const key of optionsKeys) {
+        delete data[key];
+      }
+    }
+    return data;
+  }
+  static hasDefaultValue(options) {
+    const prefix = "defaultValue";
+    for (const option in options) {
+      if (Object.prototype.hasOwnProperty.call(options, option) && option.startsWith(prefix) && options[option] !== undefined) {
         return true;
+      }
     }
     return false;
   }
-  if (!hasMagic(seg))
-    return walk(io, join(dir, seg), segs, i + 1);
-  const rx = new RegExp(globToRegex(seg));
-  for (const e of await io.list(here)) {
-    if (e.name.startsWith(".") && !seg.startsWith("."))
-      continue;
-    if (!rx.test(e.name))
-      continue;
-    if (await walk(io, join(dir, e.name), segs, i + 1))
-      return true;
-  }
-  return false;
 }
+
+class LanguageUtil {
+  constructor(options) {
+    this.options = options;
+    this.supportedLngs = this.options.supportedLngs || false;
+    this.logger = baseLogger.create("languageUtils");
+    this.resolveHierarchyCache = {};
+  }
+  clearCache() {
+    this.resolveHierarchyCache = {};
+  }
+  getScriptPartFromCode(code) {
+    code = getCleanedCode(code);
+    if (!code || !code.includes("-"))
+      return null;
+    const p = code.split("-");
+    if (p.length === 2)
+      return null;
+    p.pop();
+    if (p[p.length - 1].toLowerCase() === "x")
+      return null;
+    return this.formatLanguageCode(p.join("-"));
+  }
+  getLanguagePartFromCode(code) {
+    code = getCleanedCode(code);
+    if (!code || !code.includes("-"))
+      return code;
+    const p = code.split("-");
+    return this.formatLanguageCode(p[0]);
+  }
+  formatLanguageCode(code) {
+    if (isString(code) && code.includes("-")) {
+      let formattedCode;
+      try {
+        formattedCode = Intl.getCanonicalLocales(code)[0];
+      } catch (e) {}
+      if (formattedCode && this.options.lowerCaseLng) {
+        formattedCode = formattedCode.toLowerCase();
+      }
+      if (formattedCode)
+        return formattedCode;
+      if (this.options.lowerCaseLng) {
+        return code.toLowerCase();
+      }
+      return code;
+    }
+    return this.options.cleanCode || this.options.lowerCaseLng ? code.toLowerCase() : code;
+  }
+  isSupportedCode(code) {
+    if (this.options.load === "languageOnly" || this.options.nonExplicitSupportedLngs) {
+      code = this.getLanguagePartFromCode(code);
+    }
+    return !this.supportedLngs || !this.supportedLngs.length || this.supportedLngs.includes(code);
+  }
+  getBestMatchFromCodes(codes) {
+    if (!codes)
+      return null;
+    let found;
+    codes.forEach((code) => {
+      if (found)
+        return;
+      const cleanedLng = this.formatLanguageCode(code);
+      if (!this.options.supportedLngs || this.isSupportedCode(cleanedLng))
+        found = cleanedLng;
+    });
+    if (!found && this.options.supportedLngs) {
+      codes.forEach((code) => {
+        if (found)
+          return;
+        const lngScOnly = this.getScriptPartFromCode(code);
+        if (this.isSupportedCode(lngScOnly))
+          return found = lngScOnly;
+        const lngOnly = this.getLanguagePartFromCode(code);
+        if (this.isSupportedCode(lngOnly))
+          return found = lngOnly;
+        found = this.options.supportedLngs.find((supportedLng) => {
+          if (supportedLng === lngOnly)
+            return true;
+          if (!supportedLng.includes("-") && !lngOnly.includes("-"))
+            return false;
+          if (supportedLng.includes("-") && !lngOnly.includes("-") && supportedLng.slice(0, supportedLng.indexOf("-")) === lngOnly)
+            return true;
+          if (supportedLng.startsWith(lngOnly) && lngOnly.length > 1)
+            return true;
+          return false;
+        });
+      });
+    }
+    if (!found)
+      found = this.getFallbackCodes(this.options.fallbackLng)[0];
+    return found;
+  }
+  getFallbackCodes(fallbacks, code) {
+    if (!fallbacks)
+      return [];
+    if (typeof fallbacks === "function")
+      fallbacks = fallbacks(code);
+    if (isString(fallbacks))
+      fallbacks = [fallbacks];
+    if (Array.isArray(fallbacks))
+      return fallbacks;
+    if (!code)
+      return fallbacks.default || [];
+    let found = fallbacks[code];
+    if (!found)
+      found = fallbacks[this.getScriptPartFromCode(code)];
+    if (!found)
+      found = fallbacks[this.formatLanguageCode(code)];
+    if (!found)
+      found = fallbacks[this.getLanguagePartFromCode(code)];
+    if (!found)
+      found = fallbacks.default;
+    return found || [];
+  }
+  toResolveHierarchy(code, fallbackCode) {
+    const fallbackLng = this.options.fallbackLng;
+    const fallbackLngKey = Array.isArray(fallbackLng) ? fallbackLng.join("|") : fallbackLng;
+    if (fallbackLngKey !== this._cachedFallbackLng) {
+      this.resolveHierarchyCache = {};
+      this._cachedFallbackLng = fallbackLngKey;
+    }
+    const hasCacheableFallback = fallbackCode === undefined || fallbackCode === false || isString(fallbackCode);
+    const usesUncacheableOptionsFallback = fallbackCode === undefined && typeof this.options.fallbackLng === "function";
+    const cacheable = isString(code) && hasCacheableFallback && !usesUncacheableOptionsFallback;
+    let cacheKey = null;
+    if (cacheable) {
+      let fallbackCacheKey;
+      if (fallbackCode === undefined)
+        fallbackCacheKey = "undefined";
+      else if (fallbackCode === false)
+        fallbackCacheKey = "boolean:false";
+      else
+        fallbackCacheKey = `string:${fallbackCode}`;
+      cacheKey = `${code.length}:${code}|${fallbackCacheKey}`;
+    }
+    if (cacheKey !== null) {
+      const cached = this.resolveHierarchyCache[cacheKey];
+      if (cached !== undefined)
+        return cached.slice();
+    }
+    const fallbackCodes = this.getFallbackCodes((fallbackCode === false ? [] : fallbackCode) || this.options.fallbackLng || [], code);
+    const codes = [];
+    const addCode = (c) => {
+      if (!c)
+        return;
+      if (this.isSupportedCode(c)) {
+        codes.push(c);
+      } else {
+        this.logger.warn(`rejecting language code not found in supportedLngs: ${c}`);
+      }
+    };
+    if (isString(code) && (code.includes("-") || code.includes("_"))) {
+      if (this.options.load !== "languageOnly")
+        addCode(this.formatLanguageCode(code));
+      if (this.options.load !== "languageOnly" && this.options.load !== "currentOnly")
+        addCode(this.getScriptPartFromCode(code));
+      if (this.options.load !== "currentOnly")
+        addCode(this.getLanguagePartFromCode(code));
+    } else if (isString(code)) {
+      addCode(this.formatLanguageCode(code));
+    }
+    fallbackCodes.forEach((fc) => {
+      if (!codes.includes(fc))
+        addCode(this.formatLanguageCode(fc));
+    });
+    if (cacheKey !== null) {
+      this.resolveHierarchyCache[cacheKey] = codes;
+      return codes.slice();
+    }
+    return codes;
+  }
+}
+var suffixesOrder = {
+  zero: 0,
+  one: 1,
+  two: 2,
+  few: 3,
+  many: 4,
+  other: 5
+};
+var dummyRule = {
+  select: (count) => count === 1 ? "one" : "other",
+  resolvedOptions: () => ({
+    pluralCategories: ["one", "other"]
+  })
+};
+
+class PluralResolver {
+  constructor(languageUtils, options = {}) {
+    this.languageUtils = languageUtils;
+    this.options = options;
+    this.logger = baseLogger.create("pluralResolver");
+    this.pluralRulesCache = {};
+  }
+  clearCache() {
+    this.pluralRulesCache = {};
+  }
+  getRule(code, options = {}) {
+    const cleanedCode = getCleanedCode(code === "dev" ? "en" : code);
+    const type = options.ordinal ? "ordinal" : "cardinal";
+    const cacheKey = JSON.stringify({
+      cleanedCode,
+      type
+    });
+    if (cacheKey in this.pluralRulesCache) {
+      return this.pluralRulesCache[cacheKey];
+    }
+    let rule;
+    try {
+      rule = new Intl.PluralRules(cleanedCode, {
+        type
+      });
+    } catch (err) {
+      if (typeof Intl === "undefined") {
+        this.logger.error("No Intl support, please use an Intl polyfill!");
+        return dummyRule;
+      }
+      if (!code.match(/-|_/))
+        return dummyRule;
+      const lngPart = this.languageUtils.getLanguagePartFromCode(code);
+      rule = this.getRule(lngPart, options);
+    }
+    this.pluralRulesCache[cacheKey] = rule;
+    return rule;
+  }
+  needsPlural(code, options = {}) {
+    let rule = this.getRule(code, options);
+    if (!rule)
+      rule = this.getRule("dev", options);
+    return rule?.resolvedOptions().pluralCategories.length > 1;
+  }
+  getPluralFormsOfKey(code, key, options = {}) {
+    return this.getSuffixes(code, options).map((suffix) => `${key}${suffix}`);
+  }
+  getSuffixes(code, options = {}) {
+    let rule = this.getRule(code, options);
+    if (!rule)
+      rule = this.getRule("dev", options);
+    if (!rule)
+      return [];
+    return rule.resolvedOptions().pluralCategories.sort((pluralCategory1, pluralCategory2) => suffixesOrder[pluralCategory1] - suffixesOrder[pluralCategory2]).map((pluralCategory) => `${this.options.prepend}${options.ordinal ? `ordinal${this.options.prepend}` : ""}${pluralCategory}`);
+  }
+  getSuffix(code, count, options = {}) {
+    const rule = this.getRule(code, options);
+    if (rule) {
+      return `${this.options.prepend}${options.ordinal ? `ordinal${this.options.prepend}` : ""}${rule.select(count)}`;
+    }
+    this.logger.warn(`no plural rule found for: ${code}`);
+    return this.getSuffix("dev", count, options);
+  }
+}
+var deepFindWithDefaults = (data, defaultData, key, keySeparator = ".", ignoreJSONStructure = true) => {
+  let path = getPathWithDefaults(data, defaultData, key);
+  if (!path && ignoreJSONStructure && isString(key)) {
+    path = deepFind(data, key, keySeparator);
+    if (path === undefined)
+      path = deepFind(defaultData, key, keySeparator);
+  }
+  return path;
+};
+var regexSafe = (val) => val.replace(/\$/g, "$$$$");
+
+class Interpolator {
+  constructor(options = {}) {
+    this.logger = baseLogger.create("interpolator");
+    this.options = options;
+    this.format = options?.interpolation?.format || ((value) => value);
+    this.init(options);
+  }
+  init(options = {}) {
+    if (!options.interpolation)
+      options.interpolation = {
+        escapeValue: true
+      };
+    const {
+      escape: escape$1,
+      escapeValue,
+      useRawValueToEscape,
+      prefix,
+      prefixEscaped,
+      suffix,
+      suffixEscaped,
+      formatSeparator,
+      unescapeSuffix,
+      unescapePrefix,
+      nestingPrefix,
+      nestingPrefixEscaped,
+      nestingSuffix,
+      nestingSuffixEscaped,
+      nestingOptionsSeparator,
+      maxReplaces,
+      alwaysFormat
+    } = options.interpolation;
+    this.escape = escape$1 !== undefined ? escape$1 : escape;
+    this.escapeValue = escapeValue !== undefined ? escapeValue : true;
+    this.useRawValueToEscape = useRawValueToEscape !== undefined ? useRawValueToEscape : false;
+    this.prefix = prefix ? regexEscape(prefix) : prefixEscaped || "{{";
+    this.suffix = suffix ? regexEscape(suffix) : suffixEscaped || "}}";
+    this.formatSeparator = formatSeparator || ",";
+    this.unescapePrefix = unescapeSuffix ? "" : unescapePrefix ? regexEscape(unescapePrefix) : "-";
+    this.unescapeSuffix = this.unescapePrefix ? "" : unescapeSuffix ? regexEscape(unescapeSuffix) : "";
+    this.nestingPrefix = nestingPrefix ? regexEscape(nestingPrefix) : nestingPrefixEscaped || regexEscape("$t(");
+    this.nestingSuffix = nestingSuffix ? regexEscape(nestingSuffix) : nestingSuffixEscaped || regexEscape(")");
+    this.nestingOptionsSeparator = nestingOptionsSeparator || ",";
+    this.maxReplaces = maxReplaces || 1000;
+    this.alwaysFormat = alwaysFormat !== undefined ? alwaysFormat : false;
+    this.resetRegExp();
+  }
+  reset() {
+    if (this.options)
+      this.init(this.options);
+  }
+  resetRegExp() {
+    const getOrResetRegExp = (existingRegExp, pattern) => {
+      if (existingRegExp?.source === pattern) {
+        existingRegExp.lastIndex = 0;
+        return existingRegExp;
+      }
+      return new RegExp(pattern, "g");
+    };
+    this.regexp = getOrResetRegExp(this.regexp, `${this.prefix}(.+?)${this.suffix}`);
+    this.regexpUnescape = getOrResetRegExp(this.regexpUnescape, `${this.prefix}${this.unescapePrefix}(.+?)${this.unescapeSuffix}${this.suffix}`);
+    this.nestingRegexp = getOrResetRegExp(this.nestingRegexp, `${this.nestingPrefix}((?:[^()"']+|"[^"]*"|'[^']*'|\\((?:[^()]|"[^"]*"|'[^']*')*\\))*?)${this.nestingSuffix}`);
+  }
+  interpolate(str, data, lng, options) {
+    let match;
+    let value;
+    let replaces;
+    const defaultData = this.options && this.options.interpolation && this.options.interpolation.defaultVariables || {};
+    const handleFormat = (key) => {
+      if (!key.includes(this.formatSeparator)) {
+        const path = deepFindWithDefaults(data, defaultData, key, this.options.keySeparator, this.options.ignoreJSONStructure);
+        return this.alwaysFormat ? this.format(path, undefined, lng, {
+          ...options,
+          ...data,
+          interpolationkey: key
+        }) : path;
+      }
+      const p = key.split(this.formatSeparator);
+      const k = p.shift().trim();
+      const f = p.join(this.formatSeparator).trim();
+      return this.format(deepFindWithDefaults(data, defaultData, k, this.options.keySeparator, this.options.ignoreJSONStructure), f, lng, {
+        ...options,
+        ...data,
+        interpolationkey: k
+      });
+    };
+    this.resetRegExp();
+    if (!this.escapeValue && typeof str === "string" && /\$t\([^)]*\{[^}]*\{\{/.test(str)) {
+      this.logger.warn("nesting options string contains interpolated variables with escapeValue: false — " + "if any of those values are attacker-controlled they can inject additional " + "nesting options (e.g. redirect lng/ns). Sanitise untrusted input before passing " + "it to t(), or keep escapeValue: true.");
+    }
+    const missingInterpolationHandler = options?.missingInterpolationHandler || this.options.missingInterpolationHandler;
+    const skipOnVariables = options?.interpolation?.skipOnVariables !== undefined ? options.interpolation.skipOnVariables : this.options.interpolation.skipOnVariables;
+    const todos = [{
+      regex: this.regexpUnescape,
+      safeValue: (val) => val
+    }, {
+      regex: this.regexp,
+      safeValue: (val) => this.escapeValue ? this.escape(val) : val
+    }];
+    todos.forEach((todo) => {
+      replaces = 0;
+      while (match = todo.regex.exec(str)) {
+        const matchedVar = match[1].trim();
+        value = handleFormat(matchedVar);
+        if (value === undefined) {
+          if (typeof missingInterpolationHandler === "function") {
+            const temp = missingInterpolationHandler(str, match, options);
+            value = isString(temp) ? temp : "";
+          } else if (options && Object.prototype.hasOwnProperty.call(options, matchedVar)) {
+            value = "";
+          } else if (skipOnVariables) {
+            value = match[0];
+            continue;
+          } else {
+            this.logger.warn(`missed to pass in variable ${matchedVar} for interpolating ${str}`);
+            value = "";
+          }
+        } else if (!isString(value) && !this.useRawValueToEscape) {
+          value = makeString(value);
+        }
+        const safeValue = todo.safeValue(value);
+        str = str.replace(match[0], regexSafe(safeValue));
+        if (skipOnVariables) {
+          todo.regex.lastIndex += safeValue.length;
+          todo.regex.lastIndex -= match[0].length;
+        } else {
+          todo.regex.lastIndex = 0;
+        }
+        replaces++;
+        if (replaces >= this.maxReplaces) {
+          break;
+        }
+      }
+    });
+    return str;
+  }
+  nest(str, fc, options = {}) {
+    let match;
+    let value;
+    let clonedOptions;
+    const handleHasOptions = (key, inheritedOptions) => {
+      const sep = this.nestingOptionsSeparator;
+      if (!key.includes(sep))
+        return key;
+      const c = key.split(new RegExp(`${regexEscape(sep)}[ ]*{`));
+      let optionsString = `{${c[1]}`;
+      key = c[0];
+      optionsString = this.interpolate(optionsString, clonedOptions);
+      const matchedSingleQuotes = optionsString.match(/'/g);
+      const matchedDoubleQuotes = optionsString.match(/"/g);
+      if ((matchedSingleQuotes?.length ?? 0) % 2 === 0 && !matchedDoubleQuotes || (matchedDoubleQuotes?.length ?? 0) % 2 !== 0) {
+        optionsString = optionsString.replace(/'/g, '"');
+      }
+      try {
+        clonedOptions = JSON.parse(optionsString);
+        if (inheritedOptions)
+          clonedOptions = {
+            ...inheritedOptions,
+            ...clonedOptions
+          };
+      } catch (e) {
+        this.logger.warn(`failed parsing options string in nesting for key ${key}`, e);
+        return `${key}${sep}${optionsString}`;
+      }
+      if (clonedOptions.defaultValue && clonedOptions.defaultValue.includes(this.prefix))
+        delete clonedOptions.defaultValue;
+      return key;
+    };
+    while (match = this.nestingRegexp.exec(str)) {
+      let formatters = [];
+      clonedOptions = {
+        ...options
+      };
+      clonedOptions = clonedOptions.replace && !isString(clonedOptions.replace) ? clonedOptions.replace : clonedOptions;
+      clonedOptions.applyPostProcessor = false;
+      delete clonedOptions.defaultValue;
+      const keyEndIndex = /{.*}/s.test(match[1]) ? match[1].lastIndexOf("}") + 1 : match[1].indexOf(this.formatSeparator);
+      if (keyEndIndex !== -1) {
+        formatters = match[1].slice(keyEndIndex).split(this.formatSeparator).map((elem) => elem.trim()).filter(Boolean);
+        match[1] = match[1].slice(0, keyEndIndex);
+      }
+      value = fc(handleHasOptions.call(this, match[1].trim(), clonedOptions), clonedOptions);
+      if (value && match[0] === str && !isString(value))
+        return value;
+      if (!isString(value))
+        value = makeString(value);
+      if (!value) {
+        this.logger.warn(`missed to resolve ${match[1]} for nesting ${str}`);
+        value = "";
+      }
+      if (formatters.length) {
+        value = formatters.reduce((v, f) => this.format(v, f, options.lng, {
+          ...options,
+          interpolationkey: match[1].trim()
+        }), value.trim());
+      }
+      str = str.replace(match[0], regexSafe(makeString(value)));
+      this.regexp.lastIndex = 0;
+    }
+    return str;
+  }
+}
+var parseFormatStr = (formatStr) => {
+  let formatName = formatStr.toLowerCase().trim();
+  const formatOptions = {};
+  if (formatStr.includes("(")) {
+    const p = formatStr.split("(");
+    formatName = p[0].toLowerCase().trim();
+    const optStr = p[1].slice(0, -1);
+    if (formatName === "currency" && !optStr.includes(":")) {
+      if (!formatOptions.currency)
+        formatOptions.currency = optStr.trim();
+    } else if (formatName === "relativetime" && !optStr.includes(":")) {
+      if (!formatOptions.range)
+        formatOptions.range = optStr.trim();
+    } else {
+      const opts = optStr.split(";");
+      opts.forEach((opt) => {
+        if (opt) {
+          const [key, ...rest] = opt.split(":");
+          const val = rest.join(":").trim().replace(/^'+|'+$/g, "");
+          const trimmedKey = key.trim();
+          if (!formatOptions[trimmedKey])
+            formatOptions[trimmedKey] = val;
+          if (val === "false")
+            formatOptions[trimmedKey] = false;
+          if (val === "true")
+            formatOptions[trimmedKey] = true;
+          if (!isNaN(val))
+            formatOptions[trimmedKey] = parseInt(val, 10);
+        }
+      });
+    }
+  }
+  return {
+    formatName,
+    formatOptions
+  };
+};
+var createCachedFormatter = (fn) => {
+  const cache = {};
+  return (v, l, o) => {
+    let optForCache = o;
+    if (o && o.interpolationkey && o.formatParams && o.formatParams[o.interpolationkey] && o[o.interpolationkey]) {
+      optForCache = {
+        ...optForCache,
+        [o.interpolationkey]: undefined
+      };
+    }
+    const key = l + JSON.stringify(optForCache);
+    let frm = cache[key];
+    if (!frm) {
+      frm = fn(getCleanedCode(l), o);
+      cache[key] = frm;
+    }
+    return frm(v);
+  };
+};
+var createNonCachedFormatter = (fn) => (v, l, o) => fn(getCleanedCode(l), o)(v);
+
+class Formatter {
+  constructor(options = {}) {
+    this.logger = baseLogger.create("formatter");
+    this.options = options;
+    this.init(options);
+  }
+  init(services, options = {
+    interpolation: {}
+  }) {
+    this.formatSeparator = options.interpolation.formatSeparator || ",";
+    const cf = options.cacheInBuiltFormats ? createCachedFormatter : createNonCachedFormatter;
+    this.formats = {
+      number: cf((lng, opt) => {
+        const formatter = new Intl.NumberFormat(lng, {
+          ...opt
+        });
+        return (val) => formatter.format(val);
+      }),
+      currency: cf((lng, opt) => {
+        const formatter = new Intl.NumberFormat(lng, {
+          ...opt,
+          style: "currency"
+        });
+        return (val) => formatter.format(val);
+      }),
+      datetime: cf((lng, opt) => {
+        const formatter = new Intl.DateTimeFormat(lng, {
+          ...opt
+        });
+        return (val) => formatter.format(val);
+      }),
+      relativetime: cf((lng, opt) => {
+        const formatter = new Intl.RelativeTimeFormat(lng, {
+          ...opt
+        });
+        return (val) => formatter.format(val, opt.range || "day");
+      }),
+      list: cf((lng, opt) => {
+        const formatter = new Intl.ListFormat(lng, {
+          ...opt
+        });
+        return (val) => formatter.format(val);
+      })
+    };
+  }
+  add(name, fc) {
+    this.formats[name.toLowerCase().trim()] = fc;
+  }
+  addCached(name, fc) {
+    this.formats[name.toLowerCase().trim()] = createCachedFormatter(fc);
+  }
+  format(value, format, lng, options = {}) {
+    if (!format)
+      return value;
+    if (value == null)
+      return value;
+    const rawFormats = format.split(this.formatSeparator);
+    const formats = [];
+    for (let i = 0;i < rawFormats.length; i++) {
+      let f = rawFormats[i];
+      while (f.indexOf("(") > -1 && !f.includes(")") && i + 1 < rawFormats.length) {
+        f = `${f}${this.formatSeparator}${rawFormats[++i]}`;
+      }
+      formats.push(f);
+    }
+    const result = formats.reduce((mem, f) => {
+      const {
+        formatName,
+        formatOptions
+      } = parseFormatStr(f);
+      if (this.formats[formatName]) {
+        let formatted = mem;
+        try {
+          const valOptions = options?.formatParams?.[options.interpolationkey] || {};
+          const l = valOptions.locale || valOptions.lng || options.locale || options.lng || lng;
+          formatted = this.formats[formatName](mem, l, {
+            ...formatOptions,
+            ...options,
+            ...valOptions
+          });
+        } catch (error) {
+          this.logger.warn(error);
+        }
+        return formatted;
+      } else {
+        this.logger.warn(`there was no format function for ${formatName}`);
+      }
+      return mem;
+    }, value);
+    return result;
+  }
+}
+var removePending = (q, name) => {
+  if (q.pending[name] !== undefined) {
+    delete q.pending[name];
+    q.pendingCount--;
+  }
+};
+
+class Connector extends EventEmitter {
+  constructor(backend, store, services, options = {}) {
+    super();
+    this.backend = backend;
+    this.store = store;
+    this.services = services;
+    this.languageUtils = services.languageUtils;
+    this.options = options;
+    this.logger = baseLogger.create("backendConnector");
+    this.waitingReads = [];
+    this.maxParallelReads = options.maxParallelReads || 10;
+    this.readingCalls = 0;
+    this.maxRetries = options.maxRetries >= 0 ? options.maxRetries : 5;
+    this.retryTimeout = options.retryTimeout >= 1 ? options.retryTimeout : 350;
+    this.state = {};
+    this.queue = [];
+    this.backend?.init?.(services, options.backend, options);
+  }
+  queueLoad(languages, namespaces, options, callback) {
+    const toLoad = {};
+    const pending = {};
+    const toLoadLanguages = {};
+    const toLoadNamespaces = {};
+    languages.forEach((lng) => {
+      let hasAllNamespaces = true;
+      namespaces.forEach((ns) => {
+        const name = `${lng}|${ns}`;
+        if (!options.reload && this.store.hasResourceBundle(lng, ns)) {
+          this.state[name] = 2;
+        } else if (this.state[name] < 0)
+          ;
+        else if (this.state[name] === 1) {
+          if (pending[name] === undefined)
+            pending[name] = true;
+        } else {
+          this.state[name] = 1;
+          hasAllNamespaces = false;
+          if (pending[name] === undefined)
+            pending[name] = true;
+          if (toLoad[name] === undefined)
+            toLoad[name] = true;
+          if (toLoadNamespaces[ns] === undefined)
+            toLoadNamespaces[ns] = true;
+        }
+      });
+      if (!hasAllNamespaces)
+        toLoadLanguages[lng] = true;
+    });
+    if (Object.keys(toLoad).length || Object.keys(pending).length) {
+      this.queue.push({
+        pending,
+        pendingCount: Object.keys(pending).length,
+        loaded: {},
+        errors: [],
+        callback
+      });
+    }
+    return {
+      toLoad: Object.keys(toLoad),
+      pending: Object.keys(pending),
+      toLoadLanguages: Object.keys(toLoadLanguages),
+      toLoadNamespaces: Object.keys(toLoadNamespaces)
+    };
+  }
+  loaded(name, err, data) {
+    const s = name.split("|");
+    const lng = s[0];
+    const ns = s[1];
+    if (err)
+      this.emit("failedLoading", lng, ns, err);
+    if (!err && data) {
+      this.store.addResourceBundle(lng, ns, data, undefined, undefined, {
+        skipCopy: true
+      });
+    }
+    this.state[name] = err ? -1 : 2;
+    if (err && data)
+      this.state[name] = 0;
+    const loaded = {};
+    this.queue.forEach((q) => {
+      pushPath(q.loaded, [lng], ns);
+      removePending(q, name);
+      if (err)
+        q.errors.push(err);
+      if (q.pendingCount === 0 && !q.done) {
+        Object.keys(q.loaded).forEach((l) => {
+          if (!loaded[l])
+            loaded[l] = {};
+          const loadedKeys = q.loaded[l];
+          if (loadedKeys.length) {
+            loadedKeys.forEach((n) => {
+              if (loaded[l][n] === undefined)
+                loaded[l][n] = true;
+            });
+          }
+        });
+        q.done = true;
+        if (q.errors.length) {
+          q.callback(q.errors);
+        } else {
+          q.callback();
+        }
+      }
+    });
+    this.emit("loaded", loaded);
+    this.queue = this.queue.filter((q) => !q.done);
+  }
+  read(lng, ns, fcName, tried = 0, wait = this.retryTimeout, callback) {
+    if (!lng.length)
+      return callback(null, {});
+    if (this.readingCalls >= this.maxParallelReads) {
+      this.waitingReads.push({
+        lng,
+        ns,
+        fcName,
+        tried,
+        wait,
+        callback
+      });
+      return;
+    }
+    this.readingCalls++;
+    const resolver = (err, data) => {
+      this.readingCalls--;
+      if (this.waitingReads.length > 0) {
+        const next = this.waitingReads.shift();
+        this.read(next.lng, next.ns, next.fcName, next.tried, next.wait, next.callback);
+      }
+      if (err && data && tried < this.maxRetries) {
+        setTimeout(() => {
+          this.read(lng, ns, fcName, tried + 1, wait * 2, callback);
+        }, wait);
+        return;
+      }
+      callback(err, data);
+    };
+    const fc = this.backend[fcName].bind(this.backend);
+    if (fc.length === 2) {
+      try {
+        const r = fc(lng, ns);
+        if (r && typeof r.then === "function") {
+          r.then((data) => resolver(null, data)).catch(resolver);
+        } else {
+          resolver(null, r);
+        }
+      } catch (err) {
+        resolver(err);
+      }
+      return;
+    }
+    return fc(lng, ns, resolver);
+  }
+  prepareLoading(languages, namespaces, options = {}, callback) {
+    if (!this.backend) {
+      this.logger.warn("No backend was added via i18next.use. Will not load resources.");
+      return callback && callback();
+    }
+    if (isString(languages))
+      languages = this.languageUtils.toResolveHierarchy(languages);
+    if (isString(namespaces))
+      namespaces = [namespaces];
+    const toLoad = this.queueLoad(languages, namespaces, options, callback);
+    if (!toLoad.toLoad.length) {
+      if (!toLoad.pending.length)
+        callback();
+      return null;
+    }
+    toLoad.toLoad.forEach((name) => {
+      this.loadOne(name);
+    });
+  }
+  load(languages, namespaces, callback) {
+    this.prepareLoading(languages, namespaces, {}, callback);
+  }
+  reload(languages, namespaces, callback) {
+    this.prepareLoading(languages, namespaces, {
+      reload: true
+    }, callback);
+  }
+  loadOne(name, prefix = "") {
+    const s = name.split("|");
+    const lng = s[0];
+    const ns = s[1];
+    this.read(lng, ns, "read", undefined, undefined, (err, data) => {
+      if (err)
+        this.logger.warn(`${prefix}loading namespace ${ns} for language ${lng} failed`, err);
+      if (!err && data)
+        this.logger.log(`${prefix}loaded namespace ${ns} for language ${lng}`, data);
+      this.loaded(name, err, data);
+    });
+  }
+  saveMissing(languages, namespace, key, fallbackValue, isUpdate, options = {}, clb = () => {}) {
+    if (this.services?.utils?.hasLoadedNamespace && !this.services?.utils?.hasLoadedNamespace(namespace)) {
+      this.logger.warn(`did not save key "${key}" as the namespace "${namespace}" was not yet loaded`, "This means something IS WRONG in your setup. You access the t function before i18next.init / i18next.loadNamespace / i18next.changeLanguage was done. Wait for the callback or Promise to resolve before accessing it!!!");
+      return;
+    }
+    if (key === undefined || key === null || key === "")
+      return;
+    if (this.backend?.create) {
+      const opts = {
+        ...options,
+        isUpdate
+      };
+      const fc = this.backend.create.bind(this.backend);
+      if (fc.length < 6) {
+        try {
+          let r;
+          if (fc.length === 5) {
+            r = fc(languages, namespace, key, fallbackValue, opts);
+          } else {
+            r = fc(languages, namespace, key, fallbackValue);
+          }
+          if (r && typeof r.then === "function") {
+            r.then((data) => clb(null, data)).catch(clb);
+          } else {
+            clb(null, r);
+          }
+        } catch (err) {
+          clb(err);
+        }
+      } else {
+        fc(languages, namespace, key, fallbackValue, clb, opts);
+      }
+    }
+    if (!languages || !languages[0])
+      return;
+    this.store.addResource(languages[0], namespace, key, fallbackValue);
+  }
+}
+var get = () => ({
+  debug: false,
+  initAsync: true,
+  ns: ["translation"],
+  defaultNS: ["translation"],
+  fallbackLng: ["dev"],
+  fallbackNS: false,
+  supportedLngs: false,
+  nonExplicitSupportedLngs: false,
+  load: "all",
+  preload: false,
+  keySeparator: ".",
+  nsSeparator: ":",
+  pluralSeparator: "_",
+  contextSeparator: "_",
+  enableSelector: false,
+  partialBundledLanguages: false,
+  saveMissing: false,
+  updateMissing: false,
+  saveMissingTo: "fallback",
+  saveMissingPlurals: true,
+  missingKeyHandler: false,
+  missingInterpolationHandler: false,
+  postProcess: false,
+  postProcessPassResolved: false,
+  returnNull: false,
+  returnEmptyString: true,
+  returnObjects: false,
+  joinArrays: false,
+  returnedObjectHandler: false,
+  parseMissingKeyHandler: false,
+  appendNamespaceToMissingKey: false,
+  appendNamespaceToCIMode: false,
+  overloadTranslationOptionHandler: (args) => {
+    let ret = {};
+    if (typeof args[1] === "object")
+      ret = args[1];
+    if (isString(args[1]))
+      ret.defaultValue = args[1];
+    if (isString(args[2]))
+      ret.tDescription = args[2];
+    if (typeof args[2] === "object" || typeof args[3] === "object") {
+      const options = args[3] || args[2];
+      Object.keys(options).forEach((key) => {
+        ret[key] = options[key];
+      });
+    }
+    return ret;
+  },
+  interpolation: {
+    escapeValue: true,
+    prefix: "{{",
+    suffix: "}}",
+    formatSeparator: ",",
+    unescapePrefix: "-",
+    nestingPrefix: "$t(",
+    nestingSuffix: ")",
+    nestingOptionsSeparator: ",",
+    maxReplaces: 1000,
+    skipOnVariables: true
+  },
+  cacheInBuiltFormats: true
+});
+var transformOptions = (options) => {
+  if (isString(options.ns))
+    options.ns = [options.ns];
+  if (isString(options.fallbackLng))
+    options.fallbackLng = [options.fallbackLng];
+  if (isString(options.fallbackNS))
+    options.fallbackNS = [options.fallbackNS];
+  if (options.supportedLngs && !options.supportedLngs.includes("cimode")) {
+    options.supportedLngs = options.supportedLngs.concat(["cimode"]);
+  }
+  return options;
+};
+var noop = () => {};
+var bindMemberFunctions = (inst) => {
+  const mems = Object.getOwnPropertyNames(Object.getPrototypeOf(inst));
+  mems.forEach((mem) => {
+    if (typeof inst[mem] === "function") {
+      inst[mem] = inst[mem].bind(inst);
+    }
+  });
+};
+
+class I18n extends EventEmitter {
+  constructor(options = {}, callback) {
+    super();
+    this.options = transformOptions(options);
+    this.services = {};
+    this.logger = baseLogger;
+    this.modules = {
+      external: []
+    };
+    bindMemberFunctions(this);
+    if (callback && !this.isInitialized && !options.isClone) {
+      if (!this.options.initAsync) {
+        this.init(options, callback);
+        return this;
+      }
+      setTimeout(() => {
+        this.init(options, callback);
+      }, 0);
+    }
+  }
+  init(options = {}, callback) {
+    this.isInitializing = true;
+    if (typeof options === "function") {
+      callback = options;
+      options = {};
+    }
+    if (options.defaultNS == null && options.ns) {
+      if (isString(options.ns)) {
+        options.defaultNS = options.ns;
+      } else if (!options.ns.includes("translation")) {
+        options.defaultNS = options.ns[0];
+      }
+    }
+    const defOpts = get();
+    this.options = {
+      ...defOpts,
+      ...this.options,
+      ...transformOptions(options)
+    };
+    this.options.interpolation = {
+      ...defOpts.interpolation,
+      ...this.options.interpolation
+    };
+    if (options.keySeparator !== undefined) {
+      this.options.userDefinedKeySeparator = options.keySeparator;
+    }
+    if (options.nsSeparator !== undefined) {
+      this.options.userDefinedNsSeparator = options.nsSeparator;
+    }
+    if (typeof this.options.overloadTranslationOptionHandler !== "function") {
+      this.options.overloadTranslationOptionHandler = defOpts.overloadTranslationOptionHandler;
+    }
+    const createClassOnDemand = (ClassOrObject) => {
+      if (!ClassOrObject)
+        return null;
+      if (typeof ClassOrObject === "function")
+        return new ClassOrObject;
+      return ClassOrObject;
+    };
+    if (!this.options.isClone) {
+      if (this.modules.logger) {
+        baseLogger.init(createClassOnDemand(this.modules.logger), this.options);
+      } else {
+        baseLogger.init(null, this.options);
+      }
+      let formatter;
+      if (this.modules.formatter) {
+        formatter = this.modules.formatter;
+      } else {
+        formatter = Formatter;
+      }
+      const lu = new LanguageUtil(this.options);
+      this.store = new ResourceStore(this.options.resources, this.options);
+      const s = this.services;
+      s.logger = baseLogger;
+      s.resourceStore = this.store;
+      s.languageUtils = lu;
+      s.pluralResolver = new PluralResolver(lu, {
+        prepend: this.options.pluralSeparator
+      });
+      if (formatter) {
+        s.formatter = createClassOnDemand(formatter);
+        if (s.formatter.init)
+          s.formatter.init(s, this.options);
+        this.options.interpolation.format = s.formatter.format.bind(s.formatter);
+      }
+      s.interpolator = new Interpolator(this.options);
+      s.utils = {
+        hasLoadedNamespace: this.hasLoadedNamespace.bind(this)
+      };
+      s.backendConnector = new Connector(createClassOnDemand(this.modules.backend), s.resourceStore, s, this.options);
+      s.backendConnector.on("*", (event, ...args) => {
+        this.emit(event, ...args);
+      });
+      if (this.modules.languageDetector) {
+        s.languageDetector = createClassOnDemand(this.modules.languageDetector);
+        if (s.languageDetector.init)
+          s.languageDetector.init(s, this.options.detection, this.options);
+      }
+      if (this.modules.i18nFormat) {
+        s.i18nFormat = createClassOnDemand(this.modules.i18nFormat);
+        if (s.i18nFormat.init)
+          s.i18nFormat.init(this);
+      }
+      this.translator = new Translator(this.services, this.options);
+      this.translator.on("*", (event, ...args) => {
+        this.emit(event, ...args);
+      });
+      this.modules.external.forEach((m) => {
+        if (m.init)
+          m.init(this);
+      });
+    }
+    this.format = this.options.interpolation.format;
+    if (!callback)
+      callback = noop;
+    if (this.options.fallbackLng && !this.services.languageDetector && !this.options.lng) {
+      const codes = this.services.languageUtils.getFallbackCodes(this.options.fallbackLng);
+      if (codes.length > 0 && codes[0] !== "dev")
+        this.options.lng = codes[0];
+    }
+    if (!this.services.languageDetector && !this.options.lng) {
+      this.logger.warn("init: no languageDetector is used and no lng is defined");
+    }
+    const storeApi = ["getResource", "hasResourceBundle", "getResourceBundle", "getDataByLanguage"];
+    storeApi.forEach((fcName) => {
+      this[fcName] = (...args) => this.store[fcName](...args);
+    });
+    const storeApiChained = ["addResource", "addResources", "addResourceBundle", "removeResourceBundle"];
+    storeApiChained.forEach((fcName) => {
+      this[fcName] = (...args) => {
+        this.store[fcName](...args);
+        return this;
+      };
+    });
+    const deferred = defer();
+    const load = () => {
+      const finish = (err, t) => {
+        this.isInitializing = false;
+        if (this.isInitialized && !this.initializedStoreOnce)
+          this.logger.warn("init: i18next is already initialized. You should call init just once!");
+        this.isInitialized = true;
+        if (!this.options.isClone)
+          this.logger.log("initialized", this.options);
+        this.emit("initialized", this.options);
+        deferred.resolve(t);
+        callback(err, t);
+      };
+      if ((this.languages || this.isLanguageChangingTo) && !this.isInitialized)
+        return finish(null, this.t.bind(this));
+      this.changeLanguage(this.options.lng, finish);
+    };
+    if (this.options.resources || !this.options.initAsync) {
+      load();
+    } else {
+      setTimeout(load, 0);
+    }
+    return deferred;
+  }
+  loadResources(language, callback = noop) {
+    let usedCallback = callback;
+    const usedLng = isString(language) ? language : this.language;
+    if (typeof language === "function")
+      usedCallback = language;
+    if (!this.options.resources || this.options.partialBundledLanguages) {
+      if (usedLng?.toLowerCase() === "cimode" && (!this.options.preload || this.options.preload.length === 0))
+        return usedCallback();
+      const toLoad = [];
+      const append = (lng) => {
+        if (!lng)
+          return;
+        if (lng === "cimode")
+          return;
+        const lngs = this.services.languageUtils.toResolveHierarchy(lng);
+        lngs.forEach((l) => {
+          if (l === "cimode")
+            return;
+          if (!toLoad.includes(l))
+            toLoad.push(l);
+        });
+      };
+      if (!usedLng) {
+        const fallbacks = this.services.languageUtils.getFallbackCodes(this.options.fallbackLng);
+        fallbacks.forEach((l) => append(l));
+      } else {
+        append(usedLng);
+      }
+      this.options.preload?.forEach?.((l) => append(l));
+      this.services.backendConnector.load(toLoad, this.options.ns, (e) => {
+        if (!e && !this.resolvedLanguage && this.language)
+          this.setResolvedLanguage(this.language);
+        usedCallback(e);
+      });
+    } else {
+      usedCallback(null);
+    }
+  }
+  reloadResources(lngs, ns, callback) {
+    const deferred = defer();
+    if (typeof lngs === "function") {
+      callback = lngs;
+      lngs = undefined;
+    }
+    if (typeof ns === "function") {
+      callback = ns;
+      ns = undefined;
+    }
+    if (!lngs)
+      lngs = this.languages;
+    if (!ns)
+      ns = this.options.ns;
+    if (!callback)
+      callback = noop;
+    this.services.backendConnector.reload(lngs, ns, (err) => {
+      deferred.resolve();
+      callback(err);
+    });
+    return deferred;
+  }
+  use(module) {
+    if (!module)
+      throw new Error("You are passing an undefined module! Please check the object you are passing to i18next.use()");
+    if (!module.type)
+      throw new Error("You are passing a wrong module! Please check the object you are passing to i18next.use()");
+    if (module.type === "backend") {
+      this.modules.backend = module;
+    }
+    if (module.type === "logger" || module.log && module.warn && module.error) {
+      this.modules.logger = module;
+    }
+    if (module.type === "languageDetector") {
+      this.modules.languageDetector = module;
+    }
+    if (module.type === "i18nFormat") {
+      this.modules.i18nFormat = module;
+    }
+    if (module.type === "postProcessor") {
+      postProcessor.addPostProcessor(module);
+    }
+    if (module.type === "formatter") {
+      this.modules.formatter = module;
+    }
+    if (module.type === "3rdParty") {
+      this.modules.external.push(module);
+    }
+    return this;
+  }
+  setResolvedLanguage(l) {
+    if (!l || !this.languages)
+      return;
+    if (["cimode", "dev"].includes(l))
+      return;
+    for (let li = 0;li < this.languages.length; li++) {
+      const lngInLngs = this.languages[li];
+      if (["cimode", "dev"].includes(lngInLngs))
+        continue;
+      if (this.store.hasLanguageSomeTranslations(lngInLngs)) {
+        this.resolvedLanguage = lngInLngs;
+        break;
+      }
+    }
+    if (!this.resolvedLanguage && !this.languages.includes(l) && this.store.hasLanguageSomeTranslations(l)) {
+      this.resolvedLanguage = l;
+      this.languages.unshift(l);
+    }
+  }
+  changeLanguage(lng, callback) {
+    this.isLanguageChangingTo = lng;
+    const deferred = defer();
+    this.emit("languageChanging", lng);
+    const setLngProps = (l) => {
+      this.language = l;
+      this.languages = this.services.languageUtils.toResolveHierarchy(l);
+      this.resolvedLanguage = undefined;
+      this.setResolvedLanguage(l);
+    };
+    const done = (err, l) => {
+      if (l) {
+        if (this.isLanguageChangingTo === lng) {
+          setLngProps(l);
+          this.translator.changeLanguage(l);
+          this.isLanguageChangingTo = undefined;
+          this.emit("languageChanged", l);
+          this.logger.log("languageChanged", l);
+        }
+      } else {
+        this.isLanguageChangingTo = undefined;
+      }
+      deferred.resolve((...args) => this.t(...args));
+      if (callback)
+        callback(err, (...args) => this.t(...args));
+    };
+    const setLng = (lngs) => {
+      if (!lng && !lngs && this.services.languageDetector)
+        lngs = [];
+      const fl = isString(lngs) ? lngs : lngs && lngs[0];
+      const l = this.store.hasLanguageSomeTranslations(fl) ? fl : this.services.languageUtils.getBestMatchFromCodes(isString(lngs) ? [lngs] : lngs);
+      if (l) {
+        if (!this.language) {
+          setLngProps(l);
+        }
+        if (!this.translator.language)
+          this.translator.changeLanguage(l);
+        this.services.languageDetector?.cacheUserLanguage?.(l);
+      }
+      this.loadResources(l, (err) => {
+        done(err, l);
+      });
+    };
+    if (!lng && this.services.languageDetector && !this.services.languageDetector.async) {
+      setLng(this.services.languageDetector.detect());
+    } else if (!lng && this.services.languageDetector && this.services.languageDetector.async) {
+      if (this.services.languageDetector.detect.length === 0) {
+        this.services.languageDetector.detect().then(setLng);
+      } else {
+        this.services.languageDetector.detect(setLng);
+      }
+    } else {
+      setLng(lng);
+    }
+    return deferred;
+  }
+  getFixedT(lng, ns, keyPrefix, fixedOpts) {
+    const scopeNs = fixedOpts?.scopeNs;
+    const fixedT = (key, opts, ...rest) => {
+      let o;
+      if (typeof opts !== "object") {
+        o = this.options.overloadTranslationOptionHandler([key, opts].concat(rest));
+      } else {
+        o = {
+          ...opts
+        };
+      }
+      o.lng = o.lng || fixedT.lng;
+      o.lngs = o.lngs || fixedT.lngs;
+      const explicitCallNs = o.ns !== undefined && o.ns !== null;
+      o.ns = o.ns || fixedT.ns;
+      if (o.keyPrefix !== "")
+        o.keyPrefix = o.keyPrefix || keyPrefix || fixedT.keyPrefix;
+      const selectorOpts = {
+        ...this.options,
+        ...o
+      };
+      if (Array.isArray(scopeNs) && !explicitCallNs)
+        selectorOpts.ns = scopeNs;
+      if (typeof o.keyPrefix === "function")
+        o.keyPrefix = keysFromSelector(o.keyPrefix, selectorOpts);
+      const keySeparator = this.options.keySeparator || ".";
+      let resultKey;
+      if (o.keyPrefix && Array.isArray(key)) {
+        resultKey = key.map((k) => {
+          if (typeof k === "function")
+            k = keysFromSelector(k, selectorOpts);
+          return `${o.keyPrefix}${keySeparator}${k}`;
+        });
+      } else {
+        if (typeof key === "function")
+          key = keysFromSelector(key, selectorOpts);
+        resultKey = o.keyPrefix ? `${o.keyPrefix}${keySeparator}${key}` : key;
+      }
+      return this.t(resultKey, o);
+    };
+    if (isString(lng)) {
+      fixedT.lng = lng;
+    } else {
+      fixedT.lngs = lng;
+    }
+    fixedT.ns = ns;
+    fixedT.keyPrefix = keyPrefix;
+    return fixedT;
+  }
+  t(...args) {
+    return this.translator?.translate(...args);
+  }
+  exists(...args) {
+    return this.translator?.exists(...args);
+  }
+  setDefaultNamespace(ns) {
+    this.options.defaultNS = ns;
+  }
+  hasLoadedNamespace(ns, options = {}) {
+    if (!this.isInitialized) {
+      this.logger.warn("hasLoadedNamespace: i18next was not initialized", this.languages);
+      return false;
+    }
+    if (!this.languages || !this.languages.length) {
+      this.logger.warn("hasLoadedNamespace: i18n.languages were undefined or empty", this.languages);
+      return false;
+    }
+    const lng = options.lng || this.resolvedLanguage || this.languages[0];
+    const fallbackLng = this.options ? this.options.fallbackLng : false;
+    const lastLng = this.languages[this.languages.length - 1];
+    if (lng.toLowerCase() === "cimode")
+      return true;
+    const loadNotPending = (l, n) => {
+      const loadState = this.services.backendConnector.state[`${l}|${n}`];
+      return loadState === -1 || loadState === 0 || loadState === 2;
+    };
+    if (options.precheck) {
+      const preResult = options.precheck(this, loadNotPending);
+      if (preResult !== undefined)
+        return preResult;
+    }
+    if (this.hasResourceBundle(lng, ns))
+      return true;
+    if (!this.services.backendConnector.backend || this.options.resources && !this.options.partialBundledLanguages)
+      return true;
+    if (loadNotPending(lng, ns) && (!fallbackLng || loadNotPending(lastLng, ns)))
+      return true;
+    return false;
+  }
+  loadNamespaces(ns, callback) {
+    const deferred = defer();
+    if (!this.options.ns) {
+      if (callback)
+        callback();
+      return Promise.resolve();
+    }
+    if (isString(ns))
+      ns = [ns];
+    ns.forEach((n) => {
+      if (!this.options.ns.includes(n))
+        this.options.ns.push(n);
+    });
+    this.loadResources((err) => {
+      deferred.resolve();
+      if (callback)
+        callback(err);
+    });
+    return deferred;
+  }
+  loadLanguages(lngs, callback) {
+    const deferred = defer();
+    if (isString(lngs))
+      lngs = [lngs];
+    const preloaded = this.options.preload || [];
+    const newLngs = lngs.filter((lng) => !preloaded.includes(lng) && this.services.languageUtils.isSupportedCode(lng));
+    if (!newLngs.length) {
+      if (callback)
+        callback();
+      return Promise.resolve();
+    }
+    this.options.preload = preloaded.concat(newLngs);
+    this.loadResources((err) => {
+      deferred.resolve();
+      if (callback)
+        callback(err);
+    });
+    return deferred;
+  }
+  dir(lng) {
+    if (!lng)
+      lng = this.resolvedLanguage || (this.languages?.length > 0 ? this.languages[0] : this.language);
+    if (!lng)
+      return "rtl";
+    try {
+      const l = new Intl.Locale(lng);
+      if (l && l.getTextInfo) {
+        const ti = l.getTextInfo();
+        if (ti && ti.direction)
+          return ti.direction;
+      }
+    } catch (e) {}
+    const rtlLngs = ["ar", "shu", "sqr", "ssh", "xaa", "yhd", "yud", "aao", "abh", "abv", "acm", "acq", "acw", "acx", "acy", "adf", "ads", "aeb", "aec", "afb", "ajp", "apc", "apd", "arb", "arq", "ars", "ary", "arz", "auz", "avl", "ayh", "ayl", "ayn", "ayp", "bbz", "pga", "he", "iw", "ps", "pbt", "pbu", "pst", "prp", "prd", "ug", "ur", "ydd", "yds", "yih", "ji", "yi", "hbo", "men", "xmn", "fa", "jpr", "peo", "pes", "prs", "dv", "sam", "ckb"];
+    const languageUtils = this.services?.languageUtils || new LanguageUtil(get());
+    if (lng.toLowerCase().indexOf("-latn") > 1)
+      return "ltr";
+    return rtlLngs.includes(languageUtils.getLanguagePartFromCode(lng)) || lng.toLowerCase().indexOf("-arab") > 1 ? "rtl" : "ltr";
+  }
+  static createInstance(options = {}, callback) {
+    const instance = new I18n(options, callback);
+    instance.createInstance = I18n.createInstance;
+    return instance;
+  }
+  cloneInstance(options = {}, callback = noop) {
+    const forkResourceStore = options.forkResourceStore;
+    if (forkResourceStore)
+      delete options.forkResourceStore;
+    const mergedOptions = {
+      ...this.options,
+      ...options,
+      ...{
+        isClone: true
+      }
+    };
+    const clone = new I18n(mergedOptions);
+    if (options.debug !== undefined || options.prefix !== undefined) {
+      clone.logger = clone.logger.clone(options);
+    }
+    const membersToCopy = ["store", "services", "language"];
+    membersToCopy.forEach((m) => {
+      clone[m] = this[m];
+    });
+    clone.services = {
+      ...this.services
+    };
+    clone.services.utils = {
+      hasLoadedNamespace: clone.hasLoadedNamespace.bind(clone)
+    };
+    if (forkResourceStore) {
+      const clonedData = Object.keys(this.store.data).reduce((prev, l) => {
+        prev[l] = {
+          ...this.store.data[l]
+        };
+        prev[l] = Object.keys(prev[l]).reduce((acc, n) => {
+          acc[n] = {
+            ...prev[l][n]
+          };
+          return acc;
+        }, prev[l]);
+        return prev;
+      }, {});
+      clone.store = new ResourceStore(clonedData, mergedOptions);
+      clone.services.resourceStore = clone.store;
+    }
+    if (options.interpolation) {
+      const defOpts = get();
+      const mergedInterpolation = {
+        ...defOpts.interpolation,
+        ...this.options.interpolation,
+        ...options.interpolation
+      };
+      const mergedForInterpolator = {
+        ...mergedOptions,
+        interpolation: mergedInterpolation
+      };
+      clone.services.interpolator = new Interpolator(mergedForInterpolator);
+    }
+    clone.translator = new Translator(clone.services, mergedOptions);
+    clone.translator.on("*", (event, ...args) => {
+      clone.emit(event, ...args);
+    });
+    clone.init(mergedOptions, callback);
+    clone.translator.options = mergedOptions;
+    clone.translator.backendConnector.services.utils = {
+      hasLoadedNamespace: clone.hasLoadedNamespace.bind(clone)
+    };
+    return clone;
+  }
+  toJSON() {
+    return {
+      options: this.options,
+      store: this.store,
+      language: this.language,
+      languages: this.languages,
+      resolvedLanguage: this.resolvedLanguage
+    };
+  }
+}
+var instance = I18n.createInstance();
+var createInstance = instance.createInstance;
+var dir = instance.dir;
+var init = instance.init;
+var loadResources = instance.loadResources;
+var reloadResources = instance.reloadResources;
+var use = instance.use;
+var changeLanguage = instance.changeLanguage;
+var getFixedT = instance.getFixedT;
+var t = instance.t;
+var exists = instance.exists;
+var setDefaultNamespace = instance.setDefaultNamespace;
+var hasLoadedNamespace = instance.hasLoadedNamespace;
+var loadNamespaces = instance.loadNamespaces;
+var loadLanguages = instance.loadLanguages;
 
 // node_modules/yaml/browser/dist/nodes/identity.js
 var ALIAS = Symbol.for("yaml.alias");
@@ -6449,6 +8591,616 @@ function parse(src, reviver, options) {
   }
   return doc.toJS(Object.assign({ reviver: _reviver }, options));
 }
+// locales/en.yaml
+var en_default = `# Messages printed by the hooks (English). Has the same keys as ja.yaml (tests/i18n.spec.ts checks the key sets match).
+# {{name}} is i18next interpolation.
+notify:
+  waiting: "Waiting for you"
+  waitingFallback: "Claude is waiting for your input"
+  done: "Done"
+  doneFallback: "The response has finished"
+
+inject:
+  header: "# Confirmed feedback rules (count >= 3)\\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\\n\\n"
+  ruleTitle: "■ {{name}} (pointed out {{count}} times so far)"
+
+guard:
+  evaluating: "[feedback-guard] evaluating: {{rule}}"
+
+postEdit:
+  checking: "[feedback-post-edit] checking: {{rule}} ({{file}})"
+
+stopCheck:
+  checking: "[feedback-stop-check] checking: {{rule}} ({{file}})"
+  gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
+  fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
+
+launch:
+  checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"
+  promptTo: "Prompt to send to {{agentType}}:"
+  messageTo: "Message to send to {{recipient}}:"
+  unknownRecipient: "unknown recipient"
+
+correct:
+  description: "Aggregate the feedback rules and the violation log, and propose count bumps and enforce additions"
+  enforceTemplate: |-
+    enforce:
+      - event: pre_bash
+        when: 'regex'
+        unless: 'regex'
+        message: 'instruction shown on violation'
+      - event: pre_edit
+        path: 'glob'
+        when: 'regex'
+        message: 'instruction shown on violation'
+      - event: post_edit
+        path: 'glob'
+        when: 'regex'
+        message: 'instruction shown on violation'
+      - event: stop_check
+        changed: 'glob'
+        check: 'shell cmd'
+        message: 'instruction shown on violation'
+  expired: "expires ({{date}}) has passed"
+  conditions: "the conditions"
+  notMatching: "{{what}} do not match this project, so the rule is inactive"
+  topDetail: ". Most frequent: {{detail}}"
+  bumpToConfirmed: "{{n}} violations in the last {{window}} ({{counts}}). Promote to a confirmed rule{{top}}"
+  bumpToDeny: "ask / block {{strong}} times in the last {{window}} ({{counts}}). Raise to deny{{top}}"
+  noEnforce: "Confirmed rule with count {{count}} but no enforce, so no hook can detect it (and it never appears in the violation log)"
+  stale: "Has enforce but has never appeared in the violation log. Check that the enforce works and that the rule is not out of date"
+  expiredAction: "{{reason}}. Consider deleting or updating it"
+  reportHeader: "[correct] last {{window}}: {{rules}} rules / {{violations}} violations"
+  noProposals: "No proposals."
+  applyNone: "apply: no files were rewritten."
+  applyDone: "apply: count was rewritten."
+  applyHint: "\`/correct apply\` writes the count bumps of the bump proposals to the files (enforce is proposal only)."
+  context: |-
+    This is the result of /correct. Present the proposals above to the user.
+    - For an enforce addition, derive a regex / glob from the body of the rule and propose a concrete entry (template: the enforce section of rules/feedback_rules.md).
+    - Always ask the user before rewriting any file (as the rules in rules/feedback_rules.md say).
+    - For stale / expired, ask the user whether to keep, update or delete the rule.
+  contextApplied: "- apply has already rewritten count in the following files. Tell the user so: {{list}}"
+
+band:
+  running: "[gate] running:"
+  waiting: "waiting"
+  done: "[gate] done: {{counts}} ({{seconds}}s)"
+
+dogwood:
+  notFound: "dogwood binary not found (check DOGWOOD_BIN / PATH / ~/.cargo/bin)"
+  runFailed: "failed to run dogwood: {{error}}"
+  exited: "dogwood replay exited abnormally (exit {{code}}): {{detail}}"
+  badJson: "could not parse the output of dogwood replay as JSON"
+  noVerdict: "dogwood replay returned no verdict"
+  badVerdict: "could not interpret the verdict of dogwood replay: {{verdict}}"
+
+gate:
+  headOmitted: "… (first {{n}} lines omitted)"
+  restOmitted: "… (rest omitted)"
+  failuresOmitted: "… ({{n}} more failures omitted; see the [gate] log path of each)"
+  policyNotFound: "=== [gate] The policy file was not found: {{policy}}. Running without policy evaluation. ==="
+  sharedResult: "[gate] The same run was in progress in another agent, so its result was taken over (log of the running side: {{logpath}})"
+  timeout: "[gate] Killed after the timeout ({{seconds}}s). The command may be in an infinite loop or hung."
+  failedOutputHeader: "--- output of the failed commands ---"
+  nestedParallel: "=== [gate] ({{label}}) parallel cannot be nested inside parallel. Treated as a failure. ==="
+  deferredNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Dropping this deferred entry. ==="
+  cannotReadYaml: "cannot read gate.yaml: {{path}}"
+  andMore: " and {{n}} more"
+  skipUnmatched: "[gate] skip: {{files}} (matches no rule)"
+  badPerFileDir: "=== [gate] Invalid per_file_dir value: {{value}} (use true / \\"file\\" / \\"pattern_root\\"). Skipping this rule. ==="
+  skipBadPerFileDir: "[skip: invalid per_file_dir]"
+  rootNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this root. ==="
+  ruleNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this rule. ==="
+  checkNoCwd: "=== [gate] (check:{{name}}) cwd does not exist: {{cwd}}. Skipping this check. ==="
+  skipNoCwd: "[skip: no cwd]"
+  noteNoCwd: "(cwd does not exist)"
+  worktreeNotFound: "=== [gate] worktree not found: {{root}}. Excluding it. ==="
+  rulesFailed: "[gate] The rules phase failed (the conversation is not stopped). See the errors above and fix them."
+  rulesPassed: "[gate] rules phase passed:\\n{{body}}"
+  checkNotFound: "=== [gate] \\"{{name}}\\" was not found in consistency_checks. Skipping. ==="
+  checkNotFoundSummary: "(check:{{name}}) not found, skipped"
+  skipCheckUndefined: "[gate] skip: check:{{name}} (not defined in consistency_checks)"
+  nothingToRun: "(nothing to run)"
+  allPassed: "[gate] All checks passed: {{labels}}. Report this result to the user and finish."
+  deferredTitle: "deferred verification commands"
+  checksPassed: "[gate] {{title}} passed:\\n{{body}}"
+  checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
+  checksGaveUp: "[gate] Gave up because consistency checks failed {{max}} times in a row. The target files were returned to CHANGED unverified. Please check them manually. To clear this now, start a new session or run /clear (reset-gate on SessionStart removes the state files)."
+  checksFailed: "consistency checks failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
+  ymlTypo: "[gate] .claude/gate.yaml was not found but .claude/gate.yml exists. Check whether the extension is yml instead of yaml."
+  policyUnevaluated: "=== [gate] ({{label}}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [{{reason}}] $ {{cmd}} ==="
+  policySkipped: "=== [gate] ({{label}}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ {{cmd}} ==="
+  notePolicySkipped: "(deferred by the policy verdict; queued to run automatically later)"
+  notePolicyUnevaluated: "(deferred because the policy could not be evaluated; queued to run automatically later: {{reason}})"
+  internalError: "[gate] An internal error occurred, so the checks were skipped (work continues). See stderr for details."
+`;
+
+// locales/ja.yaml
+var ja_default = `# hook が出すメッセージ（日本語）。en.yaml と同じキーを持つ（tests/i18n.spec.ts がキーの一致を検査する）。
+# {{name}} は i18next の補間。
+notify:
+  waiting: "確認待ち"
+  waitingFallback: "確認を待っています"
+  done: "完了"
+  doneFallback: "応答が完了しました"
+
+inject:
+  header: "# 確定フィードバックルール（count >= 3）\\nこれらは繰り返し指摘された確定ルール。違反すると hook がブロックする。\\n\\n"
+  ruleTitle: "■ {{name}} (これまで {{count}} 回指摘されています)"
+
+guard:
+  evaluating: "[feedback-guard] 評価中: {{rule}}"
+
+postEdit:
+  checking: "[feedback-post-edit] 検査中: {{rule}} ({{file}})"
+
+stopCheck:
+  checking: "[feedback-stop-check] 検査中: {{rule}} ({{file}})"
+  gaveUp: "[feedback-stop-check] {{max}} 回連続でブロックしました。ループを打ち切ります。手動確認を。"
+  fixAbove: "[feedback-stop-check] 上記を修正してください（試行 {{attempt}}/{{max}}）。"
+
+launch:
+  checklist: "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件"
+  promptTo: "{{agentType}} に送るプロンプト:"
+  messageTo: "{{recipient}} に送るメッセージ:"
+  unknownRecipient: "宛先不明"
+
+correct:
+  description: "feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する"
+  enforceTemplate: |-
+    enforce:
+      - event: pre_bash
+        when: '正規表現'
+        unless: '正規表現'
+        message: '違反時に出す指示文'
+      - event: pre_edit
+        path: 'glob'
+        when: '正規表現'
+        message: '違反時に出す指示文'
+      - event: post_edit
+        path: 'glob'
+        when: '正規表現'
+        message: '違反時に出す指示文'
+      - event: stop_check
+        changed: 'glob'
+        check: 'shell cmd'
+        message: '違反時に出す指示文'
+  expired: "expires（{{date}}）を過ぎている"
+  conditions: "条件"
+  notMatching: "{{what}} がこのプロジェクトに一致せず無効"
+  topDetail: "。最多: {{detail}}"
+  bumpToConfirmed: "直近 {{window}} で {{n}} 回違反（{{counts}}）。確定ルールへ昇格{{top}}"
+  bumpToDeny: "直近 {{window}} で ask / block が {{strong}} 回（{{counts}}）。deny へ引き上げ{{top}}"
+  noEnforce: "count {{count}} の確定ルールだが enforce が無く、hook が検知できない（違反ログにも出ない）"
+  stale: "enforce ありで違反ログに一度も出ていない。enforce が効いているか、ルールが古くなっていないか確認"
+  expiredAction: "{{reason}}。削除または更新を検討"
+  reportHeader: "[correct] 直近 {{window}}: ルール {{rules}} 件 / 違反 {{violations}} 件"
+  noProposals: "提案はありません。"
+  applyNone: "apply: 書き換えたファイルはありません。"
+  applyDone: "apply: count を書き換えました。"
+  applyHint: "\`/correct apply\` で bump の count 引き上げをファイルに書き込みます（enforce は提案のみ）。"
+  context: |-
+    /correct の結果です。ユーザーに上記の提案を提示してください。
+    - enforce の追加は、対象ルールの本文から正規表現 / glob を起こして具体案を提案する（雛形は rules/feedback_rules.md の enforce 節）。
+    - ファイルを書き換える前に、必ずユーザーに確認する（rules/feedback_rules.md のルールどおり）。
+    - stale / expired は、ルールを残すか更新・削除するかをユーザーに尋ねる。
+  contextApplied: "- apply により次のファイルの count をすでに書き換えた。その事実をユーザーに伝えること: {{list}}"
+
+band:
+  running: "[gate] 実行中:"
+  waiting: "待機中"
+  done: "[gate] 完了: {{counts}} ({{seconds}}s)"
+
+dogwood:
+  notFound: "dogwood バイナリが見つかりません（DOGWOOD_BIN / PATH / ~/.cargo/bin を確認してください）"
+  runFailed: "dogwood の実行に失敗しました: {{error}}"
+  exited: "dogwood replay が異常終了しました（exit {{code}}）: {{detail}}"
+  badJson: "dogwood replay の出力を JSON として読めませんでした"
+  noVerdict: "dogwood replay が verdict を返しませんでした"
+  badVerdict: "dogwood replay の verdict を解釈できませんでした: {{verdict}}"
+
+gate:
+  headOmitted: "…（先頭 {{n}} 行省略）"
+  restOmitted: "…（以降省略）"
+  failuresOmitted: "…（残り {{n}} 件の失敗は省略。各 [gate] log のパスを見てください）"
+  policyNotFound: "=== [gate] policy に指定されたファイルが見つかりません: {{policy}}。ポリシー判定を行わず実行します。 ==="
+  sharedResult: "[gate] 同じ実行が他のエージェントで走っていたため、その結果を受け取りました（実行側のログ: {{logpath}}）"
+  timeout: "[gate] タイムアウト（{{seconds}}秒）で強制終了しました。無限ループやハングの可能性があります。"
+  failedOutputHeader: "--- 失敗したコマンドの出力 ---"
+  nestedParallel: "=== [gate] ({{label}}) parallel の中に parallel はネストできません。失敗扱いにします。 ==="
+  deferredNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。この控えを破棄します。 ==="
+  cannotReadYaml: "gate.yaml を読めません: {{path}}"
+  andMore: " ほか{{n}}件"
+  skipUnmatched: "[gate] skip: {{files}} (どのルールにもマッチしません)"
+  badPerFileDir: "=== [gate] per_file_dir の値が不正です: {{value}}（true / \\"file\\" / \\"pattern_root\\" のいずれかを指定してください）。このルールをスキップします。 ==="
+  skipBadPerFileDir: "[skip: per_file_dir不正]"
+  rootNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルートをスキップします。 ==="
+  ruleNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルールをスキップします。 ==="
+  checkNoCwd: "=== [gate] (check:{{name}}) cwd が存在しません: {{cwd}}。このチェックをスキップします。 ==="
+  skipNoCwd: "[skip: cwd無し]"
+  noteNoCwd: "(cwd が存在しません)"
+  worktreeNotFound: "=== [gate] worktree が見つかりません: {{root}}。対象から外します。 ==="
+  rulesFailed: "[gate] rules フェーズの検証に失敗しました（会話は止まりません）。上のエラーを見て修正してください。"
+  rulesPassed: "[gate] rules フェーズ成功:\\n{{body}}"
+  checkNotFound: "=== [gate] consistency_checks に \\"{{name}}\\" が見つかりません。スキップします。 ==="
+  checkNotFoundSummary: "(check:{{name}}) 見つかりません、スキップ"
+  skipCheckUndefined: "[gate] skip: check:{{name}} (consistency_checks に定義がありません)"
+  nothingToRun: "（対象なし）"
+  allPassed: "[gate] 検証がすべて通りました: {{labels}}。この結果をユーザーに報告して終了してください。"
+  deferredTitle: "後回しにした検証コマンド"
+  checksPassed: "[gate] {{title}} 成功:\\n{{body}}"
+  checksGaveUpStderr: "consistency checks が {{max}} 回連続失敗。ループを打ち切ります。手動確認を。"
+  checksGaveUp: "[gate] consistency checks が{{max}}回連続で失敗したため打ち切りました。対象ファイルは未検証のまま CHANGED へ戻しました。手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか /clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。"
+  checksFailed: "consistency checks 失敗（試行 {{attempt}}/{{max}}）。上のエラーを見て修正を継続してください。"
+  ymlTypo: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
+  policyUnevaluated: "=== [gate] ({{label}}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［{{reason}}］ $ {{cmd}} ==="
+  policySkipped: "=== [gate] ({{label}}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ {{cmd}} ==="
+  notePolicySkipped: "(ポリシー判定で見送り。控えに積んだので後で自動実行)"
+  notePolicyUnevaluated: "(ポリシーを評価できず見送り。控えに積んだので後で自動実行: {{reason}})"
+  internalError: "[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。"
+`;
+
+// src/i18n.ts
+var LANGS = ["ja", "en"];
+var resources = {
+  ja: parse(ja_default),
+  en: parse(en_default)
+};
+var i18n = instance.createInstance();
+i18n.init({
+  resources: { ja: { translation: resources.ja }, en: { translation: resources.en } },
+  lng: "en",
+  fallbackLng: "en",
+  supportedLngs: LANGS,
+  initAsync: false,
+  interpolation: { escapeValue: false },
+  returnNull: false
+});
+var tr = (lang) => i18n.getFixedT(lang);
+var isLang = (v) => v === "ja" || v === "en";
+function langOfLocale(locale) {
+  const v = (locale ?? "").trim();
+  if (v === "")
+    return;
+  return /^ja(?![a-z])/i.test(v) ? "ja" : "en";
+}
+function resolveLang(env, configured) {
+  if (isLang(configured))
+    return configured;
+  if (isLang(env.FEEDBACK_GATE_LANG))
+    return env.FEEDBACK_GATE_LANG;
+  for (const v of [env.FEEDBACK_GATE_LANG, env.LC_ALL, env.LC_MESSAGES, env.LANG]) {
+    const lang = langOfLocale(v);
+    if (lang)
+      return lang;
+  }
+  return "en";
+}
+
+// src/io.ts
+var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
+
+// src/pyutil.ts
+function truthy(v) {
+  if (Array.isArray(v))
+    return v.length > 0;
+  if (v !== null && typeof v === "object")
+    return Object.keys(v).length > 0;
+  return Boolean(v);
+}
+function pyRepr(v) {
+  if (v === null || v === undefined)
+    return "None";
+  if (v === true)
+    return "True";
+  if (v === false)
+    return "False";
+  if (typeof v === "number")
+    return String(v);
+  if (typeof v === "string") {
+    const quote = v.includes("'") && !v.includes('"') ? '"' : "'";
+    const body = v.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+    return quote + (quote === "'" ? body.replace(/'/g, "\\'") : body) + quote;
+  }
+  if (Array.isArray(v))
+    return `[${v.map(pyRepr).join(", ")}]`;
+  if (typeof v === "object") {
+    return `{${Object.entries(v).map(([k, x]) => `${pyRepr(k)}: ${pyRepr(x)}`).join(", ")}}`;
+  }
+  return String(v);
+}
+function toCount(v) {
+  if (!truthy(v))
+    return 0;
+  if (typeof v === "number")
+    return Math.trunc(v);
+  if (v === true)
+    return 1;
+  if (typeof v === "string" && /^\s*[+-]?\d+\s*$/.test(v))
+    return Number.parseInt(v, 10);
+  return 0;
+}
+function pyRegExp(source, flags = "") {
+  let src = source;
+  let fl = flags;
+  const m = /^\(\?([aiLmsux]+)\)/.exec(src);
+  if (m) {
+    src = src.slice(m[0].length);
+    for (const c of m[1] ?? "")
+      if ("ims".includes(c) && !fl.includes(c))
+        fl += c;
+  }
+  src = src.replace(/\(\?P<([A-Za-z_]\w*)>/g, "(?<$1>").replace(/\(\?P=([A-Za-z_]\w*)\)/g, "\\k<$1>");
+  return new RegExp(src, fl);
+}
+function jqStr(v) {
+  if (v === null || v === undefined || v === false)
+    return "";
+  return typeof v === "string" ? v : JSON.stringify(v);
+}
+var isDict = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+// src/agent-launch-guard.ts
+var ASK_AGENT_TYPES = ["code-implementer"];
+var ALLOW_RECIPIENTS = ["git-operator"];
+var ask = (reason) => ok(`${JSON.stringify({
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "ask",
+    permissionDecisionReason: reason
+  }
+})}
+`);
+function agentLaunchGuard(payload, lang) {
+  const t = tr(lang);
+  const tool = jqStr(payload.tool_name);
+  const input = isDict(payload.tool_input) ? payload.tool_input : {};
+  if (tool === "Agent") {
+    const agentType = jqStr(input.subagent_type);
+    if (agentType === "")
+      return ok();
+    if (ASK_AGENT_TYPES.includes(agentType)) {
+      return ask(`${t("launch.promptTo", { agentType })}
+
+${jqStr(input.prompt)}
+
+${t("launch.checklist")}`);
+    }
+  } else if (tool === "SendMessage") {
+    const recipient = jqStr(input.to);
+    if (!ALLOW_RECIPIENTS.includes(recipient)) {
+      return ask(`${t("launch.messageTo", { recipient: recipient || t("launch.unknownRecipient") })}
+
+${jqStr(input.message)}
+
+${t("launch.checklist")}`);
+    }
+  }
+  return ok();
+}
+
+// src/path.ts
+var isAbsolute = (p) => p.startsWith("/");
+function join(...parts) {
+  let out = "";
+  for (const part of parts) {
+    if (part.startsWith("/"))
+      out = part;
+    else if (out === "" || out.endsWith("/"))
+      out += part;
+    else
+      out += `/${part}`;
+  }
+  return out;
+}
+function normpath(p) {
+  if (p === "")
+    return ".";
+  const abs = p.startsWith("/");
+  const out = [];
+  for (const seg of p.split("/")) {
+    if (seg === "" || seg === ".")
+      continue;
+    if (seg === "..") {
+      const last = out[out.length - 1];
+      if (last !== undefined && last !== "..")
+        out.pop();
+      else if (!abs)
+        out.push("..");
+    } else {
+      out.push(seg);
+    }
+  }
+  const joined = out.join("/");
+  if (abs)
+    return `/${joined}`;
+  return joined === "" ? "." : joined;
+}
+function dirname(p) {
+  const i = p.lastIndexOf("/") + 1;
+  const head = p.slice(0, i);
+  if (head !== "" && head !== "/".repeat(head.length))
+    return head.replace(/\/+$/, "");
+  return head;
+}
+function basename(p) {
+  return p.slice(p.lastIndexOf("/") + 1);
+}
+function splitext(p) {
+  const base = basename(p);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || /^\.+$/.test(base.slice(0, dot)))
+    return [p, ""];
+  const cut = p.length - base.length + dot;
+  return [p.slice(0, cut), p.slice(cut)];
+}
+function relpath(path, start) {
+  const a = normpath(path).split("/").filter(Boolean);
+  const b = normpath(start).split("/").filter(Boolean);
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i])
+    i++;
+  const rel = [...b.slice(i).map(() => ".."), ...a.slice(i)];
+  return rel.length === 0 ? "." : rel.join("/");
+}
+function expandUser(p, home) {
+  if (!home)
+    return p;
+  if (p === "~")
+    return home;
+  if (p.startsWith("~/"))
+    return home.replace(/\/+$/, "") + p.slice(1);
+  return p;
+}
+
+// src/glob.ts
+function splitTopCommas(s) {
+  const parts = [];
+  let depth = 0;
+  let cur = "";
+  for (const c of s) {
+    if (c === "{") {
+      depth++;
+      cur += c;
+    } else if (c === "}") {
+      depth--;
+      cur += c;
+    } else if (c === "," && depth === 0) {
+      parts.push(cur);
+      cur = "";
+    } else {
+      cur += c;
+    }
+  }
+  parts.push(cur);
+  return parts;
+}
+function expandBraces(s) {
+  let depth = 0;
+  let start = -1;
+  for (let i = 0;i < s.length; i++) {
+    const c = s.charAt(i);
+    if (c === "{") {
+      if (depth === 0)
+        start = i;
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0) {
+        const pre = s.slice(0, start);
+        const inner = s.slice(start + 1, i);
+        const post = s.slice(i + 1);
+        const out = [];
+        for (const part of splitTopCommas(inner))
+          out.push(...expandBraces(pre + part + post));
+        return out;
+      }
+    }
+  }
+  return [s];
+}
+var escapeRegex = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+function globToRegex(pat) {
+  const n = pat.length;
+  let i = 0;
+  let out = "^";
+  while (i < n) {
+    const c = pat.charAt(i);
+    if (c === "*") {
+      let j = i;
+      while (j < n && pat.charAt(j) === "*")
+        j++;
+      if (j - i >= 2) {
+        if (j < n && pat.charAt(j) === "/") {
+          out += "(?:.*/)?";
+          i = j + 1;
+        } else {
+          out += ".*";
+          i = j;
+        }
+      } else {
+        out += "[^/]*";
+        i++;
+      }
+    } else if (c === "?") {
+      out += "[^/]";
+      i++;
+    } else if (c === "[") {
+      let j = i + 1;
+      if (j < n && "!^".includes(pat.charAt(j)))
+        j++;
+      if (j < n && pat.charAt(j) === "]")
+        j++;
+      while (j < n && pat.charAt(j) !== "]")
+        j++;
+      let cls = pat.slice(i, j + 1);
+      if (cls.startsWith("[!"))
+        cls = `[^${cls.slice(2)}`;
+      out += cls;
+      i = j + 1;
+    } else {
+      out += escapeRegex(c);
+      i++;
+    }
+  }
+  return `${out}$`;
+}
+function matchPatterns(pats) {
+  const pairs = [];
+  for (const pat of pats) {
+    for (const ex of expandBraces(pat))
+      pairs.push([ex, new RegExp(globToRegex(ex))]);
+  }
+  return pairs;
+}
+var compileGlobs = (patterns) => matchPatterns(patterns).map(([, rx]) => rx);
+function asList(v) {
+  if (typeof v === "string")
+    return [v];
+  if (Array.isArray(v))
+    return v;
+  return [];
+}
+var hasMagic = (seg) => /[*?[]/.test(seg);
+async function globExists(io, pattern) {
+  const abs = pattern.startsWith("/");
+  const segs = pattern.split("/").filter((s) => s !== "");
+  return walk(io, abs ? "/" : "", segs, 0);
+}
+async function walk(io, dir, segs, i) {
+  if (i >= segs.length)
+    return dir === "" ? true : io.exists(dir);
+  const seg = segs.at(i) ?? "";
+  const here = dir === "" ? "." : dir;
+  if (seg === "**") {
+    if (i === segs.length - 1)
+      return (await io.stat(here))?.kind === "dir";
+    if (await walk(io, dir, segs, i + 1))
+      return true;
+    for (const e of await io.list(here)) {
+      if (e.name.startsWith("."))
+        continue;
+      const sub = join(dir, e.name);
+      if ((await io.stat(sub))?.kind === "dir" && await walk(io, sub, segs, i))
+        return true;
+    }
+    return false;
+  }
+  if (!hasMagic(seg))
+    return walk(io, join(dir, seg), segs, i + 1);
+  const rx = new RegExp(globToRegex(seg));
+  for (const e of await io.list(here)) {
+    if (e.name.startsWith(".") && !seg.startsWith("."))
+      continue;
+    if (!rx.test(e.name))
+      continue;
+    if (await walk(io, join(dir, e.name), segs, i + 1))
+      return true;
+  }
+  return false;
+}
+
 // src/load-yaml.ts
 var PY_TRUE = /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON)$/;
 var PY_FALSE = /^(?:no|No|NO|false|False|FALSE|off|Off|OFF)$/;
@@ -6498,7 +9250,7 @@ function projectFeedbackDir(io, projectDir) {
 }
 var violationsLogPath = (io) => join(feedbackDir(io), ".violations.jsonl");
 var FRONTMATTER_RE = /^---\s*\n([\s\S]*?\n)---\s*\n?/;
-var BODY_STOP_RE = /\*\*(Why|言い訳|How to apply)[:：]?\*\*/;
+var BODY_STOP_RE = /\*\*(Why|言い訳|Excuse|How to apply)[:：]?\*\*/;
 var loadYamlText = (text) => parseYaml(text);
 var DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/;
 var DAY_MS = 86400000;
@@ -6708,7 +9460,7 @@ async function evalPreBash(io, rules, command, projectDir) {
         continue;
       const checkCmd = entry.check;
       if (truthy(checkCmd)) {
-        io.progress?.(`[feedback-guard] 評価中: ${rule.name}`);
+        io.progress?.(tr(io.lang)("guard.evaluating", { rule: rule.name }));
         const r = await io.run([...SHELL, String(checkCmd)], { cwd: dir, env: { CLAUDE_PROJECT_DIR: dir }, timeoutMs: 1e4 });
         if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
           continue;
@@ -6833,7 +9585,7 @@ async function evalPostEdit(io, rules, filePath, projectDir) {
         details.push(`content matched: ${String(when)}`);
       }
       if (truthy(checkCmd)) {
-        io.progress?.(`[feedback-post-edit] 検査中: ${rule.name} (${absPath})`);
+        io.progress?.(tr(io.lang)("postEdit.checking", { rule: rule.name, file: absPath }));
         const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: dir, FILE: absPath }, timeoutMs: 15000 });
         if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
           continue;
@@ -6948,7 +9700,7 @@ async function evalStopCheck(io, rules, projectDir, changedFiles) {
             bad = true;
         }
         if (truthy(checkCmd)) {
-          io.progress?.(`[feedback-stop-check] 検査中: ${rule.name} (${absPath})`);
+          io.progress?.(tr(io.lang)("stopCheck.checking", { rule: rule.name, file: absPath }));
           const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: projectDir, FILE: absPath }, timeoutMs: 15000 });
           if (r.exitCode !== 0 || r.timedOut || r.error !== undefined)
             bad = true;
@@ -7013,13 +9765,13 @@ async function main(io, payload) {
   }
   const attempts = await bumpAttempts(io, ap);
   if (attempts >= MAX_ATTEMPTS) {
-    stderr += `[feedback-stop-check] ${MAX_ATTEMPTS} 回連続でブロックしました。ループを打ち切ります。手動確認を。
+    stderr += `${tr(io.lang)("stopCheck.gaveUp", { max: MAX_ATTEMPTS })}
 `;
     await io.removeFiles([ap]);
     return ok("", stderr);
   }
   const lines = blocking.map((v) => `[feedback-stop-check] ${v.rule} (count: ${v.count}): ${v.message} (${v.detail})`);
-  lines.push(`[feedback-stop-check] 上記を修正してください（試行 ${attempts}/${MAX_ATTEMPTS}）。`);
+  lines.push(tr(io.lang)("stopCheck.fixAbove", { attempt: attempts, max: MAX_ATTEMPTS }));
   stderr += lines.map((l) => `${l}
 `).join("");
   const stdout = `${JSON.stringify({ decision: "block", reason: lines.join(`
@@ -7117,16 +9869,17 @@ async function which(io, name) {
 
 // src/notification.ts
 var LABELS = {
-  notify: { label: "確認待ち", fallback: "確認を待っています" },
-  stop: { label: "完了", fallback: "応答が完了しました" }
+  notify: { label: "notify.waiting", fallback: "notify.waitingFallback" },
+  stop: { label: "notify.done", fallback: "notify.doneFallback" }
 };
 var FRONT_WINDOW_SCRIPT = 'tell application "System Events" to tell (first process whose frontmost is true) to get name of (first window whose value of attribute "AXMain" is true)';
 async function notification(io, type, payload) {
   const kind = LABELS[type];
   if (!kind)
     return ok();
+  const t = tr(io.lang);
   const cwd = jqStr(payload.cwd) || io.cwd;
-  const message = jqStr(payload.message) || kind.fallback;
+  const message = jqStr(payload.message) || t(kind.fallback);
   const top = await io.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"]);
   const gitRoot = top.exitCode === 0 ? top.stdout.replace(/\n+$/, "") : "";
   const target = gitRoot || cwd;
@@ -7173,7 +9926,7 @@ async function notification(io, type, payload) {
     "-title",
     "Claude Code",
     "-subtitle",
-    `\uD83D\uDCC1 ${project} · ${kind.label}`,
+    `\uD83D\uDCC1 ${project} · ${t(kind.label)}`,
     "-message",
     message,
     "-group",
@@ -7243,27 +9996,27 @@ function cutCmd(text, room) {
 }
 var markOf = (e) => e.result === "ok" ? "✓" : "✗";
 var doneText = (e, now) => `${e.name ?? foldCmd(e.cmd)} ${markOf(e)} (${(((e.ended ?? now) - e.started) / 1000).toFixed(1)}s)`;
-function runningLine(e, now) {
+function runningLine(e, now, lang) {
   if (e.result)
     return `${INDENT}${doneText(e, now)}`;
   const seconds = Math.max(0, Math.floor((now - e.started) / 1000));
   const head = e.name ? `${INDENT}${e.name} $ ` : INDENT;
-  const tail = `${e.waiting ? " 待機中" : ""} (${seconds}s)`;
+  const tail = `${e.waiting ? ` ${tr(lang)("band.waiting")}` : ""} (${seconds}s)`;
   return `${head}${cutCmd(foldCmd(e.cmd), BAND_LINE_MAX - head.length - tail.length)}${tail}`;
 }
-function runningLines(entries, now) {
-  return ["[gate] 実行中:", ...entries.map((e) => runningLine(e, now))];
+function runningLines(entries, now, lang) {
+  return [tr(lang)("band.running"), ...entries.map((e) => runningLine(e, now, lang))];
 }
-function runningBand(entries, now) {
+function runningBand(entries, now, lang) {
   if (!entries.some((e) => !e.result))
     return;
   return {
     type: "Box",
     props: { flexDirection: "column" },
-    children: runningLines(entries, now).map((line) => ({ type: "Text", children: [line] }))
+    children: runningLines(entries, now, lang).map((line) => ({ type: "Text", children: [line] }))
   };
 }
-function finishedSummary(entries) {
+function finishedSummary(entries, lang) {
   if (entries.length === 0 || entries.some((e) => !e.result))
     return;
   const passed = entries.filter((e) => e.result === "ok").length;
@@ -7271,7 +10024,7 @@ function finishedSummary(entries) {
   const counts = [passed > 0 ? `✓ ${passed}` : "", failed > 0 ? `✗ ${failed}` : ""].filter((s) => s !== "").join(" / ");
   const first = Math.min(...entries.map((e) => e.started));
   const last = Math.max(...entries.map((e) => e.ended ?? e.started));
-  return `[gate] 完了: ${counts} (${((last - first) / 1000).toFixed(1)}s)`;
+  return tr(lang)("band.done", { counts, seconds: ((last - first) / 1000).toFixed(1) });
 }
 var summaryFile = (io, sessionId) => join(gateStatusDir(io), `summary.${sessionId}.txt`);
 var saveSummary = (io, sessionId, text) => io.writeFile(summaryFile(io, sessionId), text);
@@ -7527,17 +10280,18 @@ function summarizeCmds(cmds) {
   }
   return parts.join(" ; ");
 }
-function tailOutput(out, limit = FAIL_TAIL_LINES) {
+function tailOutput(lang, out, limit = FAIL_TAIL_LINES) {
   const lines = out.trimEnd().split(/\r?\n/);
   if (lines.length <= limit)
     return lines.join(`
 `);
-  return [`…（先頭 ${lines.length - limit} 行省略）`, ...lines.slice(-limit)].join(`
+  return [tr(lang)("gate.headOmitted", { n: lines.length - limit }), ...lines.slice(-limit)].join(`
 `);
 }
-function failureDetails(failures) {
+function failureDetails(lang, failures) {
   if (failures.length === 0)
     return "";
+  const t = tr(lang);
   let text = "";
   let used = 0;
   let omitted = 0;
@@ -7549,13 +10303,13 @@ function failureDetails(failures) {
     }
     if (used + d.length + 1 > FAIL_DETAIL_MAX)
       d = `${d.slice(0, FAIL_DETAIL_MAX)}
-…（以降省略）`;
+${t("gate.restOmitted")}`;
     text += `${d}
 `;
     used += d.length + 1;
   }
   if (omitted)
-    text += `…（残り ${omitted} 件の失敗は省略。各 [gate] log のパスを見てください）
+    text += `${t("gate.failuresOmitted", { n: omitted })}
 `;
   return text.trimEnd();
 }
@@ -7581,6 +10335,7 @@ class PolicyState {
 
 class Gate {
   io;
+  t;
   projectDir;
   sessionId;
   agentId;
@@ -7615,6 +10370,7 @@ class Gate {
   executedLabels = [];
   constructor(io, opts = {}) {
     this.io = io;
+    this.t = tr(io.lang);
     this.projectDir = io.projectDir || io.cwd;
     this.sessionId = opts.sessionId || "unknown";
     this.agentId = opts.agentId || "";
@@ -7837,7 +10593,7 @@ class Gate {
     const policy = isDefault ? this.defaultPolicy : this.resolvePolicyPath(rootDir, value);
     if (!policy || !await this.io.exists(policy)) {
       if (!isDefault && policy && logs) {
-        logs.push(`=== [gate] policy に指定されたファイルが見つかりません: ${policy}。ポリシー判定を行わず実行します。 ===`);
+        logs.push(this.t("gate.policyNotFound", { policy }));
       }
       return null;
     }
@@ -7847,7 +10603,7 @@ class Gate {
   async dogwoodVerdict(policy, schema, rootDir, name, cmd) {
     const binpath = await this.resolveDogwood();
     if (!binpath)
-      return [null, "dogwood バイナリが見つかりません（DOGWOOD_BIN / PATH / ~/.cargo/bin を確認してください）"];
+      return [null, this.t("dogwood.notFound")];
     const history = await this.readTrace(rootDir);
     const lastTs = history.length > 0 ? Number(history[history.length - 1]?.ts) || 0 : 0;
     const now = await this.io.now();
@@ -7865,12 +10621,12 @@ class Gate {
       await this.rm(tracefile);
     }
     if (r.error !== undefined || r.timedOut) {
-      return [null, `dogwood の実行に失敗しました: ${r.error ?? "timed out"}`];
+      return [null, this.t("dogwood.runFailed", { error: r.error ?? "timed out" })];
     }
     if (r.exitCode !== 0) {
       const detail = (r.stderr || r.stdout || "").trim().replaceAll(`
 `, " ").slice(0, 200);
-      return [null, `dogwood replay が異常終了しました（exit ${r.exitCode}）: ${detail}`];
+      return [null, this.t("dogwood.exited", { code: r.exitCode, detail })];
     }
     let verdicts;
     try {
@@ -7878,14 +10634,14 @@ class Gate {
       const v = isDict(parsed) ? parsed.verdicts : undefined;
       verdicts = Array.isArray(v) ? v : [];
     } catch {
-      return [null, "dogwood replay の出力を JSON として読めませんでした"];
+      return [null, this.t("dogwood.badJson")];
     }
     if (verdicts.length === 0)
-      return [null, "dogwood replay が verdict を返しませんでした"];
+      return [null, this.t("dogwood.noVerdict")];
     const last = verdicts[verdicts.length - 1];
     const verdict = String((isDict(last) ? last.verdict : "") || "").toLowerCase();
     if (verdict !== "allow" && verdict !== "deny")
-      return [null, `dogwood replay の verdict を解釈できませんでした: ${pyRepr(verdict)}`];
+      return [null, this.t("dogwood.badVerdict", { verdict: pyRepr(verdict) })];
     return [verdict, null];
   }
   async makePolicyContext(cfg, owner, rootDir, state, logs) {
@@ -7936,7 +10692,7 @@ class Gate {
     const uid = `${Math.floor(await this.io.now() / 1000)}-${logSeq++}`;
     const logpath = join(this.logDir, `${slug(name || cmd)}.${uid}.log`);
     const header = `$ ${cmd}  (cwd: ${cwd})
-[gate] 同じ実行が他のエージェントで走っていたため、その結果を受け取りました（実行側のログ: ${r.outcome.logpath}）
+${this.t("gate.sharedResult", { logpath: r.outcome.logpath })}
 `;
     await this.io.writeFile(logpath, header + r.outcome.out).catch(() => {
       return;
@@ -7969,7 +10725,7 @@ class Gate {
         if (this.running.every((r) => r.result))
           this.stopTicker();
         await this.publishAndRedraw();
-        const summary = finishedSummary(await listRunning(this.io, this.sessionId));
+        const summary = finishedSummary(await listRunning(this.io, this.sessionId), this.io.lang);
         if (summary !== undefined) {
           this.io.result?.(summary);
           await saveSummary(this.io, this.sessionId, summary);
@@ -8012,10 +10768,10 @@ class Gate {
     const detail = [chunk.lines[0]];
     if (out) {
       chunk.lines.push(out.trimEnd());
-      detail.push(tailOutput(out));
+      detail.push(tailOutput(this.io.lang, out));
     }
     if (timedOut) {
-      const msg = `[gate] タイムアウト（${timeout}秒）で強制終了しました。無限ループやハングの可能性があります。`;
+      const msg = this.t("gate.timeout", { seconds: timeout });
       chunk.lines.push(msg);
       detail.push(msg);
     }
@@ -8032,10 +10788,10 @@ class Gate {
       this.failures.push(chunk.detail);
   }
   withDetails(prefix) {
-    const details = failureDetails(this.failures);
+    const details = failureDetails(this.io.lang, this.failures);
     return prefix + (details ? `
 
---- 失敗したコマンドの出力 ---
+${this.t("gate.failedOutputHeader")}
 ${details}` : "");
   }
   async runParallel(label, items, cwd, defaultTimeout, logs, policy, extraEnv, root = policy?.rootDir ?? this.projectDir) {
@@ -8043,7 +10799,7 @@ ${details}` : "");
     const tasks = [];
     for (const item of items) {
       if (isParallel(item)) {
-        logs.push(`=== [gate] (${label}) parallel の中に parallel はネストできません。失敗扱いにします。 ===`);
+        logs.push(this.t("gate.nestedParallel", { label }));
         failed = true;
         continue;
       }
@@ -8101,7 +10857,7 @@ ${details}` : "");
         continue;
       const label = `deferred:${entry.label || "."}`;
       if ((await this.io.stat(cwd))?.kind !== "dir") {
-        logs.push(`=== [gate] (${label}) cwd が存在しません: ${cwd}。この控えを破棄します。 ===`);
+        logs.push(this.t("gate.deferredNoCwd", { label, cwd }));
         continue;
       }
       const name = entry.name || slug(cmd);
@@ -8165,7 +10921,7 @@ ${details}` : "");
   async loadAction(path) {
     const text = await this.io.readFile(path);
     if (text === undefined)
-      throw new Error(`gate.yaml を読めません: ${path}`);
+      throw new Error(this.t("gate.cannotReadYaml", { path }));
     return parseYaml(text);
   }
   noteUnmatchedFiles(rels, triggered) {
@@ -8177,8 +10933,8 @@ ${details}` : "");
     if (unmatched.length === 0)
       return;
     const shown = unmatched.slice(0, UNMATCHED_SHOWN).join(", ");
-    const more = unmatched.length > UNMATCHED_SHOWN ? ` ほか${unmatched.length - UNMATCHED_SHOWN}件` : "";
-    this.status.push(`[gate] skip: ${shown}${more} (どのルールにもマッチしません)`);
+    const more = unmatched.length > UNMATCHED_SHOWN ? this.t("gate.andMore", { n: unmatched.length - UNMATCHED_SHOWN }) : "";
+    this.status.push(this.t("gate.skipUnmatched", { files: `${shown}${more}` }));
   }
   async runRules(cfg, rels, logs, rootDir, policyState) {
     const rules = cfg?.rules || [];
@@ -8217,8 +10973,8 @@ ${details}` : "");
       if (truthy(rawPerFileDir)) {
         const mode = normalizePerFileDirMode(rawPerFileDir);
         if (mode === null) {
-          logs.push(`=== [gate] per_file_dir の値が不正です: ${pyRepr(rawPerFileDir)}（true / "file" / "pattern_root" のいずれかを指定してください）。このルールをスキップします。 ===`);
-          summary.push(`${summarizeCmds(cmds)}  [skip: per_file_dir不正]`);
+          logs.push(this.t("gate.badPerFileDir", { value: pyRepr(rawPerFileDir) }));
+          summary.push(`${summarizeCmds(cmds)}  ${this.t("gate.skipBadPerFileDir")}`);
           failed = true;
           for (const f of ruleFiles)
             failFiles.add(f);
@@ -8230,9 +10986,9 @@ ${details}` : "");
           const label = d || ".";
           const dirFiles = matched.filter((rp) => rootsByRel[rp] === d);
           if ((await this.io.stat(cwd))?.kind !== "dir") {
-            logs.push(`=== [gate] (${label}) cwd が存在しません: ${cwd}。このルートをスキップします。 ===`);
-            summary.push(`(${label}) ${summarizeCmds(cmds)}  [skip: cwd無し]`);
-            this.note("skip", label, summarizeCmds(cmds), "(cwd が存在しません)");
+            logs.push(this.t("gate.rootNoCwd", { label, cwd }));
+            summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t("gate.skipNoCwd")}`);
+            this.note("skip", label, summarizeCmds(cmds), this.t("gate.noteNoCwd"));
             continue;
           }
           summary.push(`(${label}) ${summarizeCmds(cmds)}`);
@@ -8249,9 +11005,9 @@ ${details}` : "");
         const cwd = rule.dir ? join(rootDir, rule.dir) : rootDir;
         const label = rule.dir ?? ".";
         if ((await this.io.stat(cwd))?.kind !== "dir") {
-          logs.push(`=== [gate] (${label}) cwd が存在しません: ${cwd}。このルールをスキップします。 ===`);
-          summary.push(`(${label}) ${summarizeCmds(cmds)}  [skip: cwd無し]`);
-          this.note("skip", label, summarizeCmds(cmds), "(cwd が存在しません)");
+          logs.push(this.t("gate.ruleNoCwd", { label, cwd }));
+          summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t("gate.skipNoCwd")}`);
+          this.note("skip", label, summarizeCmds(cmds), this.t("gate.noteNoCwd"));
           continue;
         }
         summary.push(`(${label}) ${summarizeCmds(cmds)}`);
@@ -8281,7 +11037,7 @@ ${details}` : "");
       if (rels.length === 0)
         continue;
       if (root !== this.projectDir && (await this.io.stat(root))?.kind !== "dir") {
-        logs.push(`=== [gate] worktree が見つかりません: ${root}。対象から外します。 ===`);
+        logs.push(this.t("gate.worktreeNotFound", { root }));
         for (const rp of rels)
           consumedKeys.add(mk(root, rp));
         continue;
@@ -8402,15 +11158,14 @@ ${details}` : "");
       this.writeErr(`${[...this.status, ...logs].join(`
 `)}
 `);
-      this.writeErr(`[gate] rules フェーズの検証に失敗しました（会話は止まりません）。上のエラーを見て修正してください。
+      this.writeErr(`${this.t("gate.rulesFailed")}
 `);
       return 2;
     }
     if (summary.length > 0 || this.status.length > 0) {
       const body = this.statusBlock(summary.map((s) => `✓ ${s}`).join(`
 `));
-      this.print({ systemMessage: `[gate] rules フェーズ成功:
-${body}` });
+      this.print({ systemMessage: this.t("gate.rulesPassed", { body }) });
     }
     return 0;
   }
@@ -8420,18 +11175,18 @@ ${body}` });
     for (const name of [...names].sort()) {
       const check = checksByName.get(name);
       if (!check) {
-        logs.push(`=== [gate] consistency_checks に "${name}" が見つかりません。スキップします。 ===`);
-        summary.push(`(check:${name}) 見つかりません、スキップ`);
-        this.status.push(`[gate] skip: check:${name} (consistency_checks に定義がありません)`);
+        logs.push(this.t("gate.checkNotFound", { name }));
+        summary.push(this.t("gate.checkNotFoundSummary", { name }));
+        this.status.push(this.t("gate.skipCheckUndefined", { name }));
         continue;
       }
       const cwd = check.dir ? join(rootDir, check.dir) : rootDir;
       const cmds = check.run || [];
       const timeout = check.timeout || DEFAULT_TIMEOUT;
       if ((await this.io.stat(cwd))?.kind !== "dir") {
-        logs.push(`=== [gate] (check:${name}) cwd が存在しません: ${cwd}。このチェックをスキップします。 ===`);
-        summary.push(`(check:${name}) ${summarizeCmds(cmds)}  [skip: cwd無し]`);
-        this.note("skip", `check:${name}`, summarizeCmds(cmds), "(cwd が存在しません)");
+        logs.push(this.t("gate.checkNoCwd", { name, cwd }));
+        summary.push(`(check:${name}) ${summarizeCmds(cmds)}  ${this.t("gate.skipNoCwd")}`);
+        this.note("skip", `check:${name}`, summarizeCmds(cmds), this.t("gate.noteNoCwd"));
         continue;
       }
       summary.push(`(check:${name}) ${summarizeCmds(cmds)}`);
@@ -8512,7 +11267,7 @@ ${body}` });
     const droppedRoots = new Set;
     for (const [root, checksMap] of Object.entries(pending)) {
       if (root !== this.projectDir && (await this.io.stat(root))?.kind !== "dir") {
-        logs.push(`=== [gate] worktree が見つかりません: ${root}。対象から外します。 ===`);
+        logs.push(this.t("gate.worktreeNotFound", { root }));
         droppedRoots.add(root);
         continue;
       }
@@ -8537,19 +11292,18 @@ ${body}` });
       await this.confirmPending(activePending);
       await this.cleanup([this.count, this.pending]);
       const body = this.statusBlock(summary.length > 0 ? summary.map((s) => `✓ ${s}`).join(`
-`) : "（対象なし）");
+`) : this.t("gate.nothingToRun"));
       if (this.executedLabels.length > 0 && !this.stopHookActive && mainCfg?.report_success !== false) {
         await this.io.writeFile(this.reported, `1
 `);
-        const reason = `[gate] 検証がすべて通りました: ${this.executedLabels.map((l) => `${l} ✓`).join(" / ")}。この結果をユーザーに報告して終了してください。`;
+        const reason = this.t("gate.allPassed", { labels: this.executedLabels.map((l) => `${l} ✓`).join(" / ") });
         this.writeErr(`${reason}
 `);
         this.print({ decision: "block", reason });
         return 2;
       }
-      const title = Object.keys(pending).length > 0 ? "consistency checks" : "後回しにした検証コマンド";
-      this.print({ systemMessage: `[gate] ${title} 成功:
-${body}` });
+      const title = Object.keys(pending).length > 0 ? "consistency checks" : this.t("gate.deferredTitle");
+      this.print({ systemMessage: this.t("gate.checksPassed", { title, body }) });
       return 0;
     }
     this.writeErr(`${[...this.status, ...logs].join(`
@@ -8566,17 +11320,17 @@ ${body}` });
     if (attempts >= MAX_ATTEMPTS2) {
       await this.requeuePendingToChanged(activePending);
       await this.cleanup([this.count, this.pending]);
-      this.writeErr(`consistency checks が ${MAX_ATTEMPTS2} 回連続失敗。ループを打ち切ります。手動確認を。
+      this.writeErr(`${this.t("gate.checksGaveUpStderr", { max: MAX_ATTEMPTS2 })}
 `);
-      const msg = `[gate] consistency checks が${MAX_ATTEMPTS2}回連続で失敗したため打ち切りました。` + "対象ファイルは未検証のまま CHANGED へ戻しました。" + "手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか " + `/clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。
-` + summary.map((s) => `✗ ${s}`).join(`
-`) + this.withDetails("");
+      const msg = `${this.t("gate.checksGaveUp", { max: MAX_ATTEMPTS2 })}
+${summary.map((s) => `✗ ${s}`).join(`
+`)}${this.withDetails("")}`;
       this.print({ systemMessage: msg });
       return 0;
     }
-    const reason = `consistency checks 失敗（試行 ${attempts}/${MAX_ATTEMPTS2}）。上のエラーを見て修正を継続してください。
-` + summary.map((s) => `✗ ${s}`).join(`
-`) + this.withDetails("");
+    const reason = `${this.t("gate.checksFailed", { attempt: attempts, max: MAX_ATTEMPTS2 })}
+${summary.map((s) => `✗ ${s}`).join(`
+`)}${this.withDetails("")}`;
     this.writeErr(`${reason}
 `);
     this.print({ decision: "block", reason });
@@ -8585,9 +11339,7 @@ ${body}` });
   async main() {
     await this.pruneLogs();
     if (!await this.io.exists(this.action) && await this.io.exists(this.gateYml)) {
-      this.print({
-        systemMessage: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
-      });
+      this.print({ systemMessage: this.t("gate.ymlTypo") });
     }
     if (!await this.io.exists(this.action)) {
       await this.cleanup();
@@ -8618,7 +11370,7 @@ class PolicyContext {
     const pname = name || slug(cmd);
     const [verdict, reason] = await this.gate.dogwoodVerdict(this.policy, this.schema, this.rootDir, pname, cmd);
     if (verdict === null) {
-      logs.push(`=== [gate] (${label}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［${reason}］ $ ${cmd} ===`);
+      logs.push(this.gate.t("gate.policyUnevaluated", { label, reason: reason ?? "", cmd }));
     } else {
       await this.gate.appendTrace(this.rootDir, cwd, pname, cmd, "request");
       if (verdict === "allow") {
@@ -8627,9 +11379,9 @@ class PolicyContext {
         this.state.allowedThisRun.add(`${this.rootDir}\x00${cwd}\x00${cmd}`);
         return true;
       }
-      logs.push(`=== [gate] (${label}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ ${cmd} ===`);
+      logs.push(this.gate.t("gate.policySkipped", { label, cmd }));
     }
-    this.gate.note("skip", label, cmd, verdict ? "(ポリシー判定で見送り。控えに積んだので後で自動実行)" : `(ポリシーを評価できず見送り。控えに積んだので後で自動実行: ${reason})`);
+    this.gate.note("skip", label, cmd, verdict ? this.gate.t("gate.notePolicySkipped") : this.gate.t("gate.notePolicyUnevaluated", { reason: reason ?? "" }));
     this.state.deferredThisRun.add(`${this.rootDir}\x00${cwd}\x00${cmd}`);
     await this.gate.deferCmd(this.rootDir, cwd, pname, cmd, timeout, label, extraEnv);
     return false;
@@ -8647,7 +11399,7 @@ async function runGate(io, opts = {}) {
     gate.stderr += `[gate] internal error:
 ${e instanceof Error ? e.stack ?? e.message : String(e)}
 `;
-    gate.stdout += `${JSON.stringify({ systemMessage: "[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。" })}
+    gate.stdout += `${JSON.stringify({ systemMessage: tr(io.lang)("gate.internalError") })}
 `;
     exitCode = 0;
   } finally {
@@ -8661,9 +11413,7 @@ async function stopTestGate(io, phase, payload) {
   const projectDir = io.projectDir || io.cwd;
   if (!await io.exists(join(projectDir, ".claude", "gate.yaml"))) {
     if (await io.exists(join(projectDir, ".claude", "gate.yml"))) {
-      return ok(`${JSON.stringify({
-        systemMessage: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
-      })}
+      return ok(`${JSON.stringify({ systemMessage: tr(io.lang)("gate.ymlTypo") })}
 `);
     }
     return ok();
@@ -8913,37 +11663,22 @@ function aggregateViolations(entries, now, windowMs) {
   }
   return stats;
 }
-var ENFORCE_TEMPLATE = `enforce:
-  - event: pre_bash
-    when: '正規表現'
-    unless: '正規表現'
-    message: '違反時に出す指示文'
-  - event: pre_edit
-    path: 'glob'
-    when: '正規表現'
-    message: '違反時に出す指示文'
-  - event: post_edit
-    path: 'glob'
-    when: '正規表現'
-    message: '違反時に出す指示文'
-  - event: stop_check
-    changed: 'glob'
-    check: 'shell cmd'
-    message: '違反時に出す指示文'`;
+var enforceTemplate = (lang) => tr(lang)("correct.enforceTemplate");
 var oneLine2 = (s, max = 60) => {
   const flat = s.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 };
 var countsText = (rec) => Object.entries(rec).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(", ");
-function inactiveReason(rule, now) {
+function inactiveReason(rule, now, lang) {
+  const t = tr(lang);
   if (rule.expires !== undefined && now > rule.expires)
-    return `expires（${new Date(rule.expires).toISOString().slice(0, 10)}）を過ぎている`;
+    return t("correct.expired", { date: new Date(rule.expires).toISOString().slice(0, 10) });
   const parts = [];
   if (rule.projects.length > 0)
     parts.push("projects");
   if (rule.whenExists.length > 0)
     parts.push("when_exists");
-  return `${parts.join(" / ") || "条件"} がこのプロジェクトに一致せず無効`;
+  return t("correct.notMatching", { what: parts.join(" / ") || t("correct.conditions") });
 }
 function buildProposals(rules, inactive, stats, opts) {
   const bumps = [];
@@ -8951,10 +11686,12 @@ function buildProposals(rules, inactive, stats, opts) {
   const stales = [];
   const expireds = [];
   const label = windowLabel(opts.window);
+  const t = tr(opts.lang);
   for (const rule of rules) {
     const s = stats.get(rule.name);
     const n = s?.inWindow ?? 0;
     if (n >= opts.min && s) {
+      const top = s.topDetail ? t("correct.topDetail", { detail: oneLine2(s.topDetail) }) : "";
       if (rule.count < 3) {
         bumps.push({
           kind: "bump",
@@ -8963,7 +11700,7 @@ function buildProposals(rules, inactive, stats, opts) {
           from: rule.count,
           to: 3,
           n,
-          reason: `直近 ${label} で ${n} 回違反（${countsText(s.bySeverity)}）。確定ルールへ昇格${s.topDetail ? `。最多: ${oneLine2(s.topDetail)}` : ""}`
+          reason: t("correct.bumpToConfirmed", { window: label, n, counts: countsText(s.bySeverity), top })
         });
       } else if (rule.count < 5) {
         const strong = (s.bySeverity.ask ?? 0) + (s.bySeverity.block ?? 0);
@@ -8975,7 +11712,7 @@ function buildProposals(rules, inactive, stats, opts) {
             from: rule.count,
             to: 5,
             n,
-            reason: `直近 ${label} で ask / block が ${strong} 回（${countsText(s.bySeverity)}）。deny へ引き上げ${s.topDetail ? `。最多: ${oneLine2(s.topDetail)}` : ""}`
+            reason: t("correct.bumpToDeny", { window: label, strong, counts: countsText(s.bySeverity), top })
           });
         }
       }
@@ -8985,8 +11722,8 @@ function buildProposals(rules, inactive, stats, opts) {
         kind: "enforce",
         rule: rule.name,
         path: rule.path,
-        reason: `count ${rule.count} の確定ルールだが enforce が無く、hook が検知できない（違反ログにも出ない）`,
-        template: ENFORCE_TEMPLATE
+        reason: t("correct.noEnforce", { count: rule.count }),
+        template: enforceTemplate(opts.lang)
       });
     }
     if (rule.count >= 3 && rule.enforce.length > 0 && n === 0 && (s?.total ?? 0) === 0) {
@@ -8994,23 +11731,29 @@ function buildProposals(rules, inactive, stats, opts) {
         kind: "stale",
         rule: rule.name,
         path: rule.path,
-        reason: `enforce ありで違反ログに一度も出ていない。enforce が効いているか、ルールが古くなっていないか確認`
+        reason: t("correct.stale")
       });
     }
   }
   for (const rule of inactive) {
-    expireds.push({ kind: "expired", rule: rule.name, path: rule.path, reason: `${inactiveReason(rule, opts.now)}。削除または更新を検討` });
+    expireds.push({
+      kind: "expired",
+      rule: rule.name,
+      path: rule.path,
+      reason: t("correct.expiredAction", { reason: inactiveReason(rule, opts.now, opts.lang) })
+    });
   }
   bumps.sort((a, b) => b.to - a.to || b.n - a.n);
   return [...bumps.map(({ n: _n, ...p }) => p), ...enforces, ...stales, ...expireds];
 }
 function formatReport(proposals, stats, opts, rulesCount, applied) {
+  const t = tr(opts.lang);
   let violations = 0;
   for (const s of stats.values())
     violations += s.inWindow;
-  const lines = [`[correct] 直近 ${windowLabel(opts.window)}: ルール ${rulesCount} 件 / 違反 ${violations} 件`];
+  const lines = [t("correct.reportHeader", { window: windowLabel(opts.window), rules: rulesCount, violations })];
   if (proposals.length === 0) {
-    lines.push("提案はありません。");
+    lines.push(t("correct.noProposals"));
   } else {
     for (const p of proposals) {
       const head = p.kind === "bump" ? `${p.rule}: count ${p.from} → ${p.to}` : p.rule;
@@ -9018,11 +11761,11 @@ function formatReport(proposals, stats, opts, rulesCount, applied) {
     }
   }
   if (opts.apply) {
-    lines.push(!applied || applied.length === 0 ? "apply: 書き換えたファイルはありません。" : "apply: count を書き換えました。");
+    lines.push(t(!applied || applied.length === 0 ? "correct.applyNone" : "correct.applyDone"));
     for (const a of applied ?? [])
       lines.push(`  - ${a.path} (count ${a.from} → ${a.to})`);
   } else {
-    lines.push("`/correct apply` で bump の count 引き上げをファイルに書き込みます（enforce は提案のみ）。");
+    lines.push(t("correct.applyHint"));
   }
   return lines.join(`
 `);
@@ -9049,18 +11792,13 @@ async function applyCountBumps(io, proposals) {
   }
   return applied;
 }
-function buildContext(proposals, applied) {
+function buildContext(proposals, applied, lang) {
   if (proposals.length === 0)
     return [];
-  const lines = [
-    "/correct の結果です。ユーザーに上記の提案を提示してください。",
-    "- enforce の追加は、対象ルールの本文から正規表現 / glob を起こして具体案を提案する（雛形は rules/feedback_rules.md の enforce 節）。",
-    "- ファイルを書き換える前に、必ずユーザーに確認する（rules/feedback_rules.md のルールどおり）。",
-    "- stale / expired は、ルールを残すか更新・削除するかをユーザーに尋ねる。"
-  ];
-  if (applied.length > 0) {
-    lines.push(`- apply により次のファイルの count をすでに書き換えた。その事実をユーザーに伝えること: ${applied.map((a) => `${a.path} (${a.from} → ${a.to})`).join(", ")}`);
-  }
+  const t = tr(lang);
+  const lines = [t("correct.context")];
+  if (applied.length > 0)
+    lines.push(t("correct.contextApplied", { list: applied.map((a) => `${a.path} (${a.from} → ${a.to})`).join(", ") }));
   return [lines.join(`
 `)];
 }
@@ -9089,12 +11827,12 @@ async function correctCommand(io, args) {
     const rules = await listRules(io);
     const inactive = await listInactive(io, rules);
     const stats = aggregateViolations(await readViolations(io), now, parsed.window);
-    const opts = { window: parsed.window, min: parsed.min, now };
+    const opts = { window: parsed.window, min: parsed.min, now, lang: io.lang };
     const proposals = buildProposals(rules, inactive, stats, opts);
     const applied = parsed.apply ? await applyCountBumps(io, proposals) : undefined;
     return {
-      text: formatReport(proposals, stats, { window: parsed.window, apply: parsed.apply }, rules.length, applied),
-      context: buildContext(proposals, applied ?? [])
+      text: formatReport(proposals, stats, { window: parsed.window, apply: parsed.apply, lang: io.lang }, rules.length, applied),
+      context: buildContext(proposals, applied ?? [], io.lang)
     };
   } catch (e) {
     return { text: `[correct] internal error: ${e instanceof Error ? e.message : String(e)}`, context: [] };
@@ -9104,18 +11842,23 @@ async function correctCommand(io, args) {
 // src/engine-io.ts
 var errorText = (e) => e instanceof Error ? e.message : String(e);
 async function readEnv($) {
-  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier] = await Promise.all([
+  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG] = await Promise.all([
     $.env.get("HOME"),
     $.env.get("PATH"),
     $.env.get("CLAUDE_FEEDBACK_DIR"),
     $.env.get("DOGWOOD_BIN"),
     $.env.get("TERM_PROGRAM"),
-    $.env.get("__CFBundleIdentifier")
+    $.env.get("__CFBundleIdentifier"),
+    $.env.get("FEEDBACK_GATE_LANG"),
+    $.env.get("LC_ALL"),
+    $.env.get("LC_MESSAGES"),
+    $.env.get("LANG")
   ]);
-  return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier };
+  return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG };
 }
-async function createIo($) {
+async function createIo($, options = {}) {
   const [env, projectDir, cwd] = await Promise.all([readEnv($), $.session.root(), $.session.cwd()]);
+  const lang = resolveLang(env, options.language);
   const stat = async (path) => {
     try {
       const s = await $.fs.stat(path);
@@ -9146,6 +11889,7 @@ async function createIo($) {
   };
   return {
     env,
+    lang,
     projectDir,
     cwd,
     pluginRoot: $.plugin.root,
@@ -9280,12 +12024,8 @@ async function feedbackGuard(io, payload) {
 }
 
 // src/feedback-inject.ts
-var HEADER = `# 確定フィードバックルール（count >= 3）
-これらは繰り返し指摘された確定ルール。違反すると hook がブロックする。
-
-`;
 async function formatFull(io, rule) {
-  const lines = [`■ ${rule.name} (これまで ${rule.count} 回指摘されています)`, rule.description];
+  const lines = [tr(io.lang)("inject.ruleTitle", { name: rule.name, count: rule.count }), rule.description];
   const intro = await loadBodyIntro(io, rule.path);
   if (intro)
     lines.push(intro);
@@ -9297,7 +12037,7 @@ async function buildOutput(io, rules) {
   const blocks = [];
   for (const r of [...rules].sort(byCountThenName))
     blocks.push(await formatFull(io, r));
-  return HEADER + blocks.join(`
+  return tr(io.lang)("inject.header") + blocks.join(`
 
 `);
 }
@@ -9504,11 +12244,12 @@ async function resetGate(io, payload) {
 
 // src/rules-file.ts
 var DEFAULT_RULES_FILE = "~/.claude/feedback-gate/feedback_rules.md";
+var bundledRulesName = (lang) => lang === "en" ? "feedback_rules.en.md" : "feedback_rules.md";
 async function loadRules(io, rulesFile) {
   const home = io.env.HOME;
   const configured = typeof rulesFile === "string" && rulesFile !== "" ? rulesFile : DEFAULT_RULES_FILE;
   const custom = configured.startsWith("~") ? home ? `${home}${configured.slice(1)}` : undefined : configured;
-  const bundled = join(io.pluginRoot, "rules", "feedback_rules.md");
+  const bundled = join(io.pluginRoot, "rules", bundledRulesName(io.lang));
   for (const path of [custom, bundled]) {
     if (path && await io.exists(path))
       return (await io.readFile(path) ?? "").trim();
@@ -9519,9 +12260,9 @@ async function loadRules(io, rulesFile) {
 // src/register.ts
 var PROGRESS_DELAY_MS = 3000;
 var str = (v) => typeof v === "string" ? v : "";
-async function runSteps($, event, steps) {
+async function runSteps($, options, event, steps) {
   let acc = {};
-  const base = await createIo($);
+  const base = await createIo($, options);
   const sessionId = await $.session.id();
   let shown = false;
   let pending;
@@ -9570,25 +12311,26 @@ async function withNext(next, e, mine) {
 export const register = (on, options) => {
   on("session.start", async ($, e, next) => {
     try {
+      const io = await createIo($, options);
       await $.command.register({
         name: "correct",
-        description: "feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する",
+        description: tr(io.lang)("correct.description"),
         argumentHint: "[--window 30d] [--min 2] [apply]"
       });
     } catch {}
     return next(e);
   });
-  on("command.run", { command: "correct" }, async ($, e) => correctCommand(await createIo($), String(e.args ?? "")));
+  on("command.run", { command: "correct" }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? "")));
   on("classic.SessionStart", async ($, e, next) => {
-    const mine = await runSteps($, "SessionStart", [(io) => resetGate(io, e)]);
+    const mine = await runSteps($, options, "SessionStart", [(io) => resetGate(io, e)]);
     return withNext(next, e, mine);
   });
   on("classic.UserPromptSubmit", async ($, e, next) => {
     const mine = {};
-    const text = await createIo($).then((io) => loadRules(io, options.rulesFile));
+    const text = await createIo($, options).then((io) => loadRules(io, options.rulesFile));
     if (text !== "")
       mine.additionalContext = [text];
-    const inject = await runSteps($, "UserPromptSubmit", [(io) => feedbackInject(io)]);
+    const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io)]);
     return withNext(next, e, merge2(mine, inject));
   });
   on("classic.PreToolUse", async ($, e, next) => {
@@ -9607,39 +12349,43 @@ export const register = (on, options) => {
     };
     if (typeof agentId === "string" && agentId !== "")
       payload.agent_id = agentId;
-    const step = guardsAgents ? async () => agentLaunchGuard(payload) : (io) => feedbackGuard(io, payload);
+    const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
     const steps = tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
-    const mine = await runSteps($, "PreToolUse", steps);
+    const mine = await runSteps($, options, "PreToolUse", steps);
     if (decided(mine))
       return mine;
     return withNext(next, e, mine);
   });
   on("classic.PostToolUse", async ($, e, next) => {
     if (str(e.tool_name) === "Bash") {
-      const mine = await runSteps($, "PostToolUse", [(io) => bashChanges(io, e)]);
+      const mine = await runSteps($, options, "PostToolUse", [(io) => bashChanges(io, e)]);
       return withNext(next, e, mine);
     }
     if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name)))
       return next(e);
-    const mine = await runSteps($, "PostToolUse", [(io) => recordChanges(io, e), (io) => feedbackPostEdit(io, e), (io) => stopTestGate(io, "rules", e)]);
+    const mine = await runSteps($, options, "PostToolUse", [
+      (io) => recordChanges(io, e),
+      (io) => feedbackPostEdit(io, e),
+      (io) => stopTestGate(io, "rules", e)
+    ]);
     return withNext(next, e, mine);
   });
   on("classic.Notification", async ($, e, next) => {
-    await runSteps($, "Notification", [(io) => notification(io, "notify", e)]);
+    await runSteps($, options, "Notification", [(io) => notification(io, "notify", e)]);
     return next(e);
   });
   on("classic.Stop", async ($, e, next) => {
-    const mine = await runSteps($, "Stop", [(io) => allStop(io, e)]);
+    const mine = await runSteps($, options, "Stop", [(io) => allStop(io, e)]);
     return withNext(next, e, mine);
   });
   on("classic.SubagentStop", async ($, e, next) => {
-    const mine = await runSteps($, "SubagentStop", [(io) => stopTestGate(io, "checks", e), (io) => feedbackStopCheck(io, e)]);
+    const mine = await runSteps($, options, "SubagentStop", [(io) => stopTestGate(io, "checks", e), (io) => feedbackStopCheck(io, e)]);
     return withNext(next, e, mine);
   });
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (e.props.hasSurvey)
       return next(e);
-    const io = await createIo($);
-    return runningBand(await listRunning(io, await $.session.id()), await io.now()) ?? next(e);
+    const io = await createIo($, options);
+    return runningBand(await listRunning(io, await $.session.id()), await io.now(), io.lang) ?? next(e);
   });
 };

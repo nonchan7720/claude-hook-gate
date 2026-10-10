@@ -3,6 +3,7 @@
 // 集計・提案・整形は純粋関数に分け、ファイルに触れるのは readViolations / applyCountBumps / correctCommand だけ。
 
 import { FRONTMATTER_RE, feedbackDir, isRuleActive, listRules, projectFeedbackDir, type Rule, violationsLogPath } from './feedback-rules.ts'
+import { type Lang, tr } from './i18n.ts'
 import type { Io } from './io.ts'
 
 const HOUR_MS = 3_600_000
@@ -31,7 +32,7 @@ export type RuleStats = {
   topDetail?: string
 }
 
-export type ProposalOpts = { window: number; min: number; now: number }
+export type ProposalOpts = { window: number; min: number; now: number; lang: Lang }
 
 export type Proposal =
   | { kind: 'bump'; rule: string; path: string; from: number; to: number; reason: string }
@@ -154,23 +155,7 @@ export function aggregateViolations(entries: ViolationEntry[], now: number, wind
 }
 
 /** rules/feedback_rules.md の enforce 節と同じ 4 イベントの雛形。 */
-export const ENFORCE_TEMPLATE = `enforce:
-  - event: pre_bash
-    when: '正規表現'
-    unless: '正規表現'
-    message: '違反時に出す指示文'
-  - event: pre_edit
-    path: 'glob'
-    when: '正規表現'
-    message: '違反時に出す指示文'
-  - event: post_edit
-    path: 'glob'
-    when: '正規表現'
-    message: '違反時に出す指示文'
-  - event: stop_check
-    changed: 'glob'
-    check: 'shell cmd'
-    message: '違反時に出す指示文'`
+export const enforceTemplate = (lang: Lang): string => tr(lang)('correct.enforceTemplate')
 
 const oneLine = (s: string, max = 60): string => {
   const flat = s.replace(/\s+/g, ' ').trim()
@@ -183,12 +168,13 @@ const countsText = (rec: Record<string, number>): string =>
     .map(([k, n]) => `${k} ${n}`)
     .join(', ')
 
-function inactiveReason(rule: Rule, now: number): string {
-  if (rule.expires !== undefined && now > rule.expires) return `expires（${new Date(rule.expires).toISOString().slice(0, 10)}）を過ぎている`
+function inactiveReason(rule: Rule, now: number, lang: Lang): string {
+  const t = tr(lang)
+  if (rule.expires !== undefined && now > rule.expires) return t('correct.expired', { date: new Date(rule.expires).toISOString().slice(0, 10) })
   const parts: string[] = []
   if (rule.projects.length > 0) parts.push('projects')
   if (rule.whenExists.length > 0) parts.push('when_exists')
-  return `${parts.join(' / ') || '条件'} がこのプロジェクトに一致せず無効`
+  return t('correct.notMatching', { what: parts.join(' / ') || t('correct.conditions') })
 }
 
 /** 提案を作る。並びは bump（to 降順、違反数降順）→ enforce → stale → expired。 */
@@ -198,11 +184,13 @@ export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<strin
   const stales: Proposal[] = []
   const expireds: Proposal[] = []
   const label = windowLabel(opts.window)
+  const t = tr(opts.lang)
 
   for (const rule of rules) {
     const s = stats.get(rule.name)
     const n = s?.inWindow ?? 0
     if (n >= opts.min && s) {
+      const top = s.topDetail ? t('correct.topDetail', { detail: oneLine(s.topDetail) }) : ''
       if (rule.count < 3) {
         bumps.push({
           kind: 'bump',
@@ -211,7 +199,7 @@ export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<strin
           from: rule.count,
           to: 3,
           n,
-          reason: `直近 ${label} で ${n} 回違反（${countsText(s.bySeverity)}）。確定ルールへ昇格${s.topDetail ? `。最多: ${oneLine(s.topDetail)}` : ''}`,
+          reason: t('correct.bumpToConfirmed', { window: label, n, counts: countsText(s.bySeverity), top }),
         })
       } else if (rule.count < 5) {
         const strong = (s.bySeverity.ask ?? 0) + (s.bySeverity.block ?? 0)
@@ -223,7 +211,7 @@ export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<strin
             from: rule.count,
             to: 5,
             n,
-            reason: `直近 ${label} で ask / block が ${strong} 回（${countsText(s.bySeverity)}）。deny へ引き上げ${s.topDetail ? `。最多: ${oneLine(s.topDetail)}` : ''}`,
+            reason: t('correct.bumpToDeny', { window: label, strong, counts: countsText(s.bySeverity), top }),
           })
         }
       }
@@ -233,8 +221,8 @@ export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<strin
         kind: 'enforce',
         rule: rule.name,
         path: rule.path,
-        reason: `count ${rule.count} の確定ルールだが enforce が無く、hook が検知できない（違反ログにも出ない）`,
-        template: ENFORCE_TEMPLATE,
+        reason: t('correct.noEnforce', { count: rule.count }),
+        template: enforceTemplate(opts.lang),
       })
     }
     if (rule.count >= 3 && rule.enforce.length > 0 && n === 0 && (s?.total ?? 0) === 0) {
@@ -242,31 +230,37 @@ export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<strin
         kind: 'stale',
         rule: rule.name,
         path: rule.path,
-        reason: `enforce ありで違反ログに一度も出ていない。enforce が効いているか、ルールが古くなっていないか確認`,
+        reason: t('correct.stale'),
       })
     }
   }
   for (const rule of inactive) {
-    expireds.push({ kind: 'expired', rule: rule.name, path: rule.path, reason: `${inactiveReason(rule, opts.now)}。削除または更新を検討` })
+    expireds.push({
+      kind: 'expired',
+      rule: rule.name,
+      path: rule.path,
+      reason: t('correct.expiredAction', { reason: inactiveReason(rule, opts.now, opts.lang) }),
+    })
   }
 
   bumps.sort((a, b) => b.to - a.to || b.n - a.n)
   return [...bumps.map(({ n: _n, ...p }) => p), ...enforces, ...stales, ...expireds]
 }
 
-/** ユーザー向けの日本語レポート。applied を渡すと、書き換えたファイルの一覧を出す。 */
+/** ユーザー向けのレポート（opts.lang の言語）。applied を渡すと、書き換えたファイルの一覧を出す。 */
 export function formatReport(
   proposals: Proposal[],
   stats: Map<string, RuleStats>,
-  opts: { window: number; apply?: boolean },
+  opts: { window: number; apply?: boolean; lang: Lang },
   rulesCount: number,
   applied?: Applied[],
 ): string {
+  const t = tr(opts.lang)
   let violations = 0
   for (const s of stats.values()) violations += s.inWindow
-  const lines = [`[correct] 直近 ${windowLabel(opts.window)}: ルール ${rulesCount} 件 / 違反 ${violations} 件`]
+  const lines = [t('correct.reportHeader', { window: windowLabel(opts.window), rules: rulesCount, violations })]
   if (proposals.length === 0) {
-    lines.push('提案はありません。')
+    lines.push(t('correct.noProposals'))
   } else {
     for (const p of proposals) {
       const head = p.kind === 'bump' ? `${p.rule}: count ${p.from} → ${p.to}` : p.rule
@@ -274,10 +268,10 @@ export function formatReport(
     }
   }
   if (opts.apply) {
-    lines.push(!applied || applied.length === 0 ? 'apply: 書き換えたファイルはありません。' : 'apply: count を書き換えました。')
+    lines.push(t(!applied || applied.length === 0 ? 'correct.applyNone' : 'correct.applyDone'))
     for (const a of applied ?? []) lines.push(`  - ${a.path} (count ${a.from} → ${a.to})`)
   } else {
-    lines.push('`/correct apply` で bump の count 引き上げをファイルに書き込みます（enforce は提案のみ）。')
+    lines.push(t('correct.applyHint'))
   }
   return lines.join('\n')
 }
@@ -306,19 +300,11 @@ export async function applyCountBumps(io: Io, proposals: Proposal[]): Promise<Ap
 }
 
 /** モデル向けの hidden message。提案が無ければ空。 */
-export function buildContext(proposals: Proposal[], applied: Applied[]): string[] {
+export function buildContext(proposals: Proposal[], applied: Applied[], lang: Lang): string[] {
   if (proposals.length === 0) return []
-  const lines = [
-    '/correct の結果です。ユーザーに上記の提案を提示してください。',
-    '- enforce の追加は、対象ルールの本文から正規表現 / glob を起こして具体案を提案する（雛形は rules/feedback_rules.md の enforce 節）。',
-    '- ファイルを書き換える前に、必ずユーザーに確認する（rules/feedback_rules.md のルールどおり）。',
-    '- stale / expired は、ルールを残すか更新・削除するかをユーザーに尋ねる。',
-  ]
-  if (applied.length > 0) {
-    lines.push(
-      `- apply により次のファイルの count をすでに書き換えた。その事実をユーザーに伝えること: ${applied.map((a) => `${a.path} (${a.from} → ${a.to})`).join(', ')}`,
-    )
-  }
+  const t = tr(lang)
+  const lines = [t('correct.context')]
+  if (applied.length > 0) lines.push(t('correct.contextApplied', { list: applied.map((a) => `${a.path} (${a.from} → ${a.to})`).join(', ') }))
   return [lines.join('\n')]
 }
 
@@ -348,12 +334,12 @@ export async function correctCommand(io: Io, args: string): Promise<{ text: stri
     const rules = await listRules(io)
     const inactive = await listInactive(io, rules)
     const stats = aggregateViolations(await readViolations(io), now, parsed.window)
-    const opts = { window: parsed.window, min: parsed.min, now }
+    const opts = { window: parsed.window, min: parsed.min, now, lang: io.lang }
     const proposals = buildProposals(rules, inactive, stats, opts)
     const applied = parsed.apply ? await applyCountBumps(io, proposals) : undefined
     return {
-      text: formatReport(proposals, stats, { window: parsed.window, apply: parsed.apply }, rules.length, applied),
-      context: buildContext(proposals, applied ?? []),
+      text: formatReport(proposals, stats, { window: parsed.window, apply: parsed.apply, lang: io.lang }, rules.length, applied),
+      context: buildContext(proposals, applied ?? [], io.lang),
     }
   } catch (e) {
     return { text: `[correct] internal error: ${e instanceof Error ? e.message : String(e)}`, context: [] }
