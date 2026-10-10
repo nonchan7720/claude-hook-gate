@@ -116,7 +116,7 @@ export function projectFeedbackDir(io: Io, projectDir?: string): string {
 export const violationsLogPath = (io: Io): string => join(feedbackDir(io), '.violations.jsonl')
 
 // ---- frontmatter 読み込み ----
-const FRONTMATTER_RE = /^---\s*\n([\s\S]*?\n)---\s*\n?/
+export const FRONTMATTER_RE = /^---\s*\n([\s\S]*?\n)---\s*\n?/
 const BODY_STOP_RE = /\*\*(Why|言い訳|How to apply)[:：]?\*\*/
 
 /** frontmatter のテキスト（YAML のサブセット）を読む。 */

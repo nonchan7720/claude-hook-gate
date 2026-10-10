@@ -63,6 +63,8 @@ declare module 'claude-code' {
       stat(path: string): Promise<FsStat>
     }
     process: { run(argv: readonly string[], init?: ProcessRunInit): Promise<ProcessRunResult> }
+    /** スラッシュコマンドの登録。 */
+    command: { register(command: { name: string; description: string; argumentHint?: string }): Promise<unknown> }
   }
 
   /** hook に渡るイベント入力（classic hook は stdin の JSON、tool.call はそのツールの入力）。 */
@@ -93,6 +95,7 @@ declare module 'claude-code' {
 
   export interface On {
     (event: 'ui.render', matcher: { component: 'AbovePrompt' }, hook: RenderHook): unknown
+    (event: 'command.run', matcher: { command: string }, hook: Hook): unknown
     (event: string, hook: Hook): unknown
   }
   export type Register = (on: On, options: PluginOptions) => unknown

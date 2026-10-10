@@ -14,6 +14,7 @@ const statusLog: Array<string | undefined> = []
 const invalidateLog: string[] = []
 const runLog: string[][] = []
 const timerLog: number[] = []
+const commandLog: Array<{ name: string; description: string }> = []
 // true の間、遅延表示の待ち時間（$.clock.every）は既に経過したものとして扱う。
 let elapsed = false
 // 完了通知は最初に osascript で前面ウィンドウを調べるので、その実行回数を通知を試みた回数として数える
@@ -30,6 +31,7 @@ async function withMod<T>(
   invalidateLog.length = 0
   runLog.length = 0
   timerLog.length = 0
+  commandLog.length = 0
   elapsed = false
   try {
     const m = loadMod(register, {
@@ -39,6 +41,7 @@ async function withMod<T>(
       invalidateLog,
       runLog,
       timerLog,
+      commandLog,
       elapsed: () => elapsed,
       stubCommands: ['osascript', 'terminal-notifier'],
       env: { HOME: home, CLAUDE_FEEDBACK_DIR: feedback, DOGWOOD_BIN: MISSING_DOGWOOD_BIN },
@@ -73,6 +76,20 @@ describe('SessionStart', () => {
       writeChangedFiles(proj, 'sess-1', 'a.py')
       await m.call('classic.SessionStart', { source: 'resume', session_id: 'sess-1' })
       expect(exists(path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1.txt'))).toBe(true)
+    }))
+})
+
+describe('/correct', () => {
+  test('session.start registers the command', () =>
+    withMod(async (m) => {
+      await m.call('session.start', {})
+      expect(commandLog.map((c) => c.name)).toEqual(['correct'])
+    }))
+
+  test('command.run returns the report text', () =>
+    withMod(async (m) => {
+      const r = (await m.call('command.run', { command: 'correct', args: '' })) as Out
+      expect(String(r.text).startsWith('[correct]')).toBe(true)
     }))
 })
 

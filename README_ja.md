@@ -51,6 +51,31 @@ flowchart LR
   C --> SG
 ```
 
+## コマンド
+
+### `/correct`
+
+繰り返す間違いを、最も効く層で直すためのコマンドです。feedback ルール（`~/.claude/feedback/*.md` と `<project>/.claude/feedback/*.md`）と違反ログ（`~/.claude/feedback/.violations.jsonl`）を集計し、締め直しの提案を出します。`src/register.ts` が `session.start` で登録し、ロジックは `src/correct.ts` にあります。
+
+```
+/correct [--window 30d] [--min 2] [apply]
+```
+
+- `--window`: 違反を数える期間。`Nd` または `Nh`（既定 `30d`）。
+- `--min`: 提案を出す窓内の最小違反回数（既定 `2`）。
+- `apply`: `bump` の提案をルールファイルに書き込みます（下記）。付けなければ何も変更しません。
+
+不明な引数は無視します。提案は次の 4 種類で、この順に並びます。
+
+| 種類 | 条件 | 提案 |
+| --- | --- | --- |
+| `bump` | 有効なルールの窓内の違反が `--min` 回以上。 | `count` 1〜2 は 3 へ（確定ルールに昇格）。`count` 3〜4 で窓内の `ask` / `block` が `--min` 回以上なら 5（`deny`）へ。`count` 5 以上は提案しません。 |
+| `enforce` | 有効なルールが `count >= 3` なのに `enforce` が無い。hook が検知できず、違反ログにも出ない。 | `enforce` の追加。4 イベント分の雛形を添えます。 |
+| `stale` | 有効なルールが `count >= 3` で `enforce` もあるが、違反ログに一度も出ていない。 | `enforce` が効いているか、ルールが古くなっていないかの確認。 |
+| `expired` | `expires` / `projects` / `when_exists` のいずれかで無効になっているルールファイル。 | 削除または更新。 |
+
+`apply` が書き換えるのは、`bump` 対象ファイルの frontmatter 内の `count:` 行だけです。変更したファイルの一覧を表示し、それ以外は一切触りません。`enforce`（と `stale` / `expired`）は提案のみで、Claude はそれをユーザーに提示し、ファイルを書き換える前に確認します。
+
 ## インストール
 
 ```

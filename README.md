@@ -51,6 +51,31 @@ flowchart LR
   C --> SG
 ```
 
+## Commands
+
+### `/correct`
+
+Fixes a repeated mistake at the layer that works best. It aggregates the feedback rules (`~/.claude/feedback/*.md` and `<project>/.claude/feedback/*.md`) and the violation log (`~/.claude/feedback/.violations.jsonl`), then proposes how to tighten them. The command is registered on `session.start` by `src/register.ts`; the logic is in `src/correct.ts`.
+
+```
+/correct [--window 30d] [--min 2] [apply]
+```
+
+- `--window`: how far back to count violations, `Nd` or `Nh` (default `30d`).
+- `--min`: the minimum number of violations in the window before a proposal is made (default `2`).
+- `apply`: write the `bump` proposals to the rule files (see below). Without it nothing is changed.
+
+Unknown arguments are ignored. There are four kinds of proposals, listed in this order:
+
+| Kind | When | Proposal |
+| --- | --- | --- |
+| `bump` | An active rule has at least `--min` violations in the window. | `count` 1-2: raise to 3 (confirmed rule). `count` 3-4 with at least `--min` `ask` / `block` violations in the window: raise to 5 (`deny`). `count` >= 5 is never proposed. |
+| `enforce` | An active rule has `count >= 3` but no `enforce`, so no hook can detect it (and the violation log never sees it). | Add `enforce` entries; a template for the four events is shown. |
+| `stale` | An active rule has `count >= 3` and `enforce`, but has never appeared in the violation log. | Check that the `enforce` works and the rule is not out of date. |
+| `expired` | A rule file is inactive because of `expires`, `projects` or `when_exists`. | Delete or update it. |
+
+`apply` rewrites only the `count:` line inside the frontmatter of the `bump` rules, and lists the changed files. Nothing else in the files is touched. `enforce` (and `stale` / `expired`) are proposals only: Claude is told to show them to you and to ask before editing any file.
+
 ## Install
 
 ```
