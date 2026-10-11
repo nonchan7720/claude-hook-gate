@@ -10271,6 +10271,7 @@ var GRACE_MS = 5000;
 var MAX_WAIT_MS = 600000;
 var MAX_ROUNDS = 20;
 var POLL_SECONDS = "0.05";
+var DEAD_GRACE_MS = 1500;
 function hashKey(key) {
   let h1 = 3735928559;
   let h2 = 1103547991;
@@ -10291,17 +10292,25 @@ async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
   const keyPrefix = `${hashKey(key)}.`;
   const ownLock = join(dir, `${shareId(key, mine)}.run`);
   const resultOf = (lock) => `${lock.slice(0, -".run".length)}.result.json`;
-  const claim = async () => (await io.run(["sh", "-c", 'mkdir -p "$1" && mkdir "$2"', "sh", dir, ownLock])).exitCode === 0;
+  const serialLock = join(dir, `${hashKey(hooks.serial ?? key)}.serial`);
+  const mkdirAtomic = async (path) => (await io.run(["sh", "-c", 'mkdir -p "$1" && mkdir "$2"', "sh", dir, path])).exitCode === 0;
+  const claim = () => mkdirAtomic(ownLock);
   const lead = async () => {
     const resultFile = resultOf(ownLock);
-    await io.writeFile(join(ownLock, "info.json"), JSON.stringify({ started: await io.now(), timeoutMs, key, files: mine }));
-    await io.removeFiles([resultFile]);
     try {
-      const outcome = await execute();
-      await io.writeFile(resultFile, JSON.stringify({ key, files: mine, ...outcome }));
-      return outcome;
+      const started = await io.now();
+      await io.writeFile(join(ownLock, "info.json"), JSON.stringify({ started, timeoutMs, key, files: mine }));
+      await io.writeFile(join(serialLock, "info.json"), JSON.stringify({ started, timeoutMs }));
+      await io.removeFiles([resultFile]);
+      try {
+        const outcome = await execute([join(serialLock, "pid"), join(ownLock, "pid")]);
+        await io.writeFile(resultFile, JSON.stringify({ key, files: mine, ...outcome }));
+        return outcome;
+      } finally {
+        await io.removeTree(ownLock);
+      }
     } finally {
-      await io.removeTree(ownLock);
+      await io.removeTree(serialLock);
     }
   };
   const readInfo = async (lock) => {
@@ -10321,8 +10330,20 @@ async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
     }
   };
   const remainingMs = async (lock, info) => {
-    const started = info?.started ?? (await io.stat(lock))?.mtimeMs ?? await io.now();
-    return started + (info?.limit ?? 0) + GRACE_MS - await io.now();
+    const now = await io.now();
+    const started = info?.started ?? (await io.stat(lock))?.mtimeMs ?? now;
+    const left = started + (info?.limit ?? 0) + GRACE_MS - now;
+    if (left <= 0)
+      return left;
+    const pid = (await io.readFile(join(lock, "pid")))?.trim();
+    if (pid) {
+      if (/^\d+$/.test(pid) && (await io.run(["sh", "-c", 'kill -0 "$1" 2>/dev/null', "sh", pid])).exitCode === 0)
+        return left;
+      const polls = Math.ceil(DEAD_GRACE_MS / (Number(POLL_SECONDS) * 1000));
+      const script = `i=0; while [ -d "$1" ] && [ "$i" -lt ${polls} ]; do sleep ${POLL_SECONDS}; i=$((i+1)); done; [ ! -d "$1" ]`;
+      return (await io.run(["sh", "-c", script, "sh", lock])).exitCode === 0 ? GRACE_MS : 0;
+    }
+    return info && now - started > GRACE_MS ? 0 : left;
   };
   const covers = (theirs) => theirs !== undefined && mine.every((f) => theirs.includes(f));
   const findRunning = async () => {
@@ -10362,6 +10383,16 @@ async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
     }
   };
   let announced = false;
+  const announce = async () => {
+    if (announced)
+      return;
+    announced = true;
+    await hooks.onWait?.();
+  };
+  const waitGone = async (path, left) => {
+    const script = `while [ -d "$1" ]; do if [ -s "$1/pid" ] && ! kill -0 "$(cat "$1/pid")" 2>/dev/null; then exit 3; fi; sleep ${POLL_SECONDS}; done`;
+    await io.run(["sh", "-c", script, "sh", path], { timeoutMs: Math.min(Math.max(left, 1), MAX_WAIT_MS) });
+  };
   for (let round = 0;round < MAX_ROUNDS; round++) {
     const found = await findRunning();
     if (!found.lock && found.pending) {
@@ -10371,27 +10402,48 @@ async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
     }
     let target = found.lock;
     if (!target) {
-      if (await claim())
+      if (!await mkdirAtomic(serialLock)) {
+        const info = await readInfo(serialLock);
+        const left = await remainingMs(serialLock, info);
+        if (left <= 0) {
+          await io.removeTree(serialLock);
+          continue;
+        }
+        if (!info) {
+          if (!await io.exists(serialLock))
+            continue;
+          await io.run(["sleep", POLL_SECONDS]);
+          round--;
+          continue;
+        }
+        const again = await findRunning();
+        if (!again.lock) {
+          await announce();
+          await waitGone(serialLock, left);
+          continue;
+        }
+        target = again.lock;
+      } else if (await claim()) {
         return { outcome: await lead(), shared: false };
-      target = ownLock;
+      } else {
+        await io.removeTree(serialLock);
+        target = ownLock;
+      }
     }
     const left = await remainingMs(target, await readInfo(target));
     if (left <= 0) {
       await io.removeTree(target);
       continue;
     }
-    if (!announced) {
-      announced = true;
-      await hooks.onWait?.();
-    }
-    await io.run(["sh", "-c", `while [ -d "$1" ]; do sleep ${POLL_SECONDS}; done`, "sh", target], { timeoutMs: Math.min(Math.max(left, 1), MAX_WAIT_MS) });
+    await announce();
+    await waitGone(target, left);
     if (await io.exists(target))
       continue;
     const outcome = await readOutcome(resultOf(target));
     if (outcome)
       return { outcome, shared: true };
   }
-  return { outcome: await execute(), shared: false };
+  return { outcome: await execute([]), shared: false };
 }
 
 // src/gate.ts
@@ -10498,6 +10550,7 @@ function shareKey(root, cwd, cmd, env) {
   const shared = Object.entries(env).filter(([k]) => !AGENT_ENV_KEYS.includes(k) && k !== FILES_ENV_KEY).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   return JSON.stringify([root, cwd, cmd, shared]);
 }
+var serialKey = (name, cmd) => name ? `name:${name}` : `cmd:${cmd}`;
 var shareFiles = (env, files) => files && env[FILES_ENV_KEY] ? shellSplit(env[FILES_ENV_KEY]) : [];
 var isParallel = (item) => isDict(item) && ("parallel" in item);
 function summarizeCmds(cmds) {
@@ -10886,7 +10939,7 @@ class Gate {
       return null;
     return new PolicyContext(this, rootDir, resolved.policy, resolved.schema, resolved.isDefault, state);
   }
-  async runCmd(cmd, cwd, timeout, name, extraEnv) {
+  async runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles = []) {
     const uid = `${Math.floor(await this.io.now() / 1000)}-${logSeq++}`;
     const logpath = join(this.logDir, `${slug(name || cmd)}.${uid}.log`);
     const header = `$ ${cmd}  (cwd: ${cwd})
@@ -10895,7 +10948,8 @@ class Gate {
       return;
     });
     const started = await this.io.now();
-    const r = await this.io.run(["sh", "-c", `exec 2>&1; ${cmd}`], {
+    const writePid = pidFiles.map((f) => `{ echo $$ > ${shellQuote(f)}; } 2>/dev/null; `).join("");
+    const r = await this.io.run(["sh", "-c", `${writePid}exec 2>&1; ${cmd}`], {
       cwd,
       env: { ...this.baseEnv, ...extraEnv },
       timeoutMs: Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS)
@@ -10918,8 +10972,9 @@ class Gate {
       return this.runCmd(cmd, cwd, timeout, name, extraEnv);
     const env = { ...this.baseEnv, ...extraEnv };
     const key = shareKey(scope.root, cwd, cmd, env);
-    const r = await runShared(this.io, key, shareFiles(env, scope.files !== false), Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS), () => this.runCmd(cmd, cwd, timeout, name, extraEnv), {
-      onWait
+    const r = await runShared(this.io, key, shareFiles(env, scope.files !== false), Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS), (pidFiles) => this.runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles), {
+      onWait,
+      serial: serialKey(name, cmd)
     });
     if (!r.shared)
       return r.outcome;

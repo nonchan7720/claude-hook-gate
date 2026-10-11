@@ -57,7 +57,9 @@
 //              name はログファイル名に使う識別名（省略時は cmd から生成）。share: false を書くと、他のエージェントが
 //              同じキー（root・cwd・cmd・渡す環境変数。エージェント識別用の変数と CLAUDE_GATE_FILES は除く）を
 //              実行中でも待たずに自分で実行する（既定は共有: 進行中の実行があれば起動せず完了を待って同じ結果を
-//              受け取る。ただし進行中の実行の対象ファイルが自分の対象ファイルをすべて含むときだけ。src/shared-run.ts）。
+//              受け取る。ただし進行中の実行の対象ファイルが自分の対象ファイルをすべて含むときだけ。含まないときや
+//              環境変数・root・cwd が違うときも、name（無ければ cmd）が同じ実行が走っている間は起動せず、終わるのを待って
+//              から実行する＝同じコマンドは直列。src/shared-run.ts）。
 //              files: false を書くと、そのコマンドは対象ファイルを使わないものとして、共有の判定上の対象ファイルを
 //              空として扱う（対象ファイルが違っても共有される）。CLAUDE_GATE_FILES 自体は従来どおり渡る。
 //              share: false と併記した場合は share: false が優先される。
@@ -282,6 +284,13 @@ export function shareKey(root: string, cwd: string, cmd: string, env: Env): stri
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
   return JSON.stringify([root, cwd, cmd, shared])
 }
+
+/**
+ * 直列化の単位。name があれば name、無ければ cmd。同じものは、root・cwd・環境変数（フェーズなど）・対象ファイルが
+ * 違っても、プロジェクト（.gate-status）の中で同時に 1 本しか走らせない。重いコマンドをエージェントの数だけ同時に
+ * 走らせると CPU の取り合いで全員が何倍も遅くなるため。
+ */
+export const serialKey = (name: string | null | undefined, cmd: string): string => (name ? `name:${name}` : `cmd:${cmd}`)
 
 /** 共有の判定に使う対象ファイル一覧。files が false（対象ファイルを使わないコマンド）なら空。 */
 export const shareFiles = (env: Env, files: boolean): string[] => (files && env[FILES_ENV_KEY] ? shellSplit(env[FILES_ENV_KEY]) : [])
@@ -742,13 +751,18 @@ export class Gate {
     timeout: number,
     name?: string | null,
     extraEnv?: Env,
+    pidFiles: readonly string[] = [],
   ): Promise<{ out: string; ok: boolean; timedOut: boolean; logpath: string }> {
     const uid = `${Math.floor((await this.io.now()) / 1000)}-${logSeq++}`
     const logpath = join(this.logDir, `${slug(name || cmd)}.${uid}.log`)
     const header = `$ ${cmd}  (cwd: ${cwd})\n`
     await this.io.writeFile(logpath, header).catch(() => undefined)
     const started = await this.io.now()
-    const r = await this.io.run(['sh', '-c', `exec 2>&1; ${cmd}`], {
+    // pidFiles には、コマンドを走らせるシェルの PID を書く（コマンドはこのシェルの中で走るので、PID はコマンドの終了まで
+    // 変わらない）。共有・直列化のロックの生死を、hook ではなくコマンドの生死で判定するため（src/shared-run.ts）。
+    // 書けなくても（ロックが消えた後など）コマンドの出力は汚さない。コマンドの位置引数（$@）は変えない。
+    const writePid = pidFiles.map((f) => `{ echo $$ > ${shellQuote(f)}; } 2>/dev/null; `).join('')
+    const r = await this.io.run(['sh', '-c', `${writePid}exec 2>&1; ${cmd}`], {
       cwd,
       env: { ...this.baseEnv, ...extraEnv },
       timeoutMs: Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS),
@@ -784,9 +798,10 @@ export class Gate {
       key,
       shareFiles(env, scope.files !== false),
       Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS),
-      () => this.runCmd(cmd, cwd, timeout, name, extraEnv),
+      (pidFiles) => this.runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles),
       {
         onWait,
+        serial: serialKey(name, cmd),
       },
     )
     if (!r.shared) return r.outcome

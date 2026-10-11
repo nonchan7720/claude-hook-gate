@@ -1,7 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { runShared, type SharedOutcome, shareId } from '../src/shared-run.ts'
+import { hashKey, runShared, type SharedOutcome, shareId } from '../src/shared-run.ts'
 import { makeIo, waitForSharedLock, withTmp } from './helpers/node-io.ts'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -140,6 +141,157 @@ describe('runShared with file lists', () => {
       const r = await overlap(proj, [], ['a.py'])
       expect(r.runs).toBe(2)
       expect(r.waiter.shared).toBe(false)
+    }))
+
+  test('runs that cannot be shared do not overlap: the second starts after the first ends', () =>
+    withTmp(async (proj) => {
+      let active = 0
+      let peak = 0
+      let runs = 0
+      const execute = async () => {
+        runs++
+        peak = Math.max(peak, ++active)
+        await sleep(300)
+        active--
+        return outcome(`run${runs}`)
+      }
+      const waited: string[] = []
+      const call = (files: string[]) =>
+        runShared(makeIo({ projectDir: proj }), 'k', files, 10_000, execute, {
+          onWait: () => {
+            waited.push(files.join(','))
+          },
+        })
+      await Promise.all([call(['a.py']), call(['b.py']), call(['c.py'])])
+      expect(runs).toBe(3)
+      expect(peak).toBe(1)
+      expect(waited).toHaveLength(2)
+    }))
+
+  test('different keys with the same serial do not overlap', () =>
+    withTmp(async (proj) => {
+      let active = 0
+      let peak = 0
+      const execute = async () => {
+        peak = Math.max(peak, ++active)
+        await sleep(300)
+        active--
+        return outcome('x')
+      }
+      await Promise.all(['k1', 'k2'].map((k) => runShared(makeIo({ projectDir: proj }), k, [], 10_000, execute, { serial: 's' })))
+      expect(peak).toBe(1)
+    }))
+
+  test('a stale serial lock is taken over', () =>
+    withTmp(async (proj) => {
+      const shared = path.join(proj, '.claude', '.gate-status', 'shared')
+      const lock = path.join(shared, `${hashKey('k')}.serial`)
+      fs.mkdirSync(lock, { recursive: true })
+      fs.writeFileSync(path.join(lock, 'info.json'), JSON.stringify({ started: 1000, timeoutMs: 1000 }))
+      const r = await runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => outcome('mine'))
+      expect(r.outcome.out).toBe('mine')
+      expect(fs.existsSync(lock)).toBe(false)
+    }))
+
+  // ESC などで hook が止められ、ロックが残ったままになった状態を作る。
+  const leftLock = (proj: string, serial: string, info: Record<string, unknown>, pid?: number) => {
+    const lock = path.join(proj, '.claude', '.gate-status', 'shared', `${hashKey(serial)}.serial`)
+    fs.mkdirSync(lock, { recursive: true })
+    fs.writeFileSync(path.join(lock, 'info.json'), JSON.stringify(info))
+    if (pid !== undefined) fs.writeFileSync(path.join(lock, 'pid'), `${pid}\n`)
+    return lock
+  }
+
+  test('a serial lock whose command process is gone is taken over at once, well before its timeout', () =>
+    withTmp(async (proj) => {
+      const dead = spawnSync('sh', ['-c', 'echo $$']).stdout.toString().trim()
+      const lock = leftLock(proj, 'k', { started: Date.now(), timeoutMs: 600_000 }, Number(dead))
+      const t0 = Date.now()
+      const r = await runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => outcome('mine'))
+      expect(r.outcome.out).toBe('mine')
+      expect(Date.now() - t0).toBeLessThan(3000)
+      expect(fs.existsSync(lock)).toBe(false)
+    }))
+
+  test('a serial lock without a pid long after its start is taken over', () =>
+    withTmp(async (proj) => {
+      leftLock(proj, 'k', { started: Date.now() - 60_000, timeoutMs: 600_000 })
+      const t0 = Date.now()
+      const r = await runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => outcome('mine'))
+      expect(r.outcome.out).toBe('mine')
+      expect(Date.now() - t0).toBeLessThan(3000)
+    }))
+
+  test('a serial lock whose command is still running is waited for until the command ends', () =>
+    withTmp(async (proj) => {
+      const child = spawn('sleep', ['1'])
+      const lock = leftLock(proj, 'k', { started: Date.now(), timeoutMs: 600_000 }, child.pid)
+      let endedAt = 0
+      child.on('exit', () => {
+        endedAt = Date.now()
+      })
+      let startedAt = 0
+      const r = await runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => {
+        startedAt = Date.now()
+        return outcome('mine')
+      })
+      expect(r.outcome.out).toBe('mine')
+      expect(endedAt).toBeGreaterThan(0)
+      expect(startedAt).toBeGreaterThanOrEqual(endedAt)
+      expect(fs.existsSync(lock)).toBe(false)
+    }))
+
+  test('when no lock can be created, it gives up coordinating and runs the command itself', () =>
+    withTmp(async (proj) => {
+      // shared/ がファイルなので mkdir できない。待ち続けず、ラウンドが尽きたら自分で実行する。
+      fs.mkdirSync(path.join(proj, '.claude', '.gate-status'), { recursive: true })
+      fs.writeFileSync(path.join(proj, '.claude', '.gate-status', 'shared'), '')
+      const r = await Promise.race([
+        runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => outcome('mine')),
+        sleep(4000).then(() => undefined),
+      ])
+      expect(r?.outcome.out).toBe('mine')
+      expect(r?.shared).toBe(false)
+    }))
+
+  test('a leader whose command just ended but has not yet written its result is not taken over', () =>
+    withTmp(async (proj) => {
+      // 実行側のコマンドは終わった（PID は死んでいる）が、結果を書いてロックを外すのはこれから、という瞬間を作る。
+      const dead = Number(spawnSync('sh', ['-c', 'echo $$']).stdout.toString().trim())
+      const shared = path.join(proj, '.claude', '.gate-status', 'shared')
+      const id = shareId('k', ['a.py'])
+      const run = path.join(shared, `${id}.run`)
+      fs.mkdirSync(run, { recursive: true })
+      fs.writeFileSync(path.join(run, 'info.json'), JSON.stringify({ started: Date.now(), timeoutMs: 600_000, key: 'k', files: ['a.py'] }))
+      fs.writeFileSync(path.join(run, 'pid'), `${dead}\n`)
+      const serial = leftLock(proj, 'k', { started: Date.now(), timeoutMs: 600_000 }, dead)
+      const finish = sleep(400).then(() => {
+        const leader = outcome('leader')
+        fs.writeFileSync(path.join(shared, `${id}.result.json`), JSON.stringify({ key: 'k', files: ['a.py'], ...leader }))
+        fs.rmSync(run, { recursive: true })
+        fs.rmSync(serial, { recursive: true })
+      })
+      let runs = 0
+      const r = await runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => {
+        runs++
+        return outcome('mine')
+      })
+      await finish
+      expect(runs).toBe(0)
+      expect(r.shared).toBe(true)
+      expect(r.outcome.out).toBe('leader')
+    }))
+
+  test('the leader passes pid files inside both locks to execute, and both locks are gone afterwards', () =>
+    withTmp(async (proj) => {
+      let got: string[] = []
+      await runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async (pidFiles) => {
+        got = pidFiles
+        return outcome('x')
+      })
+      expect(got.map((f) => path.basename(path.dirname(f)).split('.').pop())).toEqual(['serial', 'run'])
+      expect(got.every((f) => path.basename(f) === 'pid')).toBe(true)
+      expect(fs.readdirSync(path.join(proj, '.claude', '.gate-status', 'shared')).filter((n) => !n.endsWith('.result.json'))).toEqual([])
     }))
 
   test('a run with a different key is not joined even when the files match', () =>

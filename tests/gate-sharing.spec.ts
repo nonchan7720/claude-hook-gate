@@ -160,6 +160,61 @@ describe('the share key', () => {
       expect(count(marker)).toBe(2)
     }))
 
+  test('a differing CLAUDE_GATE_FILES runs twice, one after the other', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const c = `echo start >> ${marker}; sleep 0.4; echo end >> ${marker}`
+      await Promise.all([run(proj, 'a1', c, proj, filesEnv(['x.py'])), run(proj, 'a2', c, proj, filesEnv(['y.py']))])
+      expect(fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean)).toEqual(['start', 'end', 'start', 'end'])
+    }))
+
+  test('the same cmd in the rules phase of one agent and the checks phase of another runs one after the other', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const c = `echo start >> ${marker}; sleep 0.4; echo end >> ${marker}`
+      const g = (id: string, phase: string) =>
+        new Gate(makeIo({ projectDir: proj, env: { DOGWOOD_BIN: MISSING_DOGWOOD_BIN } }), { sessionId: 'sess1', agentId: id, phase }).execOne(
+          'l',
+          c,
+          proj,
+          10,
+          '',
+          'n',
+          {},
+          { root: proj },
+        )
+      await Promise.all([g('a1', 'rules'), g('a2', 'checks')])
+      expect(fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean)).toEqual(['start', 'end', 'start', 'end'])
+    }))
+
+  test('different cmds with the same name run one after the other, even in different roots', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const c = (tag: string) => `echo start >> ${marker}; sleep 0.4; echo end >> ${marker} # ${tag}`
+      const g = (id: string, tag: string, root: string) => agentGate(proj, id).execOne('l', c(tag), proj, 10, '', 'go-test', filesEnv(['x.py']), { root })
+      await Promise.all([g('a1', 'a', proj), g('a2', 'b', path.join(proj, 'other'))])
+      expect(fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean)).toEqual(['start', 'end', 'start', 'end'])
+    }))
+
+  test('the command pid is written into the lock while it runs', () =>
+    withTmp(async (proj) => {
+      const shared = path.join(proj, '.claude', '.gate-status', 'shared')
+      const seen = path.join(proj, 'seen.txt')
+      // 実行中のコマンド自身から、ロックの pid が自分の PID（$$）と一致するかを書き出す。
+      const c = `for f in ${shared}/*.serial/pid; do [ "$(cat "$f")" = "$$" ] && echo same >> ${seen}; done; true`
+      await agentGate(proj, 'a1').execOne('l', c, proj, 10, '', 'n', filesEnv(['x.py']), { root: proj })
+      expect(fs.readFileSync(seen, 'utf8').trim()).toBe('same')
+    }))
+
+  test('share: false is not serialized', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const c = `echo start >> ${marker}; sleep 0.4; echo end >> ${marker}`
+      const g = (id: string) => agentGate(proj, id).execOne('l', c, proj, 10, '', 'n', filesEnv(['x.py']), { root: proj, share: false })
+      await Promise.all([g('a1'), g('a2')])
+      expect(fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean).slice(0, 2)).toEqual(['start', 'start'])
+    }))
+
   test('a differing root runs twice', () =>
     withTmp(async (proj) => {
       const marker = path.join(proj, 'm.txt')
