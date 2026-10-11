@@ -18,12 +18,16 @@ The hooks are registered in `src/register.ts` (bundled into `hooks/register.js` 
 | UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | Adds the rules file (your `rulesFile` if it exists, otherwise the bundled `rules/feedback_rules.md`, or `rules/feedback_rules.en.md` when the language is English) and the confirmed feedback rules (`count >= 3`) to the context. |
 | PreToolUse (Bash / Edit / Write / MultiEdit) | `src/feedback-guard.ts` | Evaluates `pre_bash` / `pre_edit` enforce entries; denies, asks or warns by `count`. |
 | PostToolUse (Write / Edit / MultiEdit) | `src/record-changes.ts`, `src/feedback-post-edit.ts`, then `src/stop-test-gate.ts` (`rules`) | Records changed files, evaluates `post_edit` enforce entries against the edited file as a whole (blocks or warns by `count`), then runs the matching rules of `.claude/gate.yaml` (via `src/gate.ts`). |
-| PreToolUse (Bash) | `src/bash-changes.ts` (`bashStarted`), before `feedback-guard` | Notes when the command started (`bash_started.<session>--<tool_use_id>.json`). |
-| PostToolUse (Bash) | `src/bash-changes.ts`, then `src/stop-test-gate.ts` (`rules`) | Records only the files the command actually rewrote (git-modified or untracked files, and files of commits made during the command, whose mtime is at or after the command start; in the cwd's working tree and in each worktree under `.claude/worktrees/`), then runs the matching rules only if something was recorded. Git history / working-tree operations (rebase / checkout / merge etc.) are never recorded. |
+| PreToolUse (Bash) | `src/bash-changes.ts` (`bashStarted`), before `feedback-guard` | Notes when the command started (`bash_started.<session>--<tool_use_id>.json`): under `.claude/.gate-status/` when the project has `.claude/gate.yaml`; otherwise under `~/.claude/feedback/.bash_started/` (the feedback state directory, next to `.ask_state`), and only when an active feedback rule has a `post_edit` / `pre_edit` enforce entry, so a project without `gate.yaml` gets no state files in its working tree. |
+| PostToolUse (Bash) | `src/bash-changes.ts`, `src/feedback-bash-edit.ts`, then `src/stop-test-gate.ts` (`rules`) | Finds the files the command actually rewrote (git-modified or untracked files, and files of commits made during the command, whose mtime is at or after the command start; in the cwd's working tree and in each worktree under `.claude/worktrees/`), so writing with a heredoc, `python`, `sed -i` and the like does not skip the checks that Edit / Write get. Each of those files is checked against the `post_edit` enforce entries as a whole file, like after Edit / Write, and against the `pre_edit` entries that can be judged afterwards (see below); the results of all files are merged into one block / warn. Then, only with `.claude/gate.yaml`, the files are recorded and the matching rules run if something was recorded. The feedback checks work without `gate.yaml`. Git history / working-tree operations (rebase / checkout / merge etc.) are never checked nor recorded. |
 | PreToolUse (Agent / SendMessage), opt-in | `src/agent-launch-guard.ts` | Only when `agentLaunchGuard` is `true`: asks before sending instructions to a subagent, showing the full text. |
 | Notification | `src/notification.ts` (`notify`) | Desktop notification when Claude waits for you (needs `terminal-notifier`, macOS). |
 | Stop | `src/all-stop.ts` | Runs, in order: the gate `checks` phase (reruns the rules that failed and were not fixed, then the reserved consistency checks), `src/feedback-stop-check.ts`, then the `stop` notification. |
 | SubagentStop | gate `checks` phase, `src/feedback-stop-check.ts` | Same gate and `stop_check` rules for subagents. |
+
+### Files written by Bash
+
+A Bash command cannot be checked by `pre_edit` before it runs, since what it will write is unknown until then. After the command, `src/feedback-bash-edit.ts` evaluates the `pre_edit` entries on each file it rewrote with the same conditions: `path` / `exclude_path`, `absent_sibling` / `absent_glob` (the test file must exist once the command is done, so writing the test in the same command is fine), and `when` / `unless` against the content the command wrote: for a file git tracks, the lines added relative to `HEAD` (or, when the command committed them, the lines added by the commits made since it started); for an untracked file (a new file, or a file outside git), the whole content, as with the `content` of Write. As the file is already written, `deny` / `ask` become a PostToolUse `block` (Claude is told to fix the file), and the message says the rule was only caught after the command. An `ask` already raised for the same rule and file in this session is downgraded to `warn`, as with Edit. Warnings and blocks carry the file path. The checks only see files git can list (tracked, or untracked and not ignored); files written outside a git working tree, or ignored by `.gitignore`, are not checked.
 
 ### Agent launch guard (optional)
 
@@ -35,6 +39,18 @@ The hooks are registered in `src/register.ts` (bundled into `hooks/register.js` 
 Anything else passes through to the normal permission flow. The target agent types and the allowed recipients are the `ASK_AGENT_TYPES` and `ALLOW_RECIPIENTS` arrays at the top of `src/agent-launch-guard.ts`.
 
 To enable it, turn on `agentLaunchGuard` on the settings screen shown when you install the plugin with `/plugin`, or change it later in the `/config` menu (the plugin's `agentLaunchGuard` row).
+
+### Automatic count increase
+
+When a hook (`pre_bash` / `pre_edit` on PreToolUse, `post_edit` on PostToolUse, `stop_check` on Stop / SubagentStop) detects a feedback rule violation, it raises that rule's `count` by 1 at the same time it writes the violation log. Repeating the same violation escalates enforcement from warn to ask / block to deny, instead of the rule staying at `count: 1` forever. Violations found when PostToolUse(Bash) checks files written by Bash (heredoc, `python`, `sed -i`, ...; `post_edit` and the after-the-command `pre_edit` described in "Files written by Bash" above) count too, the same as for Edit / Write.
+
+- Only the `count: N` line inside the frontmatter of the rule file actually used is rewritten (when the global and project directories both have a rule with that name, the project one). The line must be a plain number; a rule without a numeric `count` line is left alone. The new text is written to a temporary file in the same directory and moved into place with `mv`.
+- Increases are limited per session and rule name: within one session a rule is raised at most once, however often it is violated (multiple matching `enforce` entries, repeated Stop blocks). A violation in a later session raises it again. The rules already raised are recorded in `~/.claude/feedback/.count_state/<session_id>.json`; calls without a `session_id` never raise a count.
+- The cap is `5` (the count that means deny when no `severity` is given); counts at or above it are not raised.
+- The current decision still uses the count from before the increase; the new enforcement applies from the next violation. When a count is raised, a line saying `count` went from N to N+1 is added to the deny / ask / block reason (or to stderr for warn), so the model sees it too.
+- A failed write never stops the hook.
+
+To turn it off, set `autoCount` in `userConfig` to `false` (default `true`; on the settings screen shown by `/plugin` at install time, or later in `/config`).
 
 ### Language of the messages
 
@@ -50,9 +66,12 @@ flowchart LR
   P[UserPromptSubmit] --> I[feedback-inject]
   T[PreToolUse: Bash / Edit / Write / MultiEdit] --> G[feedback-guard]
   T2["PreToolUse: Agent / SendMessage<br/>(agentLaunchGuard = true)"] --> AL[agent-launch-guard]
-  E[PostToolUse] --> R[record-changes]
+  E[PostToolUse: Edit / Write / MultiEdit] --> R[record-changes]
   R --> PE[feedback-post-edit]
   PE --> S[stop-test-gate: rules]
+  EB[PostToolUse: Bash] --> BC[bash-changes]
+  BC --> BE["feedback-bash-edit<br/>(post_edit + pre_edit)"]
+  BE --> S
   S --> SG[gate]
   X[Stop] --> A[all-stop]
   A --> C[stop-test-gate: checks]
@@ -86,6 +105,8 @@ Unknown arguments are ignored. There are five kinds of proposals, listed in this
 
 `apply` rewrites only the `count:` line inside the frontmatter of the `bump` rules, and lists the changed files. Nothing else in the files is touched. `enforce` (and `stale` / `expired`) are proposals only: Claude is told to show them to you and to ask before editing any file.
 
+With the automatic increase (`autoCount`) on, `count` goes up by 1 per session in which the rule is violated. A `bump` proposal instead jumps to 3 or 5 based on the violations in the window; it always starts from the current `count`, and `apply` only rewrites a file whose `count` still matches the proposal, so the two never add up twice.
+
 ## Install
 
 ```
@@ -109,7 +130,7 @@ Nothing to install: the hooks are plain TypeScript, bundled into one JavaScript 
 - <a id="broken-rules"></a>Broken rules: one broken rule file never turns off the other rules. A file whose frontmatter is not valid YAML is skipped on its own. An `enforce` that is not a list (for example a forgotten `- `) is treated as empty, and an `enforce` entry that is not a mapping (`- ` with nothing after it), or whose `when` / `unless` is not a usable regular expression, is dropped on its own; the rest of the rule still works. An entry that throws while being evaluated is skipped the same way. Regular expressions are written in Python's `re` syntax and run as JavaScript: a leading `(?i)` / `(?s)` / `(?m)`, `(?P<name>...)`, `(?P=name)`, and `\A` / `\Z` / `\z` (start / end of the whole text, also under the multiline flag used by `pre_edit` / `post_edit`) are translated; a leading `(?x)` and anything JavaScript rejects (an inline flag in the middle such as `x(?i)y`, `a*+`, `(?#...)`, `(?P>name)`) make that entry invalid. Each broken file or entry is recorded once, with the file and the reason, in `~/.claude/feedback/.errors.jsonl` (next to `.violations.jsonl`), and is listed at the top of the context injected on every prompt (`The following rule files could not be read and are disabled: ...`) until it is fixed; `/correct` reports it as a `broken` proposal. Internal errors that the feedback hooks swallow so as not to stop your work are recorded in the same file.
 - The rules file, added to the context on every prompt. By default the bundled `rules/feedback_rules.md` (Japanese) or `rules/feedback_rules.en.md` (English) is used, by the language above. To replace it entirely, put your own file at the `rulesFile` path (default `~/.claude/feedback-gate/feedback_rules.md`, configurable in the plugin settings; a leading `~` is expanded). If that file exists it is used instead of the bundled one (never both, whatever the language). Avoid `~/.claude/rules/`: Claude Code loads that directory itself, so the rules would be injected twice.
 
-State files (changed files, attempt counters, command logs) are written under the project's `.claude/.gate-status/` directory (`gate.yaml` stays directly under `.claude/`). Add `.claude/.gate-status/` to the project's `.gitignore`. State files left by older versions directly under `.claude/` (and `.claude/hooks/logs/`) are removed automatically at session start. `bash_started.*.json` there holds the start time of the Bash command in flight, used to tell which files that command rewrote. It is keyed by the `tool_use_id` of the call, which both PreToolUse and PostToolUse carry, not by the session / agent id: the engine does not pass the agent id to `classic.PreToolUse`, while `classic.PostToolUse` has `agent_id`, so a key based on them would not match inside a subagent. Files left by commands that failed (no PostToolUse) are removed at the next Bash start once they are older than 2 hours.
+State files (changed files, attempt counters, command logs) are written under the project's `.claude/.gate-status/` directory (`gate.yaml` stays directly under `.claude/`). Add `.claude/.gate-status/` to the project's `.gitignore`. State files left by older versions directly under `.claude/` (and `.claude/hooks/logs/`) are removed automatically at session start. `bash_started.*.json` there (or under `~/.claude/feedback/.bash_started/` in a project without `gate.yaml`) holds the start time of the Bash command in flight, used to tell which files that command rewrote. It is keyed by the `tool_use_id` of the call, which both PreToolUse and PostToolUse carry, not by the session / agent id: the engine does not pass the agent id to `classic.PreToolUse`, while `classic.PostToolUse` has `agent_id`, so a key based on them would not match inside a subagent. Files left by commands that failed (no PostToolUse) are removed at the next Bash start once they are older than 2 hours.
 
 While gate commands run, a band above the prompt shows what is running, one item per line, e.g.
 

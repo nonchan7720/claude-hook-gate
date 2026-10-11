@@ -43,6 +43,8 @@ export interface Io {
   readonly env: Readonly<EnvVars>
   /** hook が出すメッセージの言語（プラグイン設定の language と OS の言語設定から resolveLang が決める）。 */
   readonly lang: Lang
+  /** 違反を検出したら feedback ルールの count を自動で上げるか（プラグイン設定の autoCount）。undefined は true 扱い。 */
+  readonly autoCount?: boolean
   /** CLAUDE_PROJECT_DIR 相当（セッションのルート）。 */
   readonly projectDir: string
   /** セッションの作業ディレクトリ。 */

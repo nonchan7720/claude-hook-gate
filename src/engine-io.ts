@@ -22,7 +22,8 @@ async function readEnv($: Engine): Promise<EnvVars> {
   return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG }
 }
 
-/** options はプラグイン設定（userConfig）。`language` がメッセージの言語を決める（auto なら OS の言語設定）。 */
+/** options はプラグイン設定（userConfig）。`language` がメッセージの言語を決める（auto なら OS の言語設定）。
+ * `autoCount` が false なら違反時の count の自動引き上げをしない（既定 true）。 */
 export async function createIo($: Engine, options: Readonly<Record<string, unknown>> = {}): Promise<Io> {
   const [env, projectDir, cwd] = await Promise.all([readEnv($), $.session.root(), $.session.cwd()])
   const lang = resolveLang(env, options.language)
@@ -60,6 +61,7 @@ export async function createIo($: Engine, options: Readonly<Record<string, unkno
   return {
     env,
     lang,
+    autoCount: options.autoCount !== false,
     projectDir,
     cwd,
     pluginRoot: $.plugin.root,

@@ -24,10 +24,17 @@ guard:
 postEdit:
   checking: "[feedback-post-edit] checking: {{rule}} ({{file}})"
 
+bashEdit:
+  header: "[feedback] Files rewritten by Bash violate feedback rules (the same checks as Edit / Write)."
+  preEditAfter: "Note: this is a pre_edit rule, but with Bash the content cannot be known before it runs, so it was detected after the command (the file is already written; fix it to follow the rule)."
+
 stopCheck:
   checking: "[feedback-stop-check] checking: {{rule}} ({{file}})"
   gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
   fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
+
+autoCount:
+  bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
 
 launch:
   checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"

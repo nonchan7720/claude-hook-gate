@@ -9,7 +9,19 @@
 // 何も出さず exit 0。
 //
 // hook 自身のバグで作業を止めないよう、例外は必ず握りつぶして exit 0 にする（stderr に1行だけ出し、~/.claude/feedback/.errors.jsonl に残す）。
-import { errorText, evalPreBash, evalPreEdit, extractPreEditContent, feedbackDir, listRules, logError, logViolation, type Violation } from './feedback-rules.ts'
+import {
+  autoBumpCounts,
+  countBumpNotes,
+  errorText,
+  evalPreBash,
+  evalPreEdit,
+  extractPreEditContent,
+  feedbackDir,
+  listRules,
+  logError,
+  logViolation,
+  type Violation,
+} from './feedback-rules.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, isDict, truthy } from './pyutil.ts'
@@ -84,6 +96,8 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
   await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput)
 
   for (const v of violations) await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail)
+  // 今回の判定は上げる前の count で行い、次回以降の強制力を上げる。
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id))
 
   const blocking = violations.filter((v) => v.severity !== 'warn')
   const warnings = violations.filter((v) => v.severity === 'warn')
@@ -95,11 +109,11 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: decisionFor(top.severity),
-        permissionDecisionReason: buildReason(blocking),
+        permissionDecisionReason: [buildReason(blocking), ...notes].join('\n'),
       },
     })}\n`
   }
-  const stderr = warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}\n`).join('')
+  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}`), ...notes].map((l) => `${l}\n`).join('')
   return ok(stdout, stderr)
 }
 

@@ -123,4 +123,4 @@ changes how count 3 and 4 are treated).
   an explicit `ask` on `post_edit` is treated as `block`)
 - `warn`: only print a warning to stderr and continue
 
-Violations are appended to `~/.claude/feedback/.violations.jsonl` (`count` itself is not changed).
+Violations are appended to `~/.claude/feedback/.violations.jsonl`, and the hook also raises that rule's `count` by 1 (at most once per rule per session, up to 5; turned off by the plugin setting `autoCount: false`). You do not need to raise `count` yourself for a violation a hook detected.

@@ -3,7 +3,7 @@
 // グローバル (~/.claude/feedback/*.md) とプロジェクト (<projectDir>/.claude/feedback/*.md) の
 // 両ディレクトリから frontmatter を全件読み（同名はプロジェクト側が優先）、count に応じた強制力
 // （severity: deny / ask（pre_*）・block（stop_check / post_edit） / warn）を解決する。
-// PreToolUse hook (feedback-guard.ts) / PostToolUse hook (feedback-post-edit.ts) /
+// PreToolUse hook (feedback-guard.ts) / PostToolUse hook (feedback-post-edit.ts, feedback-bash-edit.ts) /
 // Stop hook (feedback-stop-check.ts) / UserPromptSubmit hook (feedback-inject.ts) から使う
 // 共通ロジックのみを持つ。
 //
@@ -18,6 +18,8 @@
 //     severity: deny           # 任意。省略時は count から自動決定
 //
 //   - event: pre_edit          # PreToolUse(Edit|Write|MultiEdit) で対象と内容を検査
+//                              # （Bash で書かれたファイルは実行後に PostToolUse(Bash) で同じ条件を評価し、
+//                              #  deny / ask は block にする。feedback-bash-edit.ts）
 //     path: 'glob'             # 必須。file_path にマッチ
 //     exclude_path: 'glob'     # 任意。文字列または配列。path にマッチしても
 //                              # これにマッチしたら検査対象外（テスト不要なファイルの除外）
@@ -36,6 +38,7 @@
 //                              # absent_sibling と併記した場合は OR で判定する
 //
 //   - event: post_edit         # PostToolUse(Edit|Write|MultiEdit) で、編集後のファイル全体を検査
+//                              # （Bash で書き換えられたファイルも PostToolUse(Bash) で同様に。feedback-bash-edit.ts）
 //     path: 'glob'             # 必須。file_path（プロジェクト相対）にマッチ
 //     exclude_path: 'glob'     # 任意。文字列または配列。マッチしたら検査対象外
 //     when: '正規表現'          # 任意。編集後のファイル内容（ディスク上の全文）に対して（m フラグ）
@@ -80,7 +83,7 @@
 // いずれも、ファイルと理由を ~/.claude/feedback/.errors.jsonl に残し（BrokenRule）、UserPromptSubmit の注入と
 // /correct で知らせる。
 import { asList, compileGlobs, expandBraces, globExists } from './glob.ts'
-import { tr } from './i18n.ts'
+import { type Lang, tr } from './i18n.ts'
 import type { Io } from './io.ts'
 import { parseYaml } from './load-yaml.ts'
 import { basename, dirname, isAbsolute, join, splitext } from './path.ts'
@@ -348,8 +351,8 @@ export function resolveSeverity(count: unknown, explicit?: unknown, event?: stri
 let logQueue: Promise<void> = Promise.resolve()
 
 /**
- * ~/.claude/feedback/.violations.jsonl に1行 JSON を追記する。count 自体は絶対に書き換えない
- * （ログに残すのみ）。ログ失敗で hook を止めないよう例外は握りつぶす。
+ * ~/.claude/feedback/.violations.jsonl に1行 JSON を追記する。count は書き換えない
+ * （count の自動引き上げは autoBumpCounts が別に行う）。ログ失敗で hook を止めないよう例外は握りつぶす。
  */
 export function logViolation(io: Io, rule: string, count: number, severity: string, event: string, detail: string): Promise<void> {
   const task = logQueue.then(async () => {
@@ -401,6 +404,108 @@ export function logError(io: Io, source: string, error: string, file?: string): 
 async function logEntryError(io: Io, rule: Rule, index: number, e: unknown): Promise<void> {
   await logError(io, 'enforce', tr(io.lang)('rules.evalError', { index, error: errorText(e) }), rule.path)
 }
+
+// ---- count の自動引き上げ ----
+/** 自動で上げる count の上限。resolveSeverity が deny を返す最小の count。 */
+export const AUTO_COUNT_MAX = 5
+
+/** frontmatter 内の `count: N` 行（数値リテラルのみ）。引用符付きや式は対象外。 */
+const COUNT_LINE_RE = /^count:[ \t]*(\d+)[ \t]*(?=\r?$)/m
+
+/** frontmatter の `count:` 行の値を返す。frontmatter や数値の count 行が無ければ undefined。 */
+export function readCountLine(content: string): number | undefined {
+  const fm = FRONTMATTER_RE.exec(content)
+  if (!fm) return undefined
+  const m = COUNT_LINE_RE.exec(fm[0])
+  return m ? Number(m[1]) : undefined
+}
+
+/** frontmatter の `count:` 行だけを `count: to` に置き換えた全文を返す。置き換えられなければ undefined。 */
+export function replaceCountLine(content: string, to: number): string | undefined {
+  const fm = FRONTMATTER_RE.exec(content)
+  if (!fm) return undefined
+  const head = fm[0]
+  if (!COUNT_LINE_RE.test(head)) return undefined
+  return head.replace(COUNT_LINE_RE, `count: ${to}`) + content.slice(head.length)
+}
+
+/**
+ * 同じディレクトリの一時ファイルに書いてから mv で置き換える（読み手が書きかけのファイルを見ないように）。
+ * 一時ファイルは .md で終わらないので listRules には拾われない。mv が使えなければ直接書く。
+ */
+export async function writeFileAtomic(io: Io, path: string, text: string): Promise<void> {
+  const tmp = join(dirname(path), `.${basename(path)}.${Math.floor(await io.now())}-${Math.random().toString(36).slice(2, 8)}.tmp`)
+  try {
+    await io.writeFile(tmp, text)
+    const r = await io.run(['mv', '-f', '--', tmp, path], { timeoutMs: 5_000 })
+    if (r.exitCode === 0 && !r.timedOut && r.error === undefined) return
+  } catch {
+    // 下で直接書く
+  }
+  await io.removeFiles([tmp]).catch(() => undefined)
+  await io.writeFile(path, text)
+}
+
+export type CountBump = { rule: string; path: string; from: number; to: number }
+
+/** セッション内で count を自動で上げ済みのルール名を持つ状態ファイル（~/.claude/feedback/.count_state/<session>.json）。 */
+export const countStatePath = (io: Io, sessionId: string): string => join(feedbackDir(io), '.count_state', `${sessionId.replace(/[^A-Za-z0-9_-]/g, '')}.json`)
+
+async function loadBumpedRules(io: Io, sessionId: string): Promise<Set<string>> {
+  try {
+    const text = await io.readFile(countStatePath(io, sessionId))
+    if (text === undefined) return new Set()
+    const data: unknown = JSON.parse(text)
+    if (isDict(data) && Array.isArray(data.bumped)) return new Set(data.bumped.map(String))
+  } catch {
+    // 壊れた状態ファイルは空扱い
+  }
+  return new Set()
+}
+
+/**
+ * 違反したルールのファイルの count を 1 つ上げる（frontmatter の `count:` 行だけを書き換える）。
+ * - 対象は rules（listRules のマージ後）で実際に使われたファイル。同名ならプロジェクト側。
+ * - 同じセッションでは同じルール名につき 1 回だけ（次のセッションでまた違反すればまた上がる）。
+ * - AUTO_COUNT_MAX（deny になる count）以上には上げない。
+ * - io.autoCount === false（プラグイン設定 autoCount: false）や session_id が無いときは何もしない。
+ * 失敗しても hook を止めないよう例外は握りつぶし、上げられたものだけを返す。
+ */
+export async function autoBumpCounts(io: Io, rules: Rule[], violations: Violation[], sessionId: unknown): Promise<CountBump[]> {
+  const bumps: CountBump[] = []
+  if (io.autoCount === false || !truthy(sessionId) || violations.length === 0) return bumps
+  try {
+    const sid = String(sessionId)
+    const done = await loadBumpedRules(io, sid)
+    const names = [...new Set(violations.map((v) => v.rule))].filter((n) => !done.has(n))
+    if (names.length === 0) return bumps
+    for (const name of names) {
+      const rule = rules.find((r) => r.name === name)
+      if (!rule) continue
+      try {
+        const content = await io.readFile(rule.path)
+        if (content === undefined) continue
+        const from = readCountLine(content)
+        if (from === undefined || from >= AUTO_COUNT_MAX) continue
+        const next = replaceCountLine(content, from + 1)
+        if (next === undefined) continue
+        await writeFileAtomic(io, rule.path, next)
+        bumps.push({ rule: name, path: rule.path, from, to: from + 1 })
+        done.add(name)
+      } catch {
+        // このルールは諦めて次へ
+      }
+    }
+    if (bumps.length > 0) await io.writeFile(countStatePath(io, sid), JSON.stringify({ bumped: [...done].sort() }))
+  } catch {
+    // 状態の読み書き失敗で hook を止めない
+  }
+  return bumps
+}
+
+/** count を上げたことをモデルとユーザーに伝える行。 */
+export const countBumpNotes = (lang: Lang, bumps: CountBump[]): string[] =>
+  bumps.map((b) => tr(lang)('autoCount.bumped', { rule: b.rule, from: b.from, to: b.to, path: b.path }))
 
 // ---- pre_edit: テストファイル自身の自己参照を防ぐ ----
 export function looksLikeTestFile(name: string): boolean {
