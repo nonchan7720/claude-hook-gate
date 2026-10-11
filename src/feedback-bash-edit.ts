@@ -12,9 +12,10 @@
 //   ルールは、Edit と同じく warn に落とす。
 //
 // 複数ファイルの結果は 1 つにまとめる（block があれば全件を 1 つの reason に、warn は stderr に）。
+// 違反したルールの count は Edit / Write と同じく autoBumpCounts で上げ、その旨をメッセージに添える。
 // hook 自身のバグで作業を止めないよう、例外は必ず握りつぶして exit 0 にする（stderr に1行だけ出す）。
 import { downgradeRepeatedAsks } from './feedback-guard.ts'
-import { evalPostEdit, evalPreEdit, listRules, logViolation, type Rule, type Violation } from './feedback-rules.ts'
+import { autoBumpCounts, countBumpNotes, evalPostEdit, evalPreEdit, listRules, logViolation, type Rule, type Violation } from './feedback-rules.ts'
 import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { basename, dirname, isAbsolute, join, relpath } from './path.ts'
@@ -89,6 +90,9 @@ async function main(io: Io, payload: Dict, files: string[], threshold: number): 
   if (found.length === 0) return ok()
 
   for (const { v } of found) await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail)
+  // Edit / Write（feedback-post-edit / feedback-guard）と同じく、違反したルールの count を上げる（同じセッション・同じルールは 1 回）。
+  const violations = found.map(({ v }) => v)
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id))
 
   const t = tr(io.lang)
   const tag = (v: Violation) => (v.event === 'pre_edit' ? '[feedback-guard]' : '[feedback-post-edit]')
@@ -97,10 +101,11 @@ async function main(io: Io, payload: Dict, files: string[], threshold: number): 
   const blocking = found.filter(({ v }) => v.severity !== 'warn')
 
   let stderr = warnings.map(({ file, v }) => `${tag(v)} warn: ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)})${after(v)}\n`).join('')
-  if (blocking.length === 0) return ok('', stderr)
+  if (blocking.length === 0) return ok('', stderr + notes.map((l) => `${l}\n`).join(''))
 
   const lines = blocking.map(({ file, v }) => `${tag(v)} ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)}: ${v.detail})${after(v)}`)
   lines.unshift(t('bashEdit.header'))
+  lines.push(...notes)
   stderr += lines.map((l) => `${l}\n`).join('')
   return ok(`${JSON.stringify({ decision: 'block', reason: lines.join('\n') })}\n`, stderr)
 }

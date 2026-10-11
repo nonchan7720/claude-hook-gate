@@ -6,6 +6,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { bashChanges, bashStarted } from '../src/bash-changes.ts'
 import { addedLines } from '../src/feedback-bash-edit.ts'
+import { readCountLine } from '../src/feedback-rules.ts'
 import type { Dict } from '../src/pyutil.ts'
 import { exists, writeGateYaml } from './helpers/gate.ts'
 import { makeIo, rmTree, tmpDir } from './helpers/node-io.ts'
@@ -113,7 +114,11 @@ describe('Bash edits are checked by feedback rules', () => {
       bashWrite('other/c.ts', 'console.log(1)\n')
     })
     expect(r.stdout).toBe('')
-    expect(r.stderr).toBe('[feedback-post-edit] warn: no_console_log (count: 1): console.log を残さない (src/a.ts)\n')
+    const [warn, ...rest] = r.stderr.trimEnd().split('\n')
+    expect(warn).toBe('[feedback-post-edit] warn: no_console_log (count: 1): console.log を残さない (src/a.ts)')
+    // 残りは count の自動引き上げの通知だけ
+    expect(rest).toHaveLength(1)
+    expect(rest[0]).toContain('no_console_log の count を 1 → 2 に上げました')
   })
 
   test('violations in several files are merged into one block', async () => {
@@ -142,6 +147,60 @@ describe('Bash edits are checked by feedback rules', () => {
     await runBash(() => bashWrite('src/a.ts', 'console.log(1)\n'))
     const lines = fs.readFileSync(path.join(fb, '.violations.jsonl'), 'utf8').trim().split('\n')
     expect(lines.map((l) => JSON.parse(l))).toMatchObject([{ rule: 'no_console_log', event: 'post_edit', severity: 'block' }])
+  })
+
+  describe('count auto bump', () => {
+    const countOf = (name: string) => readCountLine(fs.readFileSync(path.join(fb, `${name}.md`), 'utf8'))
+
+    test('a post_edit violation in a file written by Bash raises the count once per session', async () => {
+      initRepo(false)
+      consoleLogPost(3)
+      const r = await runBash(() => bashWrite('src/a.ts', 'console.log(1)\n'))
+      expect(countOf('no_console_log')).toBe(4)
+      const reason: string = JSON.parse(r.stdout).reason
+      expect(reason).toContain('no_console_log (count: 3)')
+      expect(reason).toContain('no_console_log の count を 3 → 4 に上げました')
+
+      // 同じセッションでの 2 回目は上げない
+      const r2 = await runBash(() => bashWrite('src/b.ts', 'console.log(2)\n'), payload(undefined, { tool_use_id: 'tu2' }))
+      expect(JSON.parse(r2.stdout).reason).toContain('no_console_log (count: 4)')
+      expect(r2.stdout).not.toContain('上げました')
+      expect(countOf('no_console_log')).toBe(4)
+
+      // 別のセッションならまた上がる
+      await runBash(() => bashWrite('src/c.ts', 'console.log(3)\n'), payload(undefined, { session_id: 'sess-2' }))
+      expect(countOf('no_console_log')).toBe(5)
+    })
+
+    test('a warn-level violation also raises the count, with the note on stderr', async () => {
+      initRepo(false)
+      consoleLogPost(1)
+      const r = await runBash(() => bashWrite('src/a.ts', 'console.log(1)\n'))
+      expect(r.stdout).toBe('')
+      expect(r.stderr).toContain('no_console_log の count を 1 → 2 に上げました')
+      expect(countOf('no_console_log')).toBe(2)
+    })
+
+    test('a pre_edit violation detected after the command raises the count', async () => {
+      initRepo(false)
+      noAnyPre(3)
+      const r = await runBash(() => bashWrite('src/new.ts', 'export const y: any = 2\n'))
+      expect(JSON.parse(r.stdout).reason).toContain('no_any の count を 3 → 4 に上げました')
+      expect(countOf('no_any')).toBe(4)
+    })
+
+    test('autoCount=false leaves the count alone', async () => {
+      initRepo(false)
+      consoleLogPost(4)
+      const p = payload()
+      const off = () => makeIo({ projectDir: proj, now: () => T0, env: { CLAUDE_FEEDBACK_DIR: fb }, autoCount: false })
+      await bashStarted(off(), p)
+      bashWrite('src/a.ts', 'console.log(1)\n')
+      const r = await bashChanges(off(), p)
+      expect(JSON.parse(r.stdout).decision).toBe('block')
+      expect(r.stdout).not.toContain('上げました')
+      expect(countOf('no_console_log')).toBe(4)
+    })
   })
 
   describe('pre_edit (checked after the command)', () => {
@@ -184,6 +243,8 @@ describe('Bash edits are checked by feedback rules', () => {
       writeRule('tdd', 4, ['  - event: pre_edit', "    path: 'src/**/*.ts'", "    absent_sibling: '{stem}.test.ts'", "    message: 'テストを先に書く'"])
       const bad = await runBash(() => bashWrite('src/foo.ts', 'export {}\n'))
       expect(JSON.parse(bad.stdout).reason).toContain('tdd (count: 4): テストを先に書く (src/foo.ts: missing test file: foo.test.ts)')
+      // 違反で count が 5（deny）に上がるので、残しておくと次の実行でも block になる。テストのある側だけを確かめる。
+      fs.rmSync(path.join(proj, 'src', 'foo.ts'))
       const good = await runBash(
         () => {
           bashWrite('src/bar.ts', 'export {}\n')
@@ -201,7 +262,8 @@ describe('Bash edits are checked by feedback rules', () => {
       expect(JSON.parse(first.stdout).decision).toBe('block')
       const second = await runBash(() => bashWrite('src/a.ts', 'export const y: any = 3\n'), payload('sed -i ...', { tool_use_id: 'tu2' }))
       expect(second.stdout).toBe('')
-      expect(second.stderr).toContain('[feedback-guard] warn: no_any (count: 3)')
+      // 1 回目の違反で count は 4 に上がっている（4 でもまだ ask なので、承認済みとして warn に落ちる）
+      expect(second.stderr).toContain('[feedback-guard] warn: no_any (count: 4)')
     })
   })
 })
