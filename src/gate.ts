@@ -6,13 +6,15 @@
 //     （PostToolUse の exit 2 はツール実行後の stderr フィードバックであり、会話は止まらない）。マッチした
 //     ルールが run_checks で参照した consistency_checks の名前を、checks フェーズが後で実行するための
 //     「予約」として永続化する。
-//   - checks フェーズ（Stop / SubagentStop、phase=checks、デフォルト）: 予約された consistency_checks
-//     だけを実行する。rules は実行しない。失敗なら exit 2 で会話の終了をブロックし、MAX_ATTEMPTS で
+//     失敗したファイルは FAILED（gate_failed.<state_id>.txt）に控える。
+//   - checks フェーズ（Stop / SubagentStop、phase=checks、デフォルト）: FAILED に残っているファイルの rules を
+//     最新の内容で再実行し、続けて予約された consistency_checks を実行する。rules が直っていない、または
+//     check が失敗なら exit 2 で会話の終了をブロックし（成功報告も出さない）、MAX_ATTEMPTS で
 //     打ち切る。実際に 1 件以上実行してすべて成功したときは、結果の要約を reason にして 1 回だけ
 //     ブロックする（report_success: false で無効。stop_hook_active のときは報告しない）。その直後の
 //     Stop は印（gate_reported）を消して、コマンドを走らせずに通す。
 //
-// 予約が空（何も rules フェーズでマッチしなかった）なら checks フェーズは即 exit 0。run_checks を持たない
+// FAILED・予約・控えがすべて空なら checks フェーズは即 exit 0（諦めたときは FAILED も消す）。run_checks を持たない
 // ルールで通ったファイルは、それ以上待つものが無いので rules フェーズの時点で完了扱いになり、CHANGED
 // からも SIDECAR からも外れる。以後そのファイルが別の変更で壊れても検出されない（run_checks がパッケージ
 // 跨ぎ検証の唯一の手段）。
@@ -48,7 +50,8 @@
 //              true/false のいずれでもない不正な文字列が指定された場合はルールをスキップした上で rules
 //              フェーズを失敗扱いにする（黙って無視しない）。
 // run:         マッチしたとき実行するコマンド列。1つでも非0なら失敗＝rules フェーズでは stderr 通知（会話は
-//              止めない）、checks フェーズでは停止をブロック。各要素は文字列、{cmd, name, timeout} 形式、
+//              止めない。ただし FAILED に控え、直るまで checks フェーズで再実行して停止をブロックする）、
+//              checks フェーズでは停止をブロック。各要素は文字列、{cmd, name, timeout} 形式、
 //              または {parallel: [...]} 形式。timeout はそのコマンドのタイムアウト秒数（省略時 300 秒）。
 //              超過したら強制終了して失敗扱い。rule / consistency_check レベルの timeout: はデフォルト値になる。
 //              name はログファイル名に使う識別名（省略時は cmd から生成）。share: false を書くと、他のエージェントが
@@ -377,6 +380,7 @@ export class Gate {
   readonly reported: string
   readonly trace: string
   readonly deferred: string
+  readonly failed: string
   readonly logRoot: string
   readonly logDir: string
   defaultPolicy: string
@@ -423,6 +427,7 @@ export class Gate {
     this.reported = join(this.stateDir, `gate_reported.${this.stateId}.txt`) // 成功報告でブロックした印
     this.trace = join(this.stateDir, `gate_trace.${this.stateId}.jsonl`) // ポリシー判定に食わせる実行履歴
     this.deferred = join(this.stateDir, `gate_deferred.${this.stateId}.json`) // ポリシーでスキップした分の控え
+    this.failed = join(this.stateDir, `gate_failed.${this.stateId}.txt`) // rules で失敗したまま直っていないファイル
     this.logRoot = join(this.stateDir, 'logs')
     this.logDir = join(this.logRoot, this.stateId)
     this.defaultPolicy = join(io.pluginRoot, 'scripts', 'dogwood', 'gate.default.dw')
@@ -446,7 +451,7 @@ export class Gate {
 
   /** 状態ファイルを削除する。only を渡すと、その集合だけを消す。 */
   async cleanup(only?: string[]): Promise<void> {
-    await this.io.removeFiles(only ?? [this.changed, this.count, this.sidecar, this.pending, this.reported])
+    await this.io.removeFiles(only ?? [this.changed, this.count, this.sidecar, this.pending, this.reported, this.failed])
   }
 
   private async rm(path: string): Promise<void> {
@@ -1242,6 +1247,57 @@ export class Gate {
     await this.savePending(data)
   }
 
+  /**
+   * runRulesAllRoots の結果を状態ファイルへ反映する。keys は今回 rules を走らせたキー。
+   * - CHANGED: keys のうち、通らなかった（失敗・未判定の）ものだけを残す。keys 以外の行はそのまま。
+   * - SIDECAR: 通ったキーのうち run_checks で参照されたものを、checks フェーズの確認待ちとして足す。
+   * - PENDING: 参照された consistency_checks の予約を足す。
+   * - FAILED: keys のうち失敗したものを足し、それ以外（通った・消えた・どのルールにも当たらない）は外す。
+   *   checks フェーズはこれを見て、直っていないファイルの rules を最新の内容で再実行する。
+   */
+  private async applyRulesResult(keys: Key[], rawByKey: Map<Key, string>, res: Awaited<ReturnType<Gate['runRulesAllRoots']>>): Promise<void> {
+    if (res.checkNamesByRoot.size > 0) await this.mergePendingChecks(res.checkNamesByRoot, res.checkRefKeysByRoot, rawByKey)
+
+    // run_checks を参照したキーだけ checks フェーズの確認待ちとして SIDECAR へ退避する。run_checks を持たない
+    // ルールで通ったキーは、それ以上待つものが無いので CHANGED からも SIDECAR からも完全に手を離す。
+    const checkedKeys = new Set<Key>()
+    for (const ref of res.checkRefKeysByRoot.values()) for (const ks of ref.values()) for (const k of ks) checkedKeys.add(k)
+
+    const remaining: Key[] = []
+    const seen = new Set<Key>()
+    const sidecarAdd: Key[] = []
+    const seenSidecar = new Set<Key>()
+    for (const k of keys) {
+      if (res.consumedKeys.has(k)) continue
+      if (res.successKeys.has(k) && !res.failKeys.has(k)) {
+        if (checkedKeys.has(k) && !seenSidecar.has(k)) {
+          seenSidecar.add(k)
+          sidecarAdd.push(k)
+        }
+        continue
+      }
+      if (seen.has(k)) continue
+      seen.add(k)
+      remaining.push(k)
+    }
+    const ran = new Set(keys)
+    const changed = await this.loadChangedFlat(this.changed)
+    const changedRaw = new Map([...changed.rawByKey, ...rawByKey])
+    await this.writeChangedFlat(this.changed, [...new Set([...changed.order.filter((k) => !ran.has(k)), ...remaining])], changedRaw)
+
+    if (sidecarAdd.length > 0) {
+      const existing = await this.loadChangedFlat(this.sidecar)
+      const merged = [...new Set([...existing.order, ...sidecarAdd])]
+      const rawLookup = new Map([...existing.rawByKey, ...rawByKey])
+      await this.writeChangedFlat(this.sidecar, merged, rawLookup)
+    }
+
+    const failedNow = keys.filter((k) => res.failKeys.has(k) && !res.consumedKeys.has(k))
+    const prev = await this.loadChangedFlat(this.failed)
+    const failedRaw = new Map([...prev.rawByKey, ...rawByKey])
+    await this.writeChangedFlat(this.failed, [...new Set([...prev.order.filter((k) => !ran.has(k)), ...failedNow])], failedRaw)
+  }
+
   private async runRulesPhase(): Promise<number> {
     if (!((await this.io.exists(this.action)) && (await this.io.exists(this.changed)))) return 0
     const { order, rawByKey } = await this.loadChangedFlat(this.changed)
@@ -1276,38 +1332,7 @@ export class Gate {
       if (deferredFailed.length > 0) failed = true
     }
 
-    if (res.checkNamesByRoot.size > 0) await this.mergePendingChecks(res.checkNamesByRoot, res.checkRefKeysByRoot, rawByKey)
-
-    // run_checks を参照したキーだけ checks フェーズの確認待ちとして SIDECAR へ退避する。run_checks を持たない
-    // ルールで通ったキーは、それ以上待つものが無いので CHANGED からも SIDECAR からも完全に手を離す。
-    const checkedKeys = new Set<Key>()
-    for (const ref of res.checkRefKeysByRoot.values()) for (const keys of ref.values()) for (const k of keys) checkedKeys.add(k)
-
-    const remaining: Key[] = []
-    const seen = new Set<Key>()
-    const sidecarAdd: Key[] = []
-    const seenSidecar = new Set<Key>()
-    for (const k of order) {
-      if (res.consumedKeys.has(k)) continue
-      if (res.successKeys.has(k) && !res.failKeys.has(k)) {
-        if (checkedKeys.has(k) && !seenSidecar.has(k)) {
-          seenSidecar.add(k)
-          sidecarAdd.push(k)
-        }
-        continue
-      }
-      if (seen.has(k)) continue
-      seen.add(k)
-      remaining.push(k)
-    }
-    await this.writeChangedFlat(this.changed, remaining, rawByKey)
-
-    if (sidecarAdd.length > 0) {
-      const existing = await this.loadChangedFlat(this.sidecar)
-      const merged = [...new Set([...existing.order, ...sidecarAdd])]
-      const rawLookup = new Map([...existing.rawByKey, ...rawByKey])
-      await this.writeChangedFlat(this.sidecar, merged, rawLookup)
-    }
+    await this.applyRulesResult(order, rawByKey, res)
 
     if (failed) {
       this.writeErr(`${[...this.status, ...logs].join('\n')}\n`)
@@ -1431,12 +1456,9 @@ export class Gate {
         return 0
       }
     }
-    const pending = (await this.io.exists(this.pending)) ? await this.loadPending() : {}
-    if (Object.keys(pending).length === 0) await this.rm(this.pending)
-    // rules フェーズの控えは、そこで実行が起きた回にしか消化されない。編集が止まると残り続け、未検証のまま
-    // commit / 終了してしまうので、checks フェーズでも全件消化する。
-    const deferred = await this.takeDeferred()
-    if (Object.keys(pending).length === 0 && deferred.length === 0) return 0
+    const failedFiles = await this.loadChangedFlat(this.failed)
+    if (failedFiles.order.length === 0) await this.rm(this.failed)
+    if (failedFiles.order.length === 0 && !(await this.io.exists(this.pending)) && !(await this.io.exists(this.deferred))) return 0
 
     const mainCfg = await this.loadAction(this.action)
 
@@ -1444,6 +1466,24 @@ export class Gate {
     const summary: string[] = []
     let failed = false
     const policyState = new PolicyState()
+
+    // rules フェーズで失敗したまま直っていないファイルは、最新の内容で rules をもう一度走らせる。直っていれば
+    // 通常どおり CHANGED / SIDECAR / PENDING へ振り分け（ここで予約された check も下で走る）、まだ失敗なら
+    // 停止をブロックする。直さずに終了・完了報告できてしまうのを防ぐため。
+    if (failedFiles.order.length > 0) {
+      const { order: rootOrder, relsByRoot } = this.groupKeysByRoot(failedFiles.order)
+      const res = await this.runRulesAllRoots(rootOrder, relsByRoot, mainCfg, logs, policyState)
+      summary.push(...res.summary)
+      if (res.failed) failed = true
+      await this.applyRulesResult(failedFiles.order, failedFiles.rawByKey, res)
+    }
+
+    const pending = (await this.io.exists(this.pending)) ? await this.loadPending() : {}
+    if (Object.keys(pending).length === 0) await this.rm(this.pending)
+    // rules フェーズの控えは、そこで実行が起きた回にしか消化されない。編集が止まると残り続け、未検証のまま
+    // commit / 終了してしまうので、checks フェーズでも全件消化する。
+    const deferred = await this.takeDeferred()
+    if (failedFiles.order.length === 0 && Object.keys(pending).length === 0 && deferred.length === 0) return 0
     const activePending: Pending = {}
     const droppedRoots = new Set<string>()
     for (const [root, checksMap] of Object.entries(pending)) {
@@ -1485,7 +1525,7 @@ export class Gate {
         this.print({ decision: 'block', reason })
         return 2
       }
-      const title = Object.keys(pending).length > 0 ? 'consistency checks' : this.t('gate.deferredTitle')
+      const title = Object.keys(pending).length > 0 ? 'consistency checks' : failedFiles.order.length > 0 ? 'rules' : this.t('gate.deferredTitle')
       this.print({ systemMessage: this.t('gate.checksPassed', { title, body }) })
       return 0
     }
@@ -1501,8 +1541,10 @@ export class Gate {
     await this.io.writeFile(this.count, String(attempts))
 
     if (attempts >= MAX_ATTEMPTS) {
+      // 諦めたら FAILED も手放す（毎回の Stop をブロックし続けないため）。失敗したファイルは CHANGED に残っているので、
+      // 次の編集で rules フェーズが再び拾う。
       await this.requeuePendingToChanged(activePending)
-      await this.cleanup([this.count, this.pending])
+      await this.cleanup([this.count, this.pending, this.failed])
       this.writeErr(`${this.t('gate.checksGaveUpStderr', { max: MAX_ATTEMPTS })}\n`)
       const msg = `${this.t('gate.checksGaveUp', { max: MAX_ATTEMPTS })}\n${summary.map((s) => `✗ ${s}`).join('\n')}${this.withDetails('')}`
       this.print({ systemMessage: msg })

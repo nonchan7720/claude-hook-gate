@@ -22,7 +22,7 @@ The hooks are registered in `src/register.ts` (bundled into `hooks/register.js` 
 | PostToolUse (Bash) | `src/bash-changes.ts`, then `src/stop-test-gate.ts` (`rules`) | Records only the files the command actually rewrote (git-modified or untracked files whose mtime is at or after the command start), then runs the matching rules only if something was recorded. Git history / working-tree operations (rebase / checkout / merge etc.) are never recorded. |
 | PreToolUse (Agent / SendMessage), opt-in | `src/agent-launch-guard.ts` | Only when `agentLaunchGuard` is `true`: asks before sending instructions to a subagent, showing the full text. |
 | Notification | `src/notification.ts` (`notify`) | Desktop notification when Claude waits for you (needs `terminal-notifier`, macOS). |
-| Stop | `src/all-stop.ts` | Runs, in order: the gate `checks` phase, `src/feedback-stop-check.ts`, then the `stop` notification. |
+| Stop | `src/all-stop.ts` | Runs, in order: the gate `checks` phase (reruns the rules that failed and were not fixed, then the reserved consistency checks), `src/feedback-stop-check.ts`, then the `stop` notification. |
 | SubagentStop | gate `checks` phase, `src/feedback-stop-check.ts` | Same gate and `stop_check` rules for subagents. |
 
 ### Agent launch guard (optional)
@@ -143,6 +143,10 @@ run:
     name: test
     files: false
 ```
+
+### Failures left unfixed
+
+A failed rule in the `rules` phase (PostToolUse) does not stop the turn: the errors go back to Claude as feedback. The failed files are also kept in `.claude/.gate-status/gate_failed.<state>.txt`, and the next `checks` phase (Stop / SubagentStop) reruns their rules on the current contents before anything else. If a rule still fails, the stop is blocked like a failed consistency check (and no success report is given); once it passes, the file is handled as if the `rules` phase had passed. So a lint failure cannot be left behind by simply finishing the turn. After `MAX_ATTEMPTS` (5) blocked stops in a row, the gate gives up: the failures are dropped (the files stay in the changed list, so the next edit checks them again).
 
 ### Success report
 
