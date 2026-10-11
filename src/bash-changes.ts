@@ -4,13 +4,23 @@
 // 動いたファイルは「変更」ではないので、そのコマンドは最初から記録対象外にする。
 // 見る作業ツリーは cwd のものと <projectDir>/.claude/worktrees/ 配下の各 worktree で、同じコマンドの中で
 // コミットされたファイルもコミット履歴から拾う（scanRoots / candidates）。
-// PJ が .claude/gate.yaml を持つ場合のみ動く（オプトイン）。
+// 拾ったファイルは feedback の post_edit / pre_edit でも検査する（src/feedback-bash-edit.ts）。Edit / Write を使わず
+// heredoc・python・sed -i などで書いても検査が抜けないようにするため。
+//
+// gate.yaml を持つ PJ（オプトイン）では、開始時刻を .claude/.gate-status/ に置き、拾ったファイルを変更ファイルのメモにも
+// 記録して gate の rules フェーズを走らせる。gate.yaml の無い PJ では、post_edit / pre_edit の enforce を持つ有効な
+// feedback ルールがあるときだけ追跡し、開始時刻は feedback 側の状態置き場（<feedbackDir>/.bash_started/。
+// .ask_state と同じ流儀）に置く。gate を使っていない PJ の作業ツリーに状態ファイルを作らない（.gitignore されて
+// いないので、`git add -A` で巻き込まれる）ため。メモ（changed_files）も書かない（gate の無い PJ の stop_check は
+// git でフォールバックする）。
 //
 // 開始時刻のファイル（bash_started.<session>--<tool_use_id>.json）は tool_use_id で引く。エンジンが classic.PreToolUse
 // に渡すイベントにはエージェント ID が入らない（tool.call の入力に tool / tool_use_id を足した形で、agentId は落とされる）
 // 一方、classic.PostToolUse は stdin JSON そのままで agent_id を持つ。状態 ID（<session>[--<agent>]）で引くと
 // サブエージェントの中では両者が食い違って開始時刻が見つからず、Bash の変更が一切記録されなかった。tool_use_id は
 // 両方のイベントに同じ値で入るので、これを鍵にする。変更の記録先（changed_files）は PostToolUse 側の状態 ID で決める。
+import { feedbackBashEdits, wantsBashEdits } from './feedback-bash-edit.ts'
+import { feedbackDir, listRules } from './feedback-rules.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, isDict, jqStr } from './pyutil.ts'
@@ -47,16 +57,24 @@ const startedKey = (payload: Dict): string => {
   return `${sessionId}--${toolUseId}`
 }
 
-const startedPath = (projectDir: string, payload: Dict): string => join(projectDir, '.claude', STATE_DIR, `bash_started.${startedKey(payload)}.json`)
+const hasGate = (io: Io, projectDir: string): Promise<boolean> => io.exists(join(projectDir, '.claude', 'gate.yaml'))
 
-/** PreToolUse(Bash): コマンド開始時刻を控える。常に ok() を返す。 */
+/** 開始時刻ファイルを置くディレクトリ。gate.yaml があれば .claude/.gate-status/、無ければ <feedbackDir>/.bash_started/。 */
+export const startedDir = (io: Io, projectDir: string, gate: boolean): string =>
+  gate ? join(projectDir, '.claude', STATE_DIR) : join(feedbackDir(io), '.bash_started')
+
+const startedPath = (dir: string, payload: Dict): string => join(dir, `bash_started.${startedKey(payload)}.json`)
+
+/** PreToolUse(Bash): コマンド開始時刻を控える（追跡する必要のある PJ だけ）。常に ok() を返す。 */
 export async function bashStarted(io: Io, payload: Dict): Promise<ScriptResult> {
   try {
     const projectDir = io.projectDir || io.cwd
-    if (!(await io.exists(join(projectDir, '.claude', 'gate.yaml')))) return ok()
+    const gate = await hasGate(io, projectDir)
+    if (!gate && !wantsBashEdits(await listRules(io))) return ok()
+    const dir = startedDir(io, projectDir, gate)
     const started = await io.now()
-    await io.writeFile(startedPath(projectDir, payload), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}\n`)
-    await sweepStale(io, projectDir, jqStr(payload.session_id) || 'unknown', started)
+    await io.writeFile(startedPath(dir, payload), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}\n`)
+    await sweepStale(io, dir, jqStr(payload.session_id) || 'unknown', started)
   } catch {
     // 追跡の失敗で作業を止めない。
   }
@@ -64,8 +82,7 @@ export async function bashStarted(io: Io, payload: Dict): Promise<ScriptResult> 
 }
 
 /** 同じセッションの bash_started.<session>--*.json のうち、STALE_STARTED_MS より古いものを消す。 */
-async function sweepStale(io: Io, projectDir: string, sessionId: string, now: number): Promise<void> {
-  const stateDir = join(projectDir, '.claude', STATE_DIR)
+async function sweepStale(io: Io, stateDir: string, sessionId: string, now: number): Promise<void> {
   const prefix = `bash_started.${sessionId}--`
   const stale = (await io.list(stateDir))
     .filter((e) => e.kind === 'file' && e.name.startsWith(prefix) && e.name.endsWith('.json') && e.mtimeMs < now - STALE_STARTED_MS)
@@ -73,39 +90,52 @@ async function sweepStale(io: Io, projectDir: string, sessionId: string, now: nu
   if (stale.length > 0) await io.removeFiles(stale)
 }
 
-/** PostToolUse(Bash): このコマンドが書き換えたファイルを記録し、新たに記録した絶対パスを返す。 */
-export async function recordBashChanges(io: Io, payload: Dict): Promise<string[]> {
+/**
+ * Bash が書き換えたファイル。changed はこのコマンドが書き換えた全ファイル（絶対パス、feedback の検査対象）、
+ * recorded はそのうち変更ファイルのメモに新たに記録したもの（gate.yaml がある PJ だけ。rules フェーズの要否に使う）。
+ * threshold は書き換えを判定した mtime の下限（ミリ秒）。
+ */
+export type BashChanges = { changed: string[]; recorded: string[]; threshold: number; gate: boolean }
+
+const NONE: BashChanges = { changed: [], recorded: [], threshold: 0, gate: false }
+
+/** PostToolUse(Bash): このコマンドが書き換えたファイルを拾い、gate.yaml があれば変更ファイルのメモに記録する。 */
+export async function detectBashChanges(io: Io, payload: Dict): Promise<BashChanges> {
   try {
     const projectDir = io.projectDir || io.cwd
-    if (!(await io.exists(join(projectDir, '.claude', 'gate.yaml')))) return []
-
-    const stateId = stateIdOf(payload)
-    const startedFile = startedPath(projectDir, payload)
+    const gate = await hasGate(io, projectDir)
+    const dir = startedDir(io, projectDir, gate)
+    const startedFile = startedPath(dir, payload)
     const raw = await io.readFile(startedFile)
-    if (raw === undefined) return []
+    if (raw === undefined) return NONE
     try {
-      return await record(io, projectDir, stateId, raw, payload)
+      return await detect(io, projectDir, gate, dir, raw, payload)
     } finally {
       await io.removeFiles([startedFile])
     }
   } catch {
-    return []
+    return NONE
   }
 }
 
-async function record(io: Io, projectDir: string, stateId: string, raw: string, payload: Dict): Promise<string[]> {
+/** PostToolUse(Bash): このコマンドが書き換えたファイルを記録し、新たに記録した絶対パスを返す（gate.yaml が無ければ常に空）。 */
+export async function recordBashChanges(io: Io, payload: Dict): Promise<string[]> {
+  return (await detectBashChanges(io, payload)).recorded
+}
+
+async function detect(io: Io, projectDir: string, gate: boolean, startedDirPath: string, raw: string, payload: Dict): Promise<BashChanges> {
   let saved: unknown
   try {
     saved = JSON.parse(raw)
   } catch {
-    return []
+    return NONE
   }
-  if (!isDict(saved) || typeof saved.started !== 'number') return []
+  if (!isDict(saved) || typeof saved.started !== 'number') return NONE
   // tool_use_id が食い違う開始時刻は、別のコマンドのものなので使わない。
-  if (jqStr(saved.tool_use_id) !== jqStr(payload.tool_use_id)) return []
+  if (jqStr(saved.tool_use_id) !== jqStr(payload.tool_use_id)) return NONE
 
   const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined)
-  if (SKIP_COMMAND_RE.test(command)) return []
+  if (SKIP_COMMAND_RE.test(command)) return NONE
 
   const threshold = saved.started - MTIME_SLACK_MS
   const stateDir = join(projectDir, '.claude', STATE_DIR)
@@ -113,19 +143,20 @@ async function record(io: Io, projectDir: string, stateId: string, raw: string, 
   for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd)) {
     for (const rel of await candidates(io, root, threshold)) {
       const abs = join(root, rel)
-      if (abs.startsWith(`${stateDir}/`) || rel.startsWith(`.claude/${STATE_DIR}/`)) continue
+      if (abs.startsWith(`${stateDir}/`) || abs.startsWith(`${startedDirPath}/`) || rel.startsWith(`.claude/${STATE_DIR}/`)) continue
       const st = await io.stat(abs)
       if (st?.kind === 'file' && st.mtimeMs >= threshold) picked.add(abs)
     }
   }
-  if (picked.size === 0) return []
+  const changed = [...picked]
+  if (changed.length === 0 || !gate) return { changed, recorded: [], threshold, gate }
 
-  const memo = join(stateDir, `changed_files.${stateId}.txt`)
+  const memo = join(stateDir, `changed_files.${stateIdOf(payload)}.txt`)
   const existing = (await io.readFile(memo)) ?? ''
   const have = new Set(existing.split('\n'))
-  const added = [...picked].filter((p) => !have.has(p))
-  if (added.length > 0) await io.writeFile(memo, `${existing}${added.map((p) => `${p}\n`).join('')}`)
-  return added
+  const recorded = changed.filter((p) => !have.has(p))
+  if (recorded.length > 0) await io.writeFile(memo, `${existing}${recorded.map((p) => `${p}\n`).join('')}`)
+  return { changed, recorded, threshold, gate }
 }
 
 const gitTop = async (io: Io, dir: string): Promise<string> => {
@@ -166,9 +197,33 @@ async function candidates(io: Io, root: string, threshold: number): Promise<stri
   return [...out]
 }
 
-/** PostToolUse(Bash): 記録できたときだけ gate の rules フェーズを走らせる。 */
+/**
+ * PostToolUse(Bash) の各段。register.ts はこれを順に runSteps へ渡し、結果（block / warn）をまとめる:
+ * 書き換えたファイルを拾う → それぞれを feedback の post_edit / pre_edit で検査する → メモに記録できたときだけ
+ * gate の rules フェーズを走らせる。Edit / Write の PostToolUse（recordChanges → feedbackPostEdit → rules）と同じ並び。
+ */
+export function bashChangeSteps(payload: Dict): Array<(io: Io) => Promise<ScriptResult>> {
+  let found: BashChanges = NONE
+  return [
+    async (io) => {
+      found = await detectBashChanges(io, payload)
+      return ok()
+    },
+    (io) => (found.changed.length > 0 ? feedbackBashEdits(io, payload, found.changed, found.threshold) : Promise.resolve(ok())),
+    (io) => (found.recorded.length > 0 ? stopTestGate(io, 'rules', payload) : Promise.resolve(ok())),
+  ]
+}
+
+/** PostToolUse(Bash): bashChangeSteps を 1 つの結果にまとめて返す（テスト・単体呼び出し用。block は先のものが勝つ）。 */
 export async function bashChanges(io: Io, payload: Dict): Promise<ScriptResult> {
-  const recorded = await recordBashChanges(io, payload)
-  if (recorded.length === 0) return ok()
-  return stopTestGate(io, 'rules', payload)
+  let stdout = ''
+  let stderr = ''
+  let exitCode = 0
+  for (const step of bashChangeSteps(payload)) {
+    const r = await step(io)
+    stderr += r.stderr
+    if (exitCode === 0 && r.exitCode !== 0) exitCode = r.exitCode
+    if (stdout.trim() === '' && r.stdout.trim() !== '') stdout = r.stdout
+  }
+  return { exitCode, stdout, stderr }
 }

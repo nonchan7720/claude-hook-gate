@@ -3,7 +3,7 @@
 // グローバル (~/.claude/feedback/*.md) とプロジェクト (<projectDir>/.claude/feedback/*.md) の
 // 両ディレクトリから frontmatter を全件読み（同名はプロジェクト側が優先）、count に応じた強制力
 // （severity: deny / ask（pre_*）・block（stop_check / post_edit） / warn）を解決する。
-// PreToolUse hook (feedback-guard.ts) / PostToolUse hook (feedback-post-edit.ts) /
+// PreToolUse hook (feedback-guard.ts) / PostToolUse hook (feedback-post-edit.ts, feedback-bash-edit.ts) /
 // Stop hook (feedback-stop-check.ts) / UserPromptSubmit hook (feedback-inject.ts) から使う
 // 共通ロジックのみを持つ。
 //
@@ -18,6 +18,8 @@
 //     severity: deny           # 任意。省略時は count から自動決定
 //
 //   - event: pre_edit          # PreToolUse(Edit|Write|MultiEdit) で対象と内容を検査
+//                              # （Bash で書かれたファイルは実行後に PostToolUse(Bash) で同じ条件を評価し、
+//                              #  deny / ask は block にする。feedback-bash-edit.ts）
 //     path: 'glob'             # 必須。file_path にマッチ
 //     exclude_path: 'glob'     # 任意。文字列または配列。path にマッチしても
 //                              # これにマッチしたら検査対象外（テスト不要なファイルの除外）
@@ -36,6 +38,7 @@
 //                              # absent_sibling と併記した場合は OR で判定する
 //
 //   - event: post_edit         # PostToolUse(Edit|Write|MultiEdit) で、編集後のファイル全体を検査
+//                              # （Bash で書き換えられたファイルも PostToolUse(Bash) で同様に。feedback-bash-edit.ts）
 //     path: 'glob'             # 必須。file_path（プロジェクト相対）にマッチ
 //     exclude_path: 'glob'     # 任意。文字列または配列。マッチしたら検査対象外
 //     when: '正規表現'          # 任意。編集後のファイル内容（ディスク上の全文）に対して（m フラグ）

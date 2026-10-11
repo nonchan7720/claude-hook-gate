@@ -1,11 +1,11 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { bashChanges, bashStarted, recordBashChanges, SKIP_COMMAND_RE } from '../src/bash-changes.ts'
 import type { Dict } from '../src/pyutil.ts'
 import { changedLines, changedPath, exists, statePath, writeGateYaml } from './helpers/gate.ts'
-import { makeIo, withTmp } from './helpers/node-io.ts'
+import { makeIo, rmTree, tmpDir, withTmp } from './helpers/node-io.ts'
 
 const T0 = 1_700_000_000_000
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' })
@@ -38,9 +38,13 @@ const payload = (extra: Dict = {}): Dict => ({
   ...extra,
 })
 
+// 実環境の ~/.claude/feedback を読まないよう、空の feedback ディレクトリを差す。
+const FEEDBACK_DIR = tmpDir('bash-changes-fb-')
+afterAll(() => rmTree(FEEDBACK_DIR))
+
 /** now を可変にした io。開始時刻 start で bashStarted を呼べる。 */
 function ioAt(proj: string, clock: { t: number }) {
-  return makeIo({ projectDir: proj, now: () => clock.t })
+  return makeIo({ projectDir: proj, now: () => clock.t, env: { CLAUDE_FEEDBACK_DIR: FEEDBACK_DIR } })
 }
 
 describe('SKIP_COMMAND_RE', () => {
@@ -107,13 +111,15 @@ describe('recordBashChanges', () => {
       expect(await recordBashChanges(io, payload())).toEqual([path.join(proj, 'tracked.txt')])
     }))
 
-  test('does nothing without gate.yaml', () =>
+  test('does nothing without gate.yaml (and without post_edit / pre_edit feedback rules)', () =>
     withTmp(async (proj) => {
       initRepo(proj, false)
       const clock = { t: T0 }
       const io = ioAt(proj, clock)
       await bashStarted(io, payload())
       expect(exists(statePath(proj, 'bash_started', 'sess-1', 'json'))).toBe(false)
+      expect(exists(statePath(proj, 'bash_started', 'sess-1--tu1', 'json'))).toBe(false)
+      expect(exists(path.join(FEEDBACK_DIR, '.bash_started'))).toBe(false)
       fs.writeFileSync(path.join(proj, 'tracked.txt'), 'changed\n')
       setMtime(path.join(proj, 'tracked.txt'), T0 + 500)
       expect(await recordBashChanges(io, payload())).toEqual([])
