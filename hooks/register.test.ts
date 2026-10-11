@@ -118,6 +118,25 @@ test('PreToolUse: ルール違反の Bash は deny、stdin 相当の組み立て
   expect(r.text).toContain('no_rm (count: 6): forbidden')
 })
 
+test('PreToolUse: 別ファイルのルールが壊れていても（YAML・正規表現・enforce の形）他の deny は効き、壊れたファイルは記録・注入される', async ($, on) => {
+  const { files } = setup(on, {
+    '/h/.claude/feedback/no_rm.md': rule('no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    message: forbidden\n    severity: deny\n"),
+    '/h/.claude/feedback/aa_regex.md': rule('aa_regex', 6, "enforce:\n  - event: pre_bash\n    when: 'go\\s+test(?i)\\s'\n    message: x\n"),
+    '/h/.claude/feedback/aa_null.md': rule('aa_null', 6, 'enforce:\n  -\n'),
+    '/h/.claude/feedback/aa_dict.md': rule('aa_dict', 6, 'enforce:\n  event: pre_bash\n  when: rm\n'),
+    '/h/.claude/feedback/zz_yaml.md': rule('zz_yaml', 3, "enforce:\n  - event: pre_bash\n    when: 'it's'\n    message: x\n"),
+  })
+  const r = await $.tool.call({ tool: 'Bash', command: 'rm -rf x' })
+  expect(r.isError).toBe(true)
+  expect(r.text).toContain('no_rm (count: 6): forbidden')
+  expect(files['/h/.claude/feedback/.violations.jsonl']).toContain('no_rm')
+  const errors = files['/h/.claude/feedback/.errors.jsonl'] ?? ''
+  for (const f of ['aa_regex', 'aa_null', 'aa_dict', 'zz_yaml']) expect(errors).toContain(`/h/.claude/feedback/${f}.md`)
+  const p = await $.classic.UserPromptSubmit({ prompt: 'hi' })
+  expect(p.additionalContext?.[1]).toContain('次のルールファイルが読めず無効になっています')
+  expect(p.additionalContext?.[1]).toContain('- /h/.claude/feedback/zz_yaml.md: ファイルを読めません: ')
+})
+
 test('PreToolUse: 違反したルールの count を自動で上げ、同じセッションでは 1 回だけ', async ($, on) => {
   const { files } = setup(on, {
     '/h/.claude/feedback/no_rm.md': rule('no_rm', 3, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    message: forbidden\n    severity: deny\n"),

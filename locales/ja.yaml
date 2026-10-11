@@ -9,6 +9,14 @@ notify:
 inject:
   header: "# 確定フィードバックルール（count >= 3）\nこれらは繰り返し指摘された確定ルール。違反すると hook がブロックする。\n\n"
   ruleTitle: "■ {{name}} (これまで {{count}} 回指摘されています)"
+  brokenRules: "# 読めない feedback ルール\n次のルールファイルが読めず無効になっています（enforce の要素だけが不正なものは、その要素だけが無効）。直すまで、その強制は効きません。ユーザーに伝えてください:"
+
+rules:
+  unreadable: "ファイルを読めません: {{error}}"
+  enforceNotList: "enforce がリストではありません（{{type}}）。各要素を `- event: ...` の形で書いてください"
+  enforceItemNotMapping: "enforce[{{index}}] が辞書ではありません（{{type}}）"
+  badRegex: "enforce[{{index}}].{{key}} の正規表現が使えません: {{error}}"
+  evalError: "enforce[{{index}}] の評価に失敗しました: {{error}}"
 
 guard:
   evaluating: "[feedback-guard] 評価中: {{rule}}"
@@ -63,6 +71,7 @@ correct:
   noEnforce: "count {{count}} の確定ルールだが enforce が無く、hook が検知できない（違反ログにも出ない）"
   stale: "enforce ありで違反ログに一度も出ていない。enforce が効いているか、ルールが古くなっていないか確認"
   expiredAction: "{{reason}}。削除または更新を検討"
+  broken: "読めず無効になっている: {{reason}}。ファイルを直す"
   reportHeader: "[correct] 直近 {{window}}: ルール {{rules}} 件 / 違反 {{violations}} 件"
   noProposals: "提案はありません。"
   applyNone: "apply: 書き換えたファイルはありません。"
@@ -73,6 +82,7 @@ correct:
     - enforce の追加は、対象ルールの本文から正規表現 / glob を起こして具体案を提案する（雛形は rules/feedback_rules.md の enforce 節）。
     - ファイルを書き換える前に、必ずユーザーに確認する（rules/feedback_rules.md のルールどおり）。
     - stale / expired は、ルールを残すか更新・削除するかをユーザーに尋ねる。
+    - broken は、読めない理由（YAML の書き方・正規表現の書き方など）を説明し、直し方を提案する（Python 専用の正規表現の書き方は JavaScript で使える形に書き換える）。
   contextApplied: "- apply により次のファイルの count をすでに書き換えた。その事実をユーザーに伝えること: {{list}}"
 
 band:

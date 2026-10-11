@@ -1,20 +1,24 @@
 // スラッシュコマンド /correct: feedback ルールと違反ログ（.violations.jsonl）を集計し、
-// 「count を上げる」「enforce を足す」「期限切れを片付ける」の提案を出す。
+// 「読めないルールを直す」「count を上げる」「enforce を足す」「期限切れを片付ける」の提案を出す。
 // 集計・提案・整形は純粋関数に分け、ファイルに触れるのは readViolations / applyCountBumps / correctCommand だけ。
 
 import {
+  type BrokenRule,
   feedbackDir,
   isRuleActive,
   listRules,
+  logError,
   projectFeedbackDir,
   type Rule,
   readCountLine,
   replaceCountLine,
+  scanRules,
   violationsLogPath,
   writeFileAtomic,
 } from './feedback-rules.ts'
 import { type Lang, tr } from './i18n.ts'
 import type { Io } from './io.ts'
+import { basename } from './path.ts'
 
 const HOUR_MS = 3_600_000
 const DAY_MS = 86_400_000
@@ -45,6 +49,7 @@ export type RuleStats = {
 export type ProposalOpts = { window: number; min: number; now: number; lang: Lang }
 
 export type Proposal =
+  | { kind: 'broken'; rule: string; path: string; reason: string }
   | { kind: 'bump'; rule: string; path: string; from: number; to: number; reason: string }
   | { kind: 'enforce'; rule: string; path: string; reason: string; template: string }
   | { kind: 'stale'; rule: string; path: string; reason: string }
@@ -187,8 +192,11 @@ function inactiveReason(rule: Rule, now: number, lang: Lang): string {
   return t('correct.notMatching', { what: parts.join(' / ') || t('correct.conditions') })
 }
 
-/** 提案を作る。並びは bump（to 降順、違反数降順）→ enforce → stale → expired。 */
-export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<string, RuleStats>, opts: ProposalOpts): Proposal[] {
+/**
+ * 提案を作る。並びは broken（読めないルールファイル・捨てた enforce の要素）→ bump（to 降順、違反数降順）→ enforce →
+ * stale → expired。broken の rule は、ファイル名から .md を除いたもの（読めないファイルは name が分からないため）。
+ */
+export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<string, RuleStats>, opts: ProposalOpts, broken: BrokenRule[] = []): Proposal[] {
   const bumps: Array<Extract<Proposal, { kind: 'bump' }> & { n: number }> = []
   const enforces: Proposal[] = []
   const stales: Proposal[] = []
@@ -253,8 +261,15 @@ export function buildProposals(rules: Rule[], inactive: Rule[], stats: Map<strin
     })
   }
 
+  const brokens: Proposal[] = broken.map((b) => ({
+    kind: 'broken',
+    rule: basename(b.path).replace(/\.md$/, ''),
+    path: b.path,
+    reason: t('correct.broken', { reason: b.reason }),
+  }))
+
   bumps.sort((a, b) => b.to - a.to || b.n - a.n)
-  return [...bumps.map(({ n: _n, ...p }) => p), ...enforces, ...stales, ...expireds]
+  return [...brokens, ...bumps.map(({ n: _n, ...p }) => p), ...enforces, ...stales, ...expireds]
 }
 
 /** ユーザー向けのレポート（opts.lang の言語）。applied を渡すと、書き換えたファイルの一覧を出す。 */
@@ -336,17 +351,19 @@ export async function correctCommand(io: Io, args: string): Promise<{ text: stri
   try {
     const parsed = parseCorrectArgs(args)
     const now = await io.now()
-    const rules = await listRules(io)
+    const { rules, broken } = await scanRules(io)
+    for (const b of broken) await logError(io, 'rules', b.reason, b.path)
     const inactive = await listInactive(io, rules)
     const stats = aggregateViolations(await readViolations(io), now, parsed.window)
     const opts = { window: parsed.window, min: parsed.min, now, lang: io.lang }
-    const proposals = buildProposals(rules, inactive, stats, opts)
+    const proposals = buildProposals(rules, inactive, stats, opts, broken)
     const applied = parsed.apply ? await applyCountBumps(io, proposals) : undefined
     return {
       text: formatReport(proposals, stats, { window: parsed.window, apply: parsed.apply, lang: io.lang }, rules.length, applied),
       context: buildContext(proposals, applied ?? [], io.lang),
     }
   } catch (e) {
+    await logError(io, 'correct', e instanceof Error ? e.message : String(e))
     return { text: `[correct] internal error: ${e instanceof Error ? e.message : String(e)}`, context: [] }
   }
 }

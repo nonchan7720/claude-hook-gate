@@ -74,6 +74,14 @@
 //
 // このフィルタは listRules を feedbackDirPath 省略で呼んだとき（グローバル＋プロジェクトのマージ後）にだけ
 // かかる。ディレクトリを明示したときは無加工で返す。
+//
+// 壊れたルールの扱い（1つのルールの不備で他のルールまで止めないため）:
+//   - frontmatter が YAML として読めないファイルは、そのファイルだけを飛ばす
+//   - enforce がリストでない（`- ` の書き忘れなど）ルールは enforce を空として扱う
+//   - enforce の要素のうち、辞書でないもの・when / unless が使えない正規表現のものは、その要素だけを捨てる
+//   - 評価中に例外になった要素は、その要素だけを飛ばす
+// いずれも、ファイルと理由を ~/.claude/feedback/.errors.jsonl に残し（BrokenRule）、UserPromptSubmit の注入と
+// /correct で知らせる。
 import { asList, compileGlobs, expandBraces, globExists } from './glob.ts'
 import { type Lang, tr } from './i18n.ts'
 import type { Io } from './io.ts'
@@ -86,8 +94,11 @@ export type Rule = {
   name: string
   description: string
   count: number
+  /** 検証済みの enforce（辞書で、when / unless が正規表現としてコンパイルできる要素だけ）。 */
   enforce: Dict[]
   path: string
+  /** 捨てた enforce の要素の理由（ルール自体は有効）。 */
+  problems?: string[]
   /** 有効期限（ミリ秒）。これより後は無効。未指定なら無期限。 */
   expires?: number
   /** プロジェクトディレクトリの絶対パスにマッチする glob（~ 展開前）。空なら制限なし。 */
@@ -118,6 +129,12 @@ export function projectFeedbackDir(io: Io, projectDir?: string): string {
 }
 
 export const violationsLogPath = (io: Io): string => join(feedbackDir(io), '.violations.jsonl')
+
+/** 壊れたルールと、hook が握りつぶした内部エラーを残すログ。 */
+export const errorsLogPath = (io: Io): string => join(feedbackDir(io), '.errors.jsonl')
+
+/** 読めなかったルールファイル、または捨てた enforce の要素。 */
+export type BrokenRule = { path: string; reason: string }
 
 // ---- frontmatter 読み込み ----
 export const FRONTMATTER_RE = /^---\s*\n([\s\S]*?\n)---\s*\n?/
@@ -150,7 +167,51 @@ function parseExpires(v: unknown): number | undefined {
 /** 文字列または配列を文字列だけのリストにそろえる。 */
 const stringList = (v: unknown): string[] => asList(v).filter((x): x is string => typeof x === 'string')
 
-/** 1つの feedback ファイルから frontmatter を読む。frontmatter が無ければ null（rules.md はこれで黙ってスキップされる）。 */
+const typeName = (v: unknown): string => (v === null || v === undefined ? 'null' : Array.isArray(v) ? 'list' : isDict(v) ? 'mapping' : typeof v)
+
+/** when / unless を評価するイベントと、そのときのフラグ（evalPreBash / evalPreEdit / evalPostEdit と同じ）。 */
+const REGEX_FLAGS: Record<string, string> = { pre_bash: '', pre_edit: 'm', post_edit: 'm' }
+
+/**
+ * frontmatter の enforce を「辞書のリスト」にそろえる。リストでなければ空、辞書でない要素と
+ * when / unless が使えない正規表現の要素は捨て、その理由を problems に入れる。
+ */
+export function normalizeEnforce(io: Io, raw: unknown): { enforce: Dict[]; problems: string[] } {
+  const t = tr(io.lang)
+  const problems: string[] = []
+  if (!truthy(raw)) return { enforce: [], problems }
+  if (!Array.isArray(raw)) return { enforce: [], problems: [t('rules.enforceNotList', { type: typeName(raw) })] }
+  const enforce: Dict[] = []
+  raw.forEach((entry: unknown, index: number) => {
+    if (!isDict(entry)) {
+      problems.push(t('rules.enforceItemNotMapping', { index, type: typeName(entry) }))
+      return
+    }
+    const flags = typeof entry.event === 'string' ? REGEX_FLAGS[entry.event] : undefined
+    if (flags !== undefined) {
+      for (const key of ['when', 'unless']) {
+        const v = entry[key]
+        if (!truthy(v)) continue
+        try {
+          pyRegExp(String(v), flags)
+        } catch (e) {
+          problems.push(t('rules.badRegex', { index, key, error: errorText(e) }))
+          return
+        }
+      }
+    }
+    enforce.push(entry)
+  })
+  return { enforce, problems }
+}
+
+/** 例外を 1 行の文字列にする（YAML のエラーはコードフレーム付きの複数行なので先頭行だけ）。 */
+export const errorText = (e: unknown): string => (e instanceof Error ? e.message : String(e)).split('\n')[0]?.trim() ?? ''
+
+/**
+ * 1つの feedback ファイルから frontmatter を読む。frontmatter が無ければ null（rules.md はこれで黙ってスキップされる）。
+ * frontmatter が YAML として読めなければ例外を投げる（listRules はそのファイルだけを飛ばす）。
+ */
 export async function loadRule(io: Io, path: string): Promise<Rule | null> {
   const content = await io.readFile(path)
   if (content === undefined) return null
@@ -158,11 +219,13 @@ export async function loadRule(io: Io, path: string): Promise<Rule | null> {
   if (!m) return null
   const data = loadYamlText(m[1] ?? '')
   if (!isDict(data) || !truthy(data.name)) return null
+  const { enforce, problems } = normalizeEnforce(io, data.enforce)
   return {
     name: String(data.name),
     description: truthy(data.description) ? String(data.description) : '',
     count: toCount(data.count),
-    enforce: (truthy(data.enforce) ? data.enforce : []) as Dict[],
+    enforce,
+    ...(problems.length > 0 ? { problems } : {}),
     path,
     expires: parseExpires(data.expires),
     projects: stringList(data.projects),
@@ -216,17 +279,24 @@ export async function loadBodyIntro(io: Io, path: string): Promise<string> {
   return (lead.split('\n\n')[0] ?? '').trim()
 }
 
-/** 1つのディレクトリ直下の *.md を名前順に走査し、frontmatter を持つものだけ返す。 */
-async function listRulesIn(io: Io, d: string): Promise<Rule[]> {
+/** 1つのディレクトリ直下の *.md を名前順に走査し、frontmatter を持つものだけ返す。読めないファイルは broken に入れて飛ばす。 */
+async function listRulesIn(io: Io, d: string, broken: BrokenRule[]): Promise<Rule[]> {
   const rules: Rule[] = []
   const names = (await io.list(d)).map((e) => e.name).sort()
   for (const name of names) {
     if (!name.endsWith('.md')) continue
-    const rule = await loadRule(io, join(d, name))
-    if (rule) rules.push(rule)
+    const path = join(d, name)
+    try {
+      const rule = await loadRule(io, path)
+      if (rule) rules.push(rule)
+    } catch (e) {
+      broken.push({ path, reason: tr(io.lang)('rules.unreadable', { error: errorText(e) }) })
+    }
   }
   return rules
 }
+
+const problemsOf = (rules: Rule[]): BrokenRule[] => rules.flatMap((r) => (r.problems ?? []).map((reason) => ({ path: r.path, reason })))
 
 /**
  * feedback ルールを全件読み、frontmatter を持つものだけ返す。
@@ -237,20 +307,34 @@ async function listRulesIn(io: Io, d: string): Promise<Rule[]> {
  * feedbackDirPath を明示したときはフィルタせず無加工で返す。
  */
 export async function listRules(io: Io, feedbackDirPath?: string): Promise<Rule[]> {
-  if (feedbackDirPath) return listRulesIn(io, feedbackDirPath)
+  const { rules, broken } = await scanRules(io, feedbackDirPath)
+  for (const b of broken) await logError(io, 'rules', b.reason, b.path)
+  return rules
+}
+
+/**
+ * listRules と同じ読み方で、ルールと壊れたルール（読めなかったファイルと、捨てた enforce の要素）を返す。ログには書かない。
+ * 壊れたルールのうち enforce の要素の不備は、返すルール（マージ・フィルタ後）のものだけを含める。
+ */
+export async function scanRules(io: Io, feedbackDirPath?: string): Promise<{ rules: Rule[]; broken: BrokenRule[] }> {
+  const broken: BrokenRule[] = []
+  if (feedbackDirPath) {
+    const rules = await listRulesIn(io, feedbackDirPath, broken)
+    return { rules, broken: [...broken, ...problemsOf(rules)] }
+  }
   const globalDir = feedbackDir(io)
   const projectDir = projectFeedbackDir(io)
-  const globalRules = await listRulesIn(io, globalDir)
+  const globalRules = await listRulesIn(io, globalDir, broken)
   // 両方が同じパスを指す場合は一度しか読まない
   let merged = globalRules
   if (projectDir !== globalDir) {
-    const projectRules = await listRulesIn(io, projectDir)
+    const projectRules = await listRulesIn(io, projectDir, broken)
     const overridden = new Set(projectRules.map((r) => r.name))
     merged = [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules]
   }
   const active: Rule[] = []
   for (const r of merged) if (await isRuleActive(io, r)) active.push(r)
-  return active
+  return { rules: active, broken: [...broken, ...problemsOf(active)] }
 }
 
 // ---- severity 解決 ----
@@ -284,6 +368,41 @@ export function logViolation(io: Io, rule: string, count: number, severity: stri
   })
   logQueue = task
   return task
+}
+
+/**
+ * ~/.claude/feedback/.errors.jsonl に1行 JSON を追記する（壊れたルールと、hook が握りつぶした内部エラー）。
+ * hook は呼び出しのたびにルールを読み直すので、同じ (source, file, error) がすでにあれば書かない。
+ * ログ失敗で hook を止めないよう例外は握りつぶす。
+ */
+export function logError(io: Io, source: string, error: string, file?: string): Promise<void> {
+  const task = logQueue.then(async () => {
+    try {
+      const path = errorsLogPath(io)
+      const existing = (await io.readFile(path)) ?? ''
+      const same = (line: string): boolean => {
+        try {
+          const d: unknown = JSON.parse(line)
+          return isDict(d) && d.source === source && d.error === error && (d.file ?? undefined) === file
+        } catch {
+          return false
+        }
+      }
+      if (existing.split('\n').some(same)) return
+      const ts = new Date(await io.now()).toISOString().replace('Z', '+00:00')
+      const entry = { ts, source, ...(file !== undefined ? { file } : {}), error }
+      await io.writeFile(path, `${existing}${JSON.stringify(entry)}\n`)
+    } catch {
+      // ログ失敗で hook を止めない
+    }
+  })
+  logQueue = task
+  return task
+}
+
+/** enforce の1要素の評価で出た例外を記録する（その要素だけを飛ばし、他の要素・ルールの評価は続ける）。 */
+async function logEntryError(io: Io, rule: Rule, index: number, e: unknown): Promise<void> {
+  await logError(io, 'enforce', tr(io.lang)('rules.evalError', { index, error: errorText(e) }), rule.path)
 }
 
 // ---- count の自動引き上げ ----
@@ -445,36 +564,52 @@ export function extractPreEditContent(toolName: string, toolInput: Dict): string
 
 const SHELL = ['sh', '-c']
 
-// ---- enforce 評価: pre_bash ----
-export async function evalPreBash(io: Io, rules: Rule[], command: string, projectDir?: string): Promise<Violation[]> {
-  const dir = projectDir || io.projectDir || io.cwd
+/**
+ * rules の enforce のうち event の要素を順に fn で評価し、返った違反を集める。fn が例外を投げた要素
+ * （不正な正規表現など）はその要素だけを飛ばして .errors.jsonl に残し、他の要素・ルールの評価は続ける。
+ */
+async function evalEntries(io: Io, rules: Rule[], event: string, fn: (rule: Rule, entry: Dict) => Promise<Violation | undefined>): Promise<Violation[]> {
   const violations: Violation[] = []
-  if (!command) return violations
   for (const rule of rules) {
-    for (const entry of rule.enforce) {
-      if (entry.event !== 'pre_bash') continue
-      const when = entry.when
-      if (!truthy(when) || !pyRegExp(String(when)).test(command)) continue
-      const unless = entry.unless
-      if (truthy(unless) && pyRegExp(String(unless)).test(command)) continue
-      const checkCmd = entry.check
-      if (truthy(checkCmd)) {
-        io.progress?.(tr(io.lang)('guard.evaluating', { rule: rule.name }))
-        const r = await io.run([...SHELL, String(checkCmd)], { cwd: dir, env: { CLAUDE_PROJECT_DIR: dir }, timeoutMs: 10_000 })
-        // 非0終了で違反確定。0終了なら違反ではない。check 自体が動かせない場合は when 一致のみで違反扱いにする。
-        if (r.exitCode === 0 && !r.timedOut && r.error === undefined) continue
+    const entries: unknown[] = Array.isArray(rule.enforce) ? rule.enforce : []
+    for (const [index, entry] of entries.entries()) {
+      if (!isDict(entry) || entry.event !== event) continue
+      try {
+        const v = await fn(rule, entry)
+        if (v) violations.push(v)
+      } catch (e) {
+        await logEntryError(io, rule, index, e)
       }
-      violations.push({
-        rule: rule.name,
-        count: rule.count,
-        severity: resolveSeverity(rule.count, entry.severity, 'pre_bash'),
-        event: 'pre_bash',
-        message: truthy(entry.message) ? String(entry.message) : '',
-        detail: `command matched: ${String(when)}`,
-      })
     }
   }
   return violations
+}
+
+// ---- enforce 評価: pre_bash ----
+export async function evalPreBash(io: Io, rules: Rule[], command: string, projectDir?: string): Promise<Violation[]> {
+  const dir = projectDir || io.projectDir || io.cwd
+  if (!command) return []
+  return evalEntries(io, rules, 'pre_bash', async (rule, entry) => {
+    const when = entry.when
+    if (!truthy(when) || !pyRegExp(String(when)).test(command)) return undefined
+    const unless = entry.unless
+    if (truthy(unless) && pyRegExp(String(unless)).test(command)) return undefined
+    const checkCmd = entry.check
+    if (truthy(checkCmd)) {
+      io.progress?.(tr(io.lang)('guard.evaluating', { rule: rule.name }))
+      const r = await io.run([...SHELL, String(checkCmd)], { cwd: dir, env: { CLAUDE_PROJECT_DIR: dir }, timeoutMs: 10_000 })
+      // 非0終了で違反確定。0終了なら違反ではない。check 自体が動かせない場合は when 一致のみで違反扱いにする。
+      if (r.exitCode === 0 && !r.timedOut && r.error === undefined) return undefined
+    }
+    return {
+      rule: rule.name,
+      count: rule.count,
+      severity: resolveSeverity(rule.count, entry.severity, 'pre_bash'),
+      event: 'pre_bash',
+      message: truthy(entry.message) ? String(entry.message) : '',
+      detail: `command matched: ${String(when)}`,
+    }
+  })
 }
 
 // ---- enforce 評価: pre_edit ----
@@ -483,64 +618,59 @@ export async function evalPreEdit(io: Io, rules: Rule[], filePath: string, conte
   const [root, rel] = splitRoot(dir, filePath)
   const name = basename(filePath)
   const text = content || ''
-  const violations: Violation[] = []
-  for (const rule of rules) {
-    for (const entry of rule.enforce) {
-      if (entry.event !== 'pre_edit') continue
-      const patterns = asList(entry.path)
-      if (patterns.length === 0) continue
-      if (!compileGlobs(patterns).some((rx) => rx.test(rel))) continue
+  return evalEntries(io, rules, 'pre_edit', async (rule, entry) => {
+    const patterns = asList(entry.path)
+    if (patterns.length === 0) return undefined
+    if (!compileGlobs(patterns).some((rx) => rx.test(rel))) return undefined
 
-      const exclPatterns = asList(entry.exclude_path)
-      if (exclPatterns.length > 0 && compileGlobs(exclPatterns).some((rx) => rx.test(rel))) continue
+    const exclPatterns = asList(entry.exclude_path)
+    if (exclPatterns.length > 0 && compileGlobs(exclPatterns).some((rx) => rx.test(rel))) return undefined
 
-      const absentSibling = entry.absent_sibling
-      const absentGlobs = asList(entry.absent_glob)
-      let detail: string
-      if (truthy(absentSibling) || absentGlobs.length > 0) {
-        if (looksLikeTestFile(name)) continue // テストファイル自身は対象外
-        const candidates: string[] = []
-        let found = false
-        if (truthy(absentSibling)) {
-          const sibNames = expandStem(String(absentSibling), filePath)
-          candidates.push(...sibNames)
-          for (const sib of sibNames) {
-            if (await io.exists(join(dirname(filePath), sib))) {
-              found = true
-              break
-            }
+    const absentSibling = entry.absent_sibling
+    const absentGlobs = asList(entry.absent_glob)
+    let detail: string
+    if (truthy(absentSibling) || absentGlobs.length > 0) {
+      if (looksLikeTestFile(name)) return undefined // テストファイル自身は対象外
+      const candidates: string[] = []
+      let found = false
+      if (truthy(absentSibling)) {
+        const sibNames = expandStem(String(absentSibling), filePath)
+        candidates.push(...sibNames)
+        for (const sib of sibNames) {
+          if (await io.exists(join(dirname(filePath), sib))) {
+            found = true
+            break
           }
         }
-        for (const pat of absentGlobs) {
-          if (found) break
-          for (const expanded of expandBraces(expandTestPattern(pat, rel))) {
-            candidates.push(expanded)
-            if (await globExists(io, join(root, expanded))) {
-              found = true
-              break
-            }
-          }
-        }
-        if (found) continue
-        detail = `missing test file: ${candidates.join(', ')}`
-      } else {
-        const when = entry.when
-        if (!truthy(when) || !pyRegExp(String(when), 'm').test(text)) continue
-        const unless = entry.unless
-        if (truthy(unless) && pyRegExp(String(unless), 'm').test(text)) continue
-        detail = `content matched: ${String(when)}`
       }
-      violations.push({
-        rule: rule.name,
-        count: rule.count,
-        severity: resolveSeverity(rule.count, entry.severity, 'pre_edit'),
-        event: 'pre_edit',
-        message: truthy(entry.message) ? String(entry.message) : '',
-        detail,
-      })
+      for (const pat of absentGlobs) {
+        if (found) break
+        for (const expanded of expandBraces(expandTestPattern(pat, rel))) {
+          candidates.push(expanded)
+          if (await globExists(io, join(root, expanded))) {
+            found = true
+            break
+          }
+        }
+      }
+      if (found) return undefined
+      detail = `missing test file: ${candidates.join(', ')}`
+    } else {
+      const when = entry.when
+      if (!truthy(when) || !pyRegExp(String(when), 'm').test(text)) return undefined
+      const unless = entry.unless
+      if (truthy(unless) && pyRegExp(String(unless), 'm').test(text)) return undefined
+      detail = `content matched: ${String(when)}`
     }
-  }
-  return violations
+    return {
+      rule: rule.name,
+      count: rule.count,
+      severity: resolveSeverity(rule.count, entry.severity, 'pre_edit'),
+      event: 'pre_edit',
+      message: truthy(entry.message) ? String(entry.message) : '',
+      detail,
+    }
+  })
 }
 
 // ---- enforce 評価: post_edit ----
@@ -549,52 +679,52 @@ export async function evalPostEdit(io: Io, rules: Rule[], filePath: string, proj
   const dir = projectDir || io.projectDir || io.cwd
   const [root, rel] = splitRoot(dir, filePath)
   const absPath = isAbsolute(filePath) ? filePath : join(dir, filePath)
-  const violations: Violation[] = []
   let text: string | undefined
-  for (const rule of rules) {
-    for (const entry of rule.enforce) {
-      if (entry.event !== 'post_edit') continue
-      const patterns = asList(entry.path)
-      if (patterns.length === 0) continue
-      if (!compileGlobs(patterns).some((rx) => rx.test(rel))) continue
+  let unreadable = false
+  return evalEntries(io, rules, 'post_edit', async (rule, entry) => {
+    if (unreadable) return undefined
+    const patterns = asList(entry.path)
+    if (patterns.length === 0) return undefined
+    if (!compileGlobs(patterns).some((rx) => rx.test(rel))) return undefined
 
-      const exclPatterns = asList(entry.exclude_path)
-      if (exclPatterns.length > 0 && compileGlobs(exclPatterns).some((rx) => rx.test(rel))) continue
+    const exclPatterns = asList(entry.exclude_path)
+    if (exclPatterns.length > 0 && compileGlobs(exclPatterns).some((rx) => rx.test(rel))) return undefined
 
-      // when / check のどちらも無い要素は無視する
-      const when = entry.when
-      const checkCmd = entry.check
-      if (!truthy(when) && !truthy(checkCmd)) continue
+    // when / check のどちらも無い要素は無視する
+    const when = entry.when
+    const checkCmd = entry.check
+    if (!truthy(when) && !truthy(checkCmd)) return undefined
 
+    if (text === undefined) {
+      text = await io.readFile(absPath)
       if (text === undefined) {
-        text = await io.readFile(absPath)
-        if (text === undefined) return violations
+        unreadable = true
+        return undefined
       }
-      const details: string[] = []
-      if (truthy(when)) {
-        if (!pyRegExp(String(when), 'm').test(text)) continue
-        const unless = entry.unless
-        if (truthy(unless) && pyRegExp(String(unless), 'm').test(text)) continue
-        details.push(`content matched: ${String(when)}`)
-      }
-      if (truthy(checkCmd)) {
-        io.progress?.(tr(io.lang)('postEdit.checking', { rule: rule.name, file: absPath }))
-        const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: dir, FILE: absPath }, timeoutMs: 15_000 })
-        // 非0終了（タイムアウト・実行不能を含む）で違反確定。0終了なら違反ではない。
-        if (r.exitCode === 0 && !r.timedOut && r.error === undefined) continue
-        details.push(`check failed: ${String(checkCmd)}`)
-      }
-      violations.push({
-        rule: rule.name,
-        count: rule.count,
-        severity: resolveSeverity(rule.count, entry.severity, 'post_edit'),
-        event: 'post_edit',
-        message: truthy(entry.message) ? String(entry.message) : '',
-        detail: details.join(', '),
-      })
     }
-  }
-  return violations
+    const details: string[] = []
+    if (truthy(when)) {
+      if (!pyRegExp(String(when), 'm').test(text)) return undefined
+      const unless = entry.unless
+      if (truthy(unless) && pyRegExp(String(unless), 'm').test(text)) return undefined
+      details.push(`content matched: ${String(when)}`)
+    }
+    if (truthy(checkCmd)) {
+      io.progress?.(tr(io.lang)('postEdit.checking', { rule: rule.name, file: absPath }))
+      const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: dir, FILE: absPath }, timeoutMs: 15_000 })
+      // 非0終了（タイムアウト・実行不能を含む）で違反確定。0終了なら違反ではない。
+      if (r.exitCode === 0 && !r.timedOut && r.error === undefined) return undefined
+      details.push(`check failed: ${String(checkCmd)}`)
+    }
+    return {
+      rule: rule.name,
+      count: rule.count,
+      severity: resolveSeverity(rule.count, entry.severity, 'post_edit'),
+      event: 'post_edit',
+      message: truthy(entry.message) ? String(entry.message) : '',
+      detail: details.join(', '),
+    }
+  })
 }
 
 // ---- enforce 評価: stop_check ----
@@ -679,54 +809,48 @@ export async function getChangedFiles(io: Io, projectDir: string, sessionId: str
 
 export async function evalStopCheck(io: Io, rules: Rule[], projectDir: string, changedFiles: string[]): Promise<Violation[]> {
   const keyed = changedFiles.map((f) => splitRoot(projectDir, f))
-  const violations: Violation[] = []
-  for (const rule of rules) {
-    for (const entry of rule.enforce) {
-      if (entry.event !== 'stop_check') continue
-      const patterns = asList(entry.changed)
-      if (patterns.length === 0) continue
-      const rxs = compileGlobs(patterns)
-      const matchedKeys = new Set<string>()
-      for (const [root, rel] of keyed) if (rxs.some((rx) => rx.test(rel))) matchedKeys.add(`${root}\0${rel}`)
-      const matched = [...matchedKeys].sort().map((k) => k.split('\0') as [string, string])
-      if (matched.length === 0) continue
+  return evalEntries(io, rules, 'stop_check', async (rule, entry) => {
+    const patterns = asList(entry.changed)
+    if (patterns.length === 0) return undefined
+    const rxs = compileGlobs(patterns)
+    const matchedKeys = new Set<string>()
+    for (const [root, rel] of keyed) if (rxs.some((rx) => rx.test(rel))) matchedKeys.add(`${root}\0${rel}`)
+    const matched = [...matchedKeys].sort().map((k) => k.split('\0') as [string, string])
+    if (matched.length === 0) return undefined
 
-      const checkCmd = entry.check
-      const requireSibling = entry.require_sibling
-      const badFiles: string[] = []
-      for (const [root, rel] of matched) {
-        const absPath = join(root, rel)
-        let bad = false
-        if (truthy(requireSibling)) {
-          const sibNames = expandStem(String(requireSibling), absPath)
-          let any = false
-          for (const sib of sibNames) {
-            if (await io.exists(join(dirname(absPath), sib))) {
-              any = true
-              break
-            }
+    const checkCmd = entry.check
+    const requireSibling = entry.require_sibling
+    const badFiles: string[] = []
+    for (const [root, rel] of matched) {
+      const absPath = join(root, rel)
+      let bad = false
+      if (truthy(requireSibling)) {
+        const sibNames = expandStem(String(requireSibling), absPath)
+        let any = false
+        for (const sib of sibNames) {
+          if (await io.exists(join(dirname(absPath), sib))) {
+            any = true
+            break
           }
-          if (!any) bad = true
         }
-        if (truthy(checkCmd)) {
-          io.progress?.(tr(io.lang)('stopCheck.checking', { rule: rule.name, file: absPath }))
-          const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: projectDir, FILE: absPath }, timeoutMs: 15_000 })
-          if (r.exitCode !== 0 || r.timedOut || r.error !== undefined) bad = true
-        }
-        if (bad) badFiles.push(root === projectDir ? rel : `${basename(root)}/${rel}`)
+        if (!any) bad = true
       }
-
-      if (badFiles.length > 0) {
-        violations.push({
-          rule: rule.name,
-          count: rule.count,
-          severity: resolveSeverity(rule.count, entry.severity, 'stop_check'),
-          event: 'stop_check',
-          message: truthy(entry.message) ? String(entry.message) : '',
-          detail: `changed files violating: ${badFiles.join(', ')}`,
-        })
+      if (truthy(checkCmd)) {
+        io.progress?.(tr(io.lang)('stopCheck.checking', { rule: rule.name, file: absPath }))
+        const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: projectDir, FILE: absPath }, timeoutMs: 15_000 })
+        if (r.exitCode !== 0 || r.timedOut || r.error !== undefined) bad = true
       }
+      if (bad) badFiles.push(root === projectDir ? rel : `${basename(root)}/${rel}`)
     }
-  }
-  return violations
+
+    if (badFiles.length === 0) return undefined
+    return {
+      rule: rule.name,
+      count: rule.count,
+      severity: resolveSeverity(rule.count, entry.severity, 'stop_check'),
+      event: 'stop_check',
+      message: truthy(entry.message) ? String(entry.message) : '',
+      detail: `changed files violating: ${badFiles.join(', ')}`,
+    }
+  })
 }

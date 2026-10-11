@@ -8,15 +8,17 @@
 // 該当ツール呼び出しを止める。warn のみなら stderr に書いて exit 0（ツールは実行させる）。違反が無ければ
 // 何も出さず exit 0。
 //
-// hook 自身のバグで作業を止めないよう、例外は必ず握りつぶして exit 0 にする（stderr に1行だけ出す）。
+// hook 自身のバグで作業を止めないよう、例外は必ず握りつぶして exit 0 にする（stderr に1行だけ出し、~/.claude/feedback/.errors.jsonl に残す）。
 import {
   autoBumpCounts,
   countBumpNotes,
+  errorText,
   evalPreBash,
   evalPreEdit,
   extractPreEditContent,
   feedbackDir,
   listRules,
+  logError,
   logViolation,
   type Violation,
 } from './feedback-rules.ts'
@@ -119,7 +121,8 @@ export async function feedbackGuard(io: Io, payload: Dict): Promise<ScriptResult
   try {
     return await main(io, payload)
   } catch (e) {
-    // hook のバグで作業を止めない
-    return ok('', `[feedback-guard] internal error (ignored): ${e instanceof Error ? e.message : String(e)}\n`)
+    // hook のバグで作業を止めない（黙って全ルールが無効にならないよう .errors.jsonl に残す）
+    await logError(io, 'feedback-guard', errorText(e))
+    return ok('', `[feedback-guard] internal error (ignored): ${errorText(e)}\n`)
   }
 }

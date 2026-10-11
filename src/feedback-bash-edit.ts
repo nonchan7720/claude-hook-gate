@@ -13,9 +13,22 @@
 //
 // 複数ファイルの結果は 1 つにまとめる（block があれば全件を 1 つの reason に、warn は stderr に）。
 // 違反したルールの count は Edit / Write と同じく autoBumpCounts で上げ、その旨をメッセージに添える。
-// hook 自身のバグで作業を止めないよう、例外は必ず握りつぶして exit 0 にする（stderr に1行だけ出す）。
+// hook 自身のバグで作業を止めないよう、例外は必ず握りつぶして exit 0 にする（stderr に1行だけ出し、~/.claude/feedback/.errors.jsonl に残す）。
+// 壊れたルール（読めないファイル・不正な enforce の要素）は listRules / evalPostEdit / evalPreEdit が飛ばして記録するので、
+// 他のルールの検査は続く。
 import { downgradeRepeatedAsks } from './feedback-guard.ts'
-import { autoBumpCounts, countBumpNotes, evalPostEdit, evalPreEdit, listRules, logViolation, type Rule, type Violation } from './feedback-rules.ts'
+import {
+  autoBumpCounts,
+  countBumpNotes,
+  errorText,
+  evalPostEdit,
+  evalPreEdit,
+  listRules,
+  logError,
+  logViolation,
+  type Rule,
+  type Violation,
+} from './feedback-rules.ts'
 import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { basename, dirname, isAbsolute, join, relpath } from './path.ts'
@@ -115,7 +128,8 @@ export async function feedbackBashEdits(io: Io, payload: Dict, files: string[], 
   try {
     return await main(io, payload, files, threshold)
   } catch (e) {
-    // hook のバグで作業を止めない
-    return ok('', `[feedback-bash-edit] internal error (ignored): ${e instanceof Error ? e.message : String(e)}\n`)
+    // hook のバグで作業を止めない（黙って全ルールが無効にならないよう .errors.jsonl に残す）
+    await logError(io, 'feedback-bash-edit', errorText(e))
+    return ok('', `[feedback-bash-edit] internal error (ignored): ${errorText(e)}\n`)
   }
 }

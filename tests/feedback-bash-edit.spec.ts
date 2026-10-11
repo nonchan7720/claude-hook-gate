@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { bashChanges, bashStarted } from '../src/bash-changes.ts'
-import { addedLines } from '../src/feedback-bash-edit.ts'
+import { addedLines, feedbackBashEdits } from '../src/feedback-bash-edit.ts'
 import { readCountLine } from '../src/feedback-rules.ts'
 import type { Dict } from '../src/pyutil.ts'
 import { exists, writeGateYaml } from './helpers/gate.ts'
@@ -147,6 +147,52 @@ describe('Bash edits are checked by feedback rules', () => {
     await runBash(() => bashWrite('src/a.ts', 'console.log(1)\n'))
     const lines = fs.readFileSync(path.join(fb, '.violations.jsonl'), 'utf8').trim().split('\n')
     expect(lines.map((l) => JSON.parse(l))).toMatchObject([{ rule: 'no_console_log', event: 'post_edit', severity: 'block' }])
+  })
+
+  test('a broken rule file elsewhere does not disable the post_edit / pre_edit checks; it is logged', async () => {
+    initRepo(false)
+    consoleLogPost(4)
+    // YAML として読めないファイル
+    fs.writeFileSync(path.join(fb, 'aa_yaml.md'), "---\nname: aa_yaml\ncount: 3\nenforce:\n  - event: post_edit\n    path: 'it's'\n---\n", 'utf8')
+    // Python 互換でない正規表現の要素（その要素だけ捨てる）と、enforce が辞書でないルール
+    writeRule('aa_regex', 4, ['  - event: post_edit', "    path: 'src/**/*.ts'", "    when: 'x(?i)y'", "    message: 'x'"])
+    writeRule('aa_null', 4, ['  -'])
+    // 同じルール内の壊れた要素は飛ばし、正しい要素（pre_edit）は効く
+    writeRule('no_any', 3, [
+      '  - event: pre_edit',
+      "    path: 'src/**/*.ts'",
+      "    when: '(?<'",
+      "    message: 'x'",
+      '  - event: pre_edit',
+      "    path: 'src/**/*.ts'",
+      "    when: ':\\s*any\\b'",
+      "    message: 'any を書かない'",
+    ])
+    const r = await runBash(() => bashWrite('src/a.ts', 'console.log(1)\nexport const y: any = 2\n'))
+    const reason: string = JSON.parse(r.stdout).reason
+    expect(reason).toContain('no_console_log (count: 4): console.log を残さない (src/a.ts: ')
+    expect(reason).toContain('no_any (count: 3): any を書かない (src/a.ts: ')
+    const errors = fs.readFileSync(path.join(fb, '.errors.jsonl'), 'utf8')
+    for (const f of ['aa_yaml', 'aa_regex', 'aa_null', 'no_any']) expect(errors).toContain(path.join(fb, `${f}.md`))
+    // 壊れた要素を持つルールでも count の自動引き上げは frontmatter の count 行だけを書き換える
+    const noAny = fs.readFileSync(path.join(fb, 'no_any.md'), 'utf8')
+    expect(readCountLine(noAny)).toBe(4)
+    expect(noAny).toContain("when: '(?<'")
+    expect(readCountLine(fs.readFileSync(path.join(fb, 'aa_yaml.md'), 'utf8'))).toBe(3)
+  })
+
+  test('an internal error is logged to .errors.jsonl and does not stop the work', async () => {
+    initRepo(false)
+    noAnyPre(4)
+    const abs = bashWrite('src/a.ts', 'export const y: any = 2\n')
+    const broken = io()
+    broken.run = async () => {
+      throw new Error('boom')
+    }
+    const r = await feedbackBashEdits(broken, payload(), [abs], T0)
+    expect(r.stdout).toBe('')
+    expect(r.stderr).toBe('[feedback-bash-edit] internal error (ignored): boom\n')
+    expect(fs.readFileSync(path.join(fb, '.errors.jsonl'), 'utf8')).toContain('"source":"feedback-bash-edit"')
   })
 
   describe('count auto bump', () => {
