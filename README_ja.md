@@ -88,10 +88,11 @@ flowchart LR
 ## インストール
 
 ```
-/plugin install feedback-gate --marketplace nonchan7720/claude-hook-gate
+/plugin marketplace add nonchan7720/claude-hook-gate
+/plugin install feedback-gate@claude-hook-gate
 ```
 
-マーケットプレイスの追加を聞かれたら `y` と答え、スコープを選択します。
+1 行目でこのリポジトリを `claude-hook-gate` マーケットプレイスとして追加し、2 行目でそこから `feedback-gate` プラグインをインストールします。その後スコープを選択します。
 
 ## 前提
 
