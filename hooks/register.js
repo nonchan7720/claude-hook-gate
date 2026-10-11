@@ -11449,7 +11449,7 @@ async function allStop(io, payload) {
 }
 
 // src/bash-changes.ts
-var SKIP_COMMAND_RE = /\bgit\b[^|;&\n]*\b(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/;
+var SKIP_COMMAND_RE = /\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?:=\S+)?))*\s+(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/;
 var MTIME_SLACK_MS = 2000;
 var STALE_STARTED_MS = 2 * 60 * 60 * 1000;
 var STATE_DIR = ".gate-status";
@@ -11518,38 +11518,65 @@ async function record(io, projectDir, stateId, raw, payload) {
   const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
   if (SKIP_COMMAND_RE.test(command))
     return [];
-  const cwd = jqStr(payload.cwd) || io.cwd;
-  const top = await io.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 });
-  if (top.exitCode !== 0)
-    return [];
-  const root = top.stdout.replace(/\n+$/, "");
-  if (root === "")
-    return [];
-  const listed = await io.run(["git", "-C", cwd, "ls-files", "-z", "--modified", "--others", "--exclude-standard", "--full-name"], { timeoutMs: 1e4 });
-  if (listed.exitCode !== 0)
-    return [];
   const threshold = saved.started - MTIME_SLACK_MS;
   const stateDir = join(projectDir, ".claude", STATE_DIR);
-  const picked = [];
-  for (const rel of new Set(listed.stdout.split("\x00").filter((s) => s !== ""))) {
-    const abs = join(root, rel);
-    if (abs.startsWith(`${stateDir}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
-      continue;
-    const st = await io.stat(abs);
-    if (st?.kind === "file" && st.mtimeMs >= threshold)
-      picked.push(abs);
+  const picked = new Set;
+  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd)) {
+    for (const rel of await candidates(io, root, threshold)) {
+      const abs = join(root, rel);
+      if (abs.startsWith(`${stateDir}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
+        continue;
+      const st = await io.stat(abs);
+      if (st?.kind === "file" && st.mtimeMs >= threshold)
+        picked.add(abs);
+    }
   }
-  if (picked.length === 0)
+  if (picked.size === 0)
     return [];
   const memo = join(stateDir, `changed_files.${stateId}.txt`);
   const existing = await io.readFile(memo) ?? "";
   const have = new Set(existing.split(`
 `));
-  const added = picked.filter((p) => !have.has(p));
+  const added = [...picked].filter((p) => !have.has(p));
   if (added.length > 0)
     await io.writeFile(memo, `${existing}${added.map((p) => `${p}
 `).join("")}`);
   return added;
+}
+var gitTop = async (io, dir) => {
+  const top = await io.run(["git", "-C", dir, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 });
+  return top.exitCode === 0 ? top.stdout.replace(/\n+$/, "") : "";
+};
+async function scanRoots(io, projectDir, cwd) {
+  const roots = [];
+  const add = (top) => {
+    if (top !== "" && !roots.includes(top))
+      roots.push(top);
+  };
+  add(await gitTop(io, cwd));
+  const worktreesDir = join(projectDir, ".claude", "worktrees");
+  for (const e of await io.list(worktreesDir)) {
+    if (e.kind === "dir")
+      add(await gitTop(io, join(worktreesDir, e.name)));
+  }
+  return roots;
+}
+async function candidates(io, root, threshold) {
+  const out = new Set;
+  const listed = await io.run(["git", "-C", root, "ls-files", "-z", "--modified", "--others", "--exclude-standard", "--full-name"], { timeoutMs: 1e4 });
+  if (listed.exitCode === 0) {
+    for (const s of listed.stdout.split("\x00"))
+      if (s !== "" && !s.endsWith("/"))
+        out.add(s);
+  }
+  const since = `--since=@${Math.floor(threshold / 1000)}`;
+  const logged = await io.run(["git", "-C", root, "log", since, "--no-merges", "--name-only", "-z", "--format=", "HEAD"], { timeoutMs: 1e4 });
+  if (logged.exitCode === 0) {
+    for (const s of logged.stdout.split(/[\0\n]/))
+      if (s !== "")
+        out.add(s);
+  }
+  return [...out];
 }
 async function bashChanges(io, payload) {
   const recorded = await recordBashChanges(io, payload);
