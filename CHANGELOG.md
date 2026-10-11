@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.5.1...v0.6.0) (2026-10-11)
+
+
+### Features
+
+* check files written by Bash with the post_edit / pre_edit feedback rules ([#31](https://github.com/nonchan7720/claude-hook-gate/issues/31)) ([4d6c4dc](https://github.com/nonchan7720/claude-hook-gate/commit/4d6c4dc10bac0862e7520b041ca895d4f4bb14dc))
+* raise a feedback rule's count automatically when a hook detects a violation ([#30](https://github.com/nonchan7720/claude-hook-gate/issues/30)) ([a2a96c8](https://github.com/nonchan7720/claude-hook-gate/commit/a2a96c81d6f9192a2a8bbea8371bfce88ecf415a))
+
+
+### Bug Fixes
+
+* block the stop while a rules failure is left unfixed ([#29](https://github.com/nonchan7720/claude-hook-gate/issues/29)) ([cf7bc36](https://github.com/nonchan7720/claude-hook-gate/commit/cf7bc363c1d780d746c487ffe8d4f3fd329971d1))
+* catch Bash edits into worktrees and edits committed in the same command ([#28](https://github.com/nonchan7720/claude-hook-gate/issues/28)) ([d833cb2](https://github.com/nonchan7720/claude-hook-gate/commit/d833cb28bb02036abeb7c542bf6ea2d61ec739ae))
+* keep the other feedback rules working when one rule file is broken ([#32](https://github.com/nonchan7720/claude-hook-gate/issues/32)) ([6651d27](https://github.com/nonchan7720/claude-hook-gate/commit/6651d27c06a0084b2474cabebb4ee754bdc5e525))
+* run the same gate command one at a time across agents ([#33](https://github.com/nonchan7720/claude-hook-gate/issues/33)) ([9380d6a](https://github.com/nonchan7720/claude-hook-gate/commit/9380d6ad83984d86afb74fe37d71a1136731c866))
+* serialize the same gate command across git worktrees of one repository ([#34](https://github.com/nonchan7720/claude-hook-gate/issues/34)) ([07b248c](https://github.com/nonchan7720/claude-hook-gate/commit/07b248ce0ddaec7b95faf59a958bec0206431960))
+
+
+### Documentation
+
+* fix plugin install instructions to add the marketplace first ([#26](https://github.com/nonchan7720/claude-hook-gate/issues/26)) ([9c59ace](https://github.com/nonchan7720/claude-hook-gate/commit/9c59ace998fbfe0d633232516325fc96d337a556))
+
 ## [0.5.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.5.0...v0.5.1) (2026-10-10)
 
 
