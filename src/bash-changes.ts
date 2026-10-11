@@ -2,6 +2,8 @@
 // PreToolUse(Bash) で開始時刻を控え（bashStarted）、PostToolUse(Bash) で git が見ている変更・未追跡ファイルのうち
 // mtime がコマンド開始以降のものだけを拾う（recordBashChanges）。git の履歴・作業ツリー操作（rebase / checkout など）で
 // 動いたファイルは「変更」ではないので、そのコマンドは最初から記録対象外にする。
+// 見る作業ツリーは cwd のものと <projectDir>/.claude/worktrees/ 配下の各 worktree で、同じコマンドの中で
+// コミットされたファイルもコミット履歴から拾う（scanRoots / candidates）。
 // PJ が .claude/gate.yaml を持つ場合のみ動く（オプトイン）。
 //
 // 開始時刻のファイル（bash_started.<session>--<tool_use_id>.json）は tool_use_id で引く。エンジンが classic.PreToolUse
@@ -14,8 +16,13 @@ import { join } from './path.ts'
 import { type Dict, isDict, jqStr } from './pyutil.ts'
 import { stopTestGate } from './stop-test-gate.ts'
 
-/** 記録しない git コマンド（履歴・作業ツリーを動かす操作）。 */
-export const SKIP_COMMAND_RE = /\bgit\b[^|;&\n]*\b(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/
+/**
+ * 記録しない git コマンド（履歴・作業ツリーを動かす操作）。サブコマンドの位置（git と、-C <dir> / -c <k=v> /
+ * --xxx などのグローバルオプションの直後）だけを見る。`git commit -m "fix checkout"` のようにメッセージや
+ * 引数に語が入っただけのコマンドまで記録対象外にしないため。
+ */
+export const SKIP_COMMAND_RE =
+  /\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?:=\S+)?))*\s+(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/
 
 // HFS+ の 1 秒粒度と時計ずれの余裕。
 const MTIME_SLACK_MS = 2000
@@ -100,32 +107,63 @@ async function record(io: Io, projectDir: string, stateId: string, raw: string, 
   const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined)
   if (SKIP_COMMAND_RE.test(command)) return []
 
-  const cwd = jqStr(payload.cwd) || io.cwd
-  const top = await io.run(['git', '-C', cwd, 'rev-parse', '--show-toplevel'], { timeoutMs: 10_000 })
-  if (top.exitCode !== 0) return []
-  const root = top.stdout.replace(/\n+$/, '')
-  if (root === '') return []
-
-  const listed = await io.run(['git', '-C', cwd, 'ls-files', '-z', '--modified', '--others', '--exclude-standard', '--full-name'], { timeoutMs: 10_000 })
-  if (listed.exitCode !== 0) return []
-
   const threshold = saved.started - MTIME_SLACK_MS
   const stateDir = join(projectDir, '.claude', STATE_DIR)
-  const picked: string[] = []
-  for (const rel of new Set(listed.stdout.split('\0').filter((s) => s !== ''))) {
-    const abs = join(root, rel)
-    if (abs.startsWith(`${stateDir}/`) || rel.startsWith(`.claude/${STATE_DIR}/`)) continue
-    const st = await io.stat(abs)
-    if (st?.kind === 'file' && st.mtimeMs >= threshold) picked.push(abs)
+  const picked = new Set<string>()
+  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd)) {
+    for (const rel of await candidates(io, root, threshold)) {
+      const abs = join(root, rel)
+      if (abs.startsWith(`${stateDir}/`) || rel.startsWith(`.claude/${STATE_DIR}/`)) continue
+      const st = await io.stat(abs)
+      if (st?.kind === 'file' && st.mtimeMs >= threshold) picked.add(abs)
+    }
   }
-  if (picked.length === 0) return []
+  if (picked.size === 0) return []
 
   const memo = join(stateDir, `changed_files.${stateId}.txt`)
   const existing = (await io.readFile(memo)) ?? ''
   const have = new Set(existing.split('\n'))
-  const added = picked.filter((p) => !have.has(p))
+  const added = [...picked].filter((p) => !have.has(p))
   if (added.length > 0) await io.writeFile(memo, `${existing}${added.map((p) => `${p}\n`).join('')}`)
   return added
+}
+
+const gitTop = async (io: Io, dir: string): Promise<string> => {
+  const top = await io.run(['git', '-C', dir, 'rev-parse', '--show-toplevel'], { timeoutMs: 10_000 })
+  return top.exitCode === 0 ? top.stdout.replace(/\n+$/, '') : ''
+}
+
+/**
+ * 変更を探す git の作業ツリー: cwd の作業ツリーと、<projectDir>/.claude/worktrees/ 直下の各 worktree。
+ * worktree は .git を持つ入れ子の作業ツリーなので、外側から ls-files しても "<name>/" の 1 行にしかならない。
+ * cwd が本体のまま worktree のファイルを書き換えるコマンド（絶対パスへの heredoc など）を拾うため、個別に見る。
+ */
+async function scanRoots(io: Io, projectDir: string, cwd: string): Promise<string[]> {
+  const roots: string[] = []
+  const add = (top: string) => {
+    if (top !== '' && !roots.includes(top)) roots.push(top)
+  }
+  add(await gitTop(io, cwd))
+  const worktreesDir = join(projectDir, '.claude', 'worktrees')
+  for (const e of await io.list(worktreesDir)) {
+    if (e.kind === 'dir') add(await gitTop(io, join(worktreesDir, e.name)))
+  }
+  return roots
+}
+
+/**
+ * root で変更の候補になるルート相対パス: 変更・未追跡のファイルと、threshold 以降のコミットが触ったファイル。
+ * 書いてそのまま同じコマンドで git commit すると作業ツリーには何も残らないので、コミット側も見る。
+ * どちらも最後に mtime で絞るので、他の作業のコミットが混ざっても、このコマンドの間に書かれていなければ落ちる。
+ */
+async function candidates(io: Io, root: string, threshold: number): Promise<string[]> {
+  const out = new Set<string>()
+  const listed = await io.run(['git', '-C', root, 'ls-files', '-z', '--modified', '--others', '--exclude-standard', '--full-name'], { timeoutMs: 10_000 })
+  if (listed.exitCode === 0) for (const s of listed.stdout.split('\0')) if (s !== '' && !s.endsWith('/')) out.add(s)
+  const since = `--since=@${Math.floor(threshold / 1000)}`
+  const logged = await io.run(['git', '-C', root, 'log', since, '--no-merges', '--name-only', '-z', '--format=', 'HEAD'], { timeoutMs: 10_000 })
+  if (logged.exitCode === 0) for (const s of logged.stdout.split(/[\0\n]/)) if (s !== '') out.add(s)
+  return [...out]
 }
 
 /** PostToolUse(Bash): 記録できたときだけ gate の rules フェーズを走らせる。 */

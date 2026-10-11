@@ -7,7 +7,13 @@ import type { Dict } from '../src/pyutil.ts'
 import { changedLines, changedPath, exists, statePath, writeGateYaml } from './helpers/gate.ts'
 import { makeIo, withTmp } from './helpers/node-io.ts'
 
+const T0 = 1_700_000_000_000
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' })
+/** コミット日時を ms で指定して git を呼ぶ（コミット履歴から拾う判定を、T0 基準の時計に合わせる）。 */
+const gitAt = (ms: number, cwd: string, ...args: string[]) => {
+  const date = `@${Math.floor(ms / 1000)} +0000`
+  execFileSync('git', args, { cwd, stdio: 'ignore', env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } })
+}
 
 /** git init して、tracked.txt / old.txt（と gate.yaml）をコミットした PJ を作る。 */
 function initRepo(proj: string, gateYaml = true): void {
@@ -19,10 +25,10 @@ function initRepo(proj: string, gateYaml = true): void {
   fs.writeFileSync(path.join(proj, 'tracked.txt'), 'a\n')
   fs.writeFileSync(path.join(proj, 'old.txt'), 'a\n')
   git(proj, 'add', '.')
-  git(proj, 'commit', '-q', '-m', 'init')
+  // 開始時刻（T0）より前のコミットにしておく。後のコミットは「このコマンドが触ったファイル」の候補になるため。
+  gitAt(T0 - 3_600_000, proj, 'commit', '-q', '-m', 'init')
 }
 
-const T0 = 1_700_000_000_000
 const setMtime = (p: string, ms: number) => fs.utimesSync(p, ms / 1000, ms / 1000)
 const payload = (extra: Dict = {}): Dict => ({
   session_id: 'sess-1',
@@ -44,7 +50,16 @@ describe('SKIP_COMMAND_RE', () => {
     }
   })
   test('does not match read-only git or other commands', () => {
-    for (const c of ['git status', 'git diff', 'git log', 'bun run format', "sed -i 's/a/b/' x.txt"]) {
+    for (const c of [
+      'git status',
+      'git diff',
+      'git log',
+      'bun run format',
+      "sed -i 's/a/b/' x.txt",
+      'git commit -m "fix checkout flow"',
+      'git add -A && git commit -m "restore the reset button"',
+      'git -C .claude/worktrees/w commit -m merge',
+    ]) {
       expect(SKIP_COMMAND_RE.test(c)).toBe(false)
     }
   })
@@ -254,6 +269,50 @@ describe('recordBashChanges', () => {
       ])
       expect(changedLines(proj, 'sess-1--a').sort()).toEqual([path.join(proj, 'a.txt'), path.join(proj, 'b.txt')])
       expect(changedLines(proj, 'sess-1--b')).toEqual([path.join(proj, 'b.txt')])
+    }))
+
+  test('records files committed within the same command', () =>
+    withTmp(async (proj) => {
+      initRepo(proj)
+      const clock = { t: T0 }
+      const io = ioAt(proj, clock)
+      await bashStarted(io, payload({ tool_input: { command: 'cat > a.txt <<EOF ... EOF && git add -A && git commit -m wip' } }))
+      fs.writeFileSync(path.join(proj, 'a.txt'), 'new\n')
+      fs.writeFileSync(path.join(proj, 'tracked.txt'), 'changed\n')
+      for (const f of ['a.txt', 'tracked.txt']) setMtime(path.join(proj, f), T0 + 500)
+      git(proj, 'add', '-A')
+      gitAt(T0 + 1000, proj, 'commit', '-q', '-m', 'wip')
+      const got = await recordBashChanges(io, payload({ tool_input: { command: 'git commit' } }))
+      expect(got.sort()).toEqual([path.join(proj, 'a.txt'), path.join(proj, 'tracked.txt')])
+    }))
+
+  test('does not record files of commits made before the start', () =>
+    withTmp(async (proj) => {
+      initRepo(proj)
+      fs.writeFileSync(path.join(proj, 'a.txt'), 'new\n')
+      setMtime(path.join(proj, 'a.txt'), T0 - 60_000)
+      git(proj, 'add', '-A')
+      gitAt(T0 - 60_000, proj, 'commit', '-q', '-m', 'earlier')
+      const clock = { t: T0 }
+      const io = ioAt(proj, clock)
+      await bashStarted(io, payload())
+      expect(await recordBashChanges(io, payload())).toEqual([])
+    }))
+
+  test('records files written into a worktree under .claude/worktrees while cwd is the main checkout', () =>
+    withTmp(async (proj) => {
+      initRepo(proj)
+      gitAt(T0 - 3_600_000, proj, 'worktree', 'add', '-q', '.claude/worktrees/w', '-b', 'w')
+      const wt = path.join(proj, '.claude', 'worktrees', 'w')
+      const clock = { t: T0 }
+      const io = ioAt(proj, clock)
+      await bashStarted(io, payload({ cwd: proj }))
+      fs.writeFileSync(path.join(wt, 'new.txt'), 'new\n')
+      fs.writeFileSync(path.join(wt, 'tracked.txt'), 'changed\n')
+      for (const f of ['new.txt', 'tracked.txt']) setMtime(path.join(wt, f), T0 + 500)
+      const got = await recordBashChanges(io, payload({ cwd: proj }))
+      expect(got.sort()).toEqual([path.join(wt, 'new.txt'), path.join(wt, 'tracked.txt')])
+      expect(changedLines(proj, 'sess-1').sort()).toEqual([path.join(wt, 'new.txt'), path.join(wt, 'tracked.txt')])
     }))
 
   test('returns nothing outside a git repository', () =>
