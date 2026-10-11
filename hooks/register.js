@@ -8696,7 +8696,7 @@ gate:
   skipNoCwd: "[skip: no cwd]"
   noteNoCwd: "(cwd does not exist)"
   worktreeNotFound: "=== [gate] worktree not found: {{root}}. Excluding it. ==="
-  rulesFailed: "[gate] The rules phase failed (the conversation is not stopped). See the errors above and fix them."
+  rulesFailed: "[gate] Verification failed. Stopping (and reporting the work as done) is blocked until it is fixed. See the errors above and fix them now."
   rulesPassed: "[gate] rules phase passed:\\n{{body}}"
   checkNotFound: "=== [gate] \\"{{name}}\\" was not found in consistency_checks. Skipping. ==="
   checkNotFoundSummary: "(check:{{name}}) not found, skipped"
@@ -8707,7 +8707,7 @@ gate:
   checksPassed: "[gate] {{title}} passed:\\n{{body}}"
   checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
   checksGaveUp: "[gate] Gave up because consistency checks failed {{max}} times in a row. The target files were returned to CHANGED unverified. Please check them manually. To clear this now, start a new session or run /clear (reset-gate on SessionStart removes the state files)."
-  checksFailed: "consistency checks failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
+  checksFailed: "[gate] Verification failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
   ymlTypo: "[gate] .claude/gate.yaml was not found but .claude/gate.yml exists. Check whether the extension is yml instead of yaml."
   policyUnevaluated: "=== [gate] ({{label}}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [{{reason}}] $ {{cmd}} ==="
   policySkipped: "=== [gate] ({{label}}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ {{cmd}} ==="
@@ -8821,7 +8821,7 @@ gate:
   skipNoCwd: "[skip: cwd無し]"
   noteNoCwd: "(cwd が存在しません)"
   worktreeNotFound: "=== [gate] worktree が見つかりません: {{root}}。対象から外します。 ==="
-  rulesFailed: "[gate] rules フェーズの検証に失敗しました（会話は止まりません）。上のエラーを見て修正してください。"
+  rulesFailed: "[gate] 検証に失敗しました。直すまで終了（Stop）はブロックされ、完了報告もできません。上のエラーを見て、今ここで修正してください。"
   rulesPassed: "[gate] rules フェーズ成功:\\n{{body}}"
   checkNotFound: "=== [gate] consistency_checks に \\"{{name}}\\" が見つかりません。スキップします。 ==="
   checkNotFoundSummary: "(check:{{name}}) 見つかりません、スキップ"
@@ -8832,7 +8832,7 @@ gate:
   checksPassed: "[gate] {{title}} 成功:\\n{{body}}"
   checksGaveUpStderr: "consistency checks が {{max}} 回連続失敗。ループを打ち切ります。手動確認を。"
   checksGaveUp: "[gate] consistency checks が{{max}}回連続で失敗したため打ち切りました。対象ファイルは未検証のまま CHANGED へ戻しました。手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか /clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。"
-  checksFailed: "consistency checks 失敗（試行 {{attempt}}/{{max}}）。上のエラーを見て修正を継続してください。"
+  checksFailed: "[gate] 検証に失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て修正を継続してください。"
   ymlTypo: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
   policyUnevaluated: "=== [gate] ({{label}}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［{{reason}}］ $ {{cmd}} ==="
   policySkipped: "=== [gate] ({{label}}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ {{cmd}} ==="
@@ -10353,6 +10353,7 @@ class Gate {
   reported;
   trace;
   deferred;
+  failed;
   logRoot;
   logDir;
   defaultPolicy;
@@ -10389,6 +10390,7 @@ class Gate {
     this.reported = join(this.stateDir, `gate_reported.${this.stateId}.txt`);
     this.trace = join(this.stateDir, `gate_trace.${this.stateId}.jsonl`);
     this.deferred = join(this.stateDir, `gate_deferred.${this.stateId}.json`);
+    this.failed = join(this.stateDir, `gate_failed.${this.stateId}.txt`);
     this.logRoot = join(this.stateDir, "logs");
     this.logDir = join(this.logRoot, this.stateId);
     this.defaultPolicy = join(io.pluginRoot, "scripts", "dogwood", "gate.default.dw");
@@ -10409,7 +10411,7 @@ class Gate {
     this.stderr += text;
   }
   async cleanup(only) {
-    await this.io.removeFiles(only ?? [this.changed, this.count, this.sidecar, this.pending, this.reported]);
+    await this.io.removeFiles(only ?? [this.changed, this.count, this.sidecar, this.pending, this.reported, this.failed]);
   }
   async rm(path) {
     await this.io.removeFiles([path]);
@@ -11093,6 +11095,48 @@ ${details}` : "");
     }
     await this.savePending(data);
   }
+  async applyRulesResult(keys, rawByKey, res) {
+    if (res.checkNamesByRoot.size > 0)
+      await this.mergePendingChecks(res.checkNamesByRoot, res.checkRefKeysByRoot, rawByKey);
+    const checkedKeys = new Set;
+    for (const ref of res.checkRefKeysByRoot.values())
+      for (const ks of ref.values())
+        for (const k of ks)
+          checkedKeys.add(k);
+    const remaining = [];
+    const seen = new Set;
+    const sidecarAdd = [];
+    const seenSidecar = new Set;
+    for (const k of keys) {
+      if (res.consumedKeys.has(k))
+        continue;
+      if (res.successKeys.has(k) && !res.failKeys.has(k)) {
+        if (checkedKeys.has(k) && !seenSidecar.has(k)) {
+          seenSidecar.add(k);
+          sidecarAdd.push(k);
+        }
+        continue;
+      }
+      if (seen.has(k))
+        continue;
+      seen.add(k);
+      remaining.push(k);
+    }
+    const ran = new Set(keys);
+    const changed = await this.loadChangedFlat(this.changed);
+    const changedRaw = new Map([...changed.rawByKey, ...rawByKey]);
+    await this.writeChangedFlat(this.changed, [...new Set([...changed.order.filter((k) => !ran.has(k)), ...remaining])], changedRaw);
+    if (sidecarAdd.length > 0) {
+      const existing = await this.loadChangedFlat(this.sidecar);
+      const merged = [...new Set([...existing.order, ...sidecarAdd])];
+      const rawLookup = new Map([...existing.rawByKey, ...rawByKey]);
+      await this.writeChangedFlat(this.sidecar, merged, rawLookup);
+    }
+    const failedNow = keys.filter((k) => res.failKeys.has(k) && !res.consumedKeys.has(k));
+    const prev = await this.loadChangedFlat(this.failed);
+    const failedRaw = new Map([...prev.rawByKey, ...rawByKey]);
+    await this.writeChangedFlat(this.failed, [...new Set([...prev.order.filter((k) => !ran.has(k)), ...failedNow])], failedRaw);
+  }
   async runRulesPhase() {
     if (!(await this.io.exists(this.action) && await this.io.exists(this.changed)))
       return 0;
@@ -11121,39 +11165,7 @@ ${details}` : "");
       if (deferredFailed.length > 0)
         failed = true;
     }
-    if (res.checkNamesByRoot.size > 0)
-      await this.mergePendingChecks(res.checkNamesByRoot, res.checkRefKeysByRoot, rawByKey);
-    const checkedKeys = new Set;
-    for (const ref of res.checkRefKeysByRoot.values())
-      for (const keys of ref.values())
-        for (const k of keys)
-          checkedKeys.add(k);
-    const remaining = [];
-    const seen = new Set;
-    const sidecarAdd = [];
-    const seenSidecar = new Set;
-    for (const k of order) {
-      if (res.consumedKeys.has(k))
-        continue;
-      if (res.successKeys.has(k) && !res.failKeys.has(k)) {
-        if (checkedKeys.has(k) && !seenSidecar.has(k)) {
-          seenSidecar.add(k);
-          sidecarAdd.push(k);
-        }
-        continue;
-      }
-      if (seen.has(k))
-        continue;
-      seen.add(k);
-      remaining.push(k);
-    }
-    await this.writeChangedFlat(this.changed, remaining, rawByKey);
-    if (sidecarAdd.length > 0) {
-      const existing = await this.loadChangedFlat(this.sidecar);
-      const merged = [...new Set([...existing.order, ...sidecarAdd])];
-      const rawLookup = new Map([...existing.rawByKey, ...rawByKey]);
-      await this.writeChangedFlat(this.sidecar, merged, rawLookup);
-    }
+    await this.applyRulesResult(order, rawByKey, res);
     if (failed) {
       this.writeErr(`${[...this.status, ...logs].join(`
 `)}
@@ -11252,17 +11264,30 @@ ${details}` : "");
         return 0;
       }
     }
-    const pending = await this.io.exists(this.pending) ? await this.loadPending() : {};
-    if (Object.keys(pending).length === 0)
-      await this.rm(this.pending);
-    const deferred = await this.takeDeferred();
-    if (Object.keys(pending).length === 0 && deferred.length === 0)
+    const failedFiles = await this.loadChangedFlat(this.failed);
+    if (failedFiles.order.length === 0)
+      await this.rm(this.failed);
+    if (failedFiles.order.length === 0 && !await this.io.exists(this.pending) && !await this.io.exists(this.deferred))
       return 0;
     const mainCfg = await this.loadAction(this.action);
     const logs = [];
     const summary = [];
     let failed = false;
     const policyState = new PolicyState;
+    if (failedFiles.order.length > 0) {
+      const { order: rootOrder, relsByRoot } = this.groupKeysByRoot(failedFiles.order);
+      const res = await this.runRulesAllRoots(rootOrder, relsByRoot, mainCfg, logs, policyState);
+      summary.push(...res.summary);
+      if (res.failed)
+        failed = true;
+      await this.applyRulesResult(failedFiles.order, failedFiles.rawByKey, res);
+    }
+    const pending = await this.io.exists(this.pending) ? await this.loadPending() : {};
+    if (Object.keys(pending).length === 0)
+      await this.rm(this.pending);
+    const deferred = await this.takeDeferred();
+    if (failedFiles.order.length === 0 && Object.keys(pending).length === 0 && deferred.length === 0)
+      return 0;
     const activePending = {};
     const droppedRoots = new Set;
     for (const [root, checksMap] of Object.entries(pending)) {
@@ -11302,7 +11327,7 @@ ${details}` : "");
         this.print({ decision: "block", reason });
         return 2;
       }
-      const title = Object.keys(pending).length > 0 ? "consistency checks" : this.t("gate.deferredTitle");
+      const title = Object.keys(pending).length > 0 ? "consistency checks" : failedFiles.order.length > 0 ? "rules" : this.t("gate.deferredTitle");
       this.print({ systemMessage: this.t("gate.checksPassed", { title, body }) });
       return 0;
     }
@@ -11319,7 +11344,7 @@ ${details}` : "");
     await this.io.writeFile(this.count, String(attempts));
     if (attempts >= MAX_ATTEMPTS2) {
       await this.requeuePendingToChanged(activePending);
-      await this.cleanup([this.count, this.pending]);
+      await this.cleanup([this.count, this.pending, this.failed]);
       this.writeErr(`${this.t("gate.checksGaveUpStderr", { max: MAX_ATTEMPTS2 })}
 `);
       const msg = `${this.t("gate.checksGaveUp", { max: MAX_ATTEMPTS2 })}
@@ -12227,6 +12252,7 @@ var STATE_FILES = [
   ["gate_pending_checks", ".json"],
   ["gate_trace", ".jsonl"],
   ["gate_deferred", ".json"],
+  ["gate_failed", ".txt"],
   ["bash_started", ".json"],
   ["feedback_gate_attempts", ".txt"],
   ["summary", ".txt"]

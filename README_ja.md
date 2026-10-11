@@ -22,7 +22,7 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 | PostToolUse（Bash） | `src/bash-changes.ts` → `src/stop-test-gate.ts`（`rules`） | コマンドが実際に書き換えたファイル（cwd の作業ツリーと `.claude/worktrees/` 配下の各 worktree で、git の変更・未追跡ファイルと、コマンド中に作られたコミットが触ったファイルのうち、mtime がコマンド開始以降のもの）だけを記録し、記録があったときだけ該当ルールを実行する。git の履歴・作業ツリー操作（rebase / checkout / merge など）は記録しない。 |
 | PreToolUse（Agent / SendMessage）、任意 | `src/agent-launch-guard.ts` | `agentLaunchGuard` が `true` のときだけ有効。サブエージェントへ指示を送る前に、送信本文を見せて確認する。 |
 | Notification | `src/notification.ts`（`notify`） | 確認待ちのときにデスクトップ通知（`terminal-notifier` が必要、macOS）。 |
-| Stop | `src/all-stop.ts` | ゲートの `checks` フェーズ、`src/feedback-stop-check.ts`、`stop` 通知を順に実行する。 |
+| Stop | `src/all-stop.ts` | ゲートの `checks` フェーズ（直っていない rules の失敗を再実行し、予約された consistency checks を実行）、`src/feedback-stop-check.ts`、`stop` 通知を順に実行する。 |
 | SubagentStop | ゲートの `checks` フェーズ、`src/feedback-stop-check.ts` | サブエージェント向けの同じゲートと `stop_check` ルール。 |
 
 ### エージェント起動ガード（任意）
@@ -143,6 +143,10 @@ run:
     name: test
     files: false
 ```
+
+### 直していない失敗
+
+`rules` フェーズ（PostToolUse）でルールが失敗しても、ターンは止まらず、エラーが Claude へのフィードバックとして返るだけです。ただし失敗したファイルを `.claude/.gate-status/gate_failed.<state>.txt` に控え、次の `checks` フェーズ（Stop / SubagentStop）で、まずそのルールを最新の内容で再実行します。まだ失敗なら、consistency check の失敗と同じく停止をブロックします（成功報告も出しません）。通れば、`rules` フェーズで通ったときと同じ扱いになります。そのため、lint の失敗を直さずにターンを終えることはできません。連続して `MAX_ATTEMPTS`（5）回ブロックしたら諦め、控えを消します（ファイルは変更ファイルの一覧に残るので、次の編集で再び検査されます）。
 
 ### 成功報告
 
