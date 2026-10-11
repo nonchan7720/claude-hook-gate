@@ -1,7 +1,7 @@
 import type { Engine, HookEvent, HookResult, PluginOptions, Register } from 'claude-code'
 import { agentLaunchGuard } from './agent-launch-guard.ts'
 import { allStop } from './all-stop.ts'
-import { bashChanges, bashStarted } from './bash-changes.ts'
+import { bashChangeSteps, bashStarted } from './bash-changes.ts'
 import { correctCommand } from './correct.ts'
 import { createIo } from './engine-io.ts'
 import { feedbackGuard } from './feedback-guard.ts'
@@ -137,8 +137,9 @@ export const register: Register = (on, options) => {
 
   on('classic.PostToolUse', async ($, e, next) => {
     if (str(e.tool_name) === 'Bash') {
-      // Bash が実際に書き換えたファイルだけを記録し、あれば rules フェーズを走らせる。
-      const mine = await runSteps($, options, 'PostToolUse', [(io) => bashChanges(io, e)])
+      // Bash が実際に書き換えたファイルを拾い、Edit / Write と同じく feedback の post_edit（と、実行後に判定できる
+      // pre_edit）で検査してから、メモに記録できたときだけ rules フェーズを走らせる。gate.yaml が無くても feedback の検査は動く。
+      const mine = await runSteps($, options, 'PostToolUse', bashChangeSteps(e))
       return withNext(next, e, mine)
     }
     if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name))) return next(e)
