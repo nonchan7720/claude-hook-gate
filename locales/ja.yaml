@@ -21,6 +21,9 @@ stopCheck:
   gaveUp: "[feedback-stop-check] {{max}} 回連続でブロックしました。ループを打ち切ります。手動確認を。"
   fixAbove: "[feedback-stop-check] 上記を修正してください（試行 {{attempt}}/{{max}}）。"
 
+autoCount:
+  bumped: "[feedback-gate] 違反を検出したため {{rule}} の count を {{from}} → {{to}} に上げました（{{path}}）。同じ違反を繰り返すと強制力（warn → ask/block → deny）が上がります。"
+
 launch:
   checklist: "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件"
   promptTo: "{{agentType}} に送るプロンプト:"
