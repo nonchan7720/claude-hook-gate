@@ -43,6 +43,13 @@ const setup = (on: any, files: Files = {}, env: Record<string, string> = {}, run
   on('process.run', (_$: unknown, e: { argv: string[] }) => {
     runs.push([...e.argv])
     if (e.argv[0] === 'rm') for (const p of e.argv.slice(1).filter((a) => !a.startsWith('-'))) delete files[p]
+    if (e.argv[0] === 'mv') {
+      const [src, dst] = e.argv.slice(-2) as [string, string]
+      if (src in files) {
+        files[dst] = files[src] as string
+        delete files[src]
+      }
+    }
     const r = run(e.argv)
     return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -102,6 +109,28 @@ test('PreToolUse: ルール違反の Bash は deny、stdin 相当の組み立て
   const r = await $.tool.call({ tool: 'Bash', command: 'rm -rf x' })
   expect(r.isError).toBe(true)
   expect(r.text).toContain('no_rm (count: 6): forbidden')
+})
+
+test('PreToolUse: 違反したルールの count を自動で上げ、同じセッションでは 1 回だけ', async ($, on) => {
+  const { files } = setup(on, {
+    '/h/.claude/feedback/no_rm.md': rule('no_rm', 3, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    message: forbidden\n    severity: deny\n"),
+  })
+  const r = await $.tool.call({ tool: 'Bash', command: 'rm -rf x' })
+  expect(r.text).toContain('no_rm (count: 3): forbidden')
+  expect(r.text).toContain('count を 3 → 4 に上げました')
+  expect(files['/h/.claude/feedback/no_rm.md']).toContain('\ncount: 4\n')
+  await $.tool.call({ tool: 'Bash', command: 'rm -rf y' })
+  expect(files['/h/.claude/feedback/no_rm.md']).toContain('\ncount: 4\n')
+  expect(Object.keys(files).filter((f) => f.endsWith('.tmp'))).toEqual([])
+})
+
+test('PreToolUse: autoCount が false なら count を上げない', { options: { autoCount: false } }, async ($, on) => {
+  const { files } = setup(on, {
+    '/h/.claude/feedback/no_rm.md': rule('no_rm', 3, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    message: forbidden\n    severity: deny\n"),
+  })
+  const r = await $.tool.call({ tool: 'Bash', command: 'rm -rf x' })
+  expect(r.text).not.toContain('上げました')
+  expect(files['/h/.claude/feedback/no_rm.md']).toContain('\ncount: 3\n')
 })
 
 test('PreToolUse: 違反が無ければ通し、対象外ツールは何も実行しない', async ($, on) => {

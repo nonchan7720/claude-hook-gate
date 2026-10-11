@@ -2,7 +2,17 @@
 // 「count を上げる」「enforce を足す」「期限切れを片付ける」の提案を出す。
 // 集計・提案・整形は純粋関数に分け、ファイルに触れるのは readViolations / applyCountBumps / correctCommand だけ。
 
-import { FRONTMATTER_RE, feedbackDir, isRuleActive, listRules, projectFeedbackDir, type Rule, violationsLogPath } from './feedback-rules.ts'
+import {
+  feedbackDir,
+  isRuleActive,
+  listRules,
+  projectFeedbackDir,
+  type Rule,
+  readCountLine,
+  replaceCountLine,
+  violationsLogPath,
+  writeFileAtomic,
+} from './feedback-rules.ts'
 import { type Lang, tr } from './i18n.ts'
 import type { Io } from './io.ts'
 
@@ -285,15 +295,10 @@ export async function applyCountBumps(io: Io, proposals: Proposal[]): Promise<Ap
   for (const p of proposals) {
     if (p.kind !== 'bump') continue
     const content = await io.readFile(p.path)
-    if (content === undefined) continue
-    const fm = FRONTMATTER_RE.exec(content)
-    if (!fm) continue
-    const head = fm[0]
-    const re = /^count:[ \t]*(\d+)[ \t]*(?=\r?$)/m
-    const m = re.exec(head)
-    if (!m || Number(m[1]) !== p.from) continue
-    const next = head.replace(re, `count: ${p.to}`)
-    await io.writeFile(p.path, next + content.slice(head.length))
+    if (content === undefined || readCountLine(content) !== p.from) continue
+    const next = replaceCountLine(content, p.to)
+    if (next === undefined) continue
+    await writeFileAtomic(io, p.path, next)
     applied.push({ path: p.path, from: p.from, to: p.to })
   }
   return applied

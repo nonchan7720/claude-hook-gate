@@ -22,6 +22,8 @@ export type NodeIoOptions = {
   env?: EnvVars
   /** メッセージの言語。省略時は ja（テストの期待値は日本語で書かれている）。 */
   lang?: Lang
+  /** プラグイン設定 autoCount。省略時は undefined（true 扱い）。 */
+  autoCount?: boolean
   /** 現在時刻（ミリ秒）を差し替える。 */
   now?: () => number
   /** progress() に渡されたテキストを順に記録する。 */
@@ -58,6 +60,7 @@ export function makeIo(opts: NodeIoOptions): Io {
   return {
     env,
     lang,
+    ...(opts.autoCount !== undefined ? { autoCount: opts.autoCount } : {}),
     projectDir: opts.projectDir,
     cwd: opts.cwd ?? opts.projectDir,
     pluginRoot: opts.pluginRoot ?? REPO_ROOT,
