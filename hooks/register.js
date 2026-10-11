@@ -8603,6 +8603,14 @@ notify:
 inject:
   header: "# Confirmed feedback rules (count >= 3)\\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\\n\\n"
   ruleTitle: "■ {{name}} (pointed out {{count}} times so far)"
+  brokenRules: "# Unreadable feedback rules\\nThe following rule files could not be read and are disabled (where only an enforce entry is invalid, only that entry is disabled). Their enforcement does not work until they are fixed. Tell the user:"
+
+rules:
+  unreadable: "cannot read the file: {{error}}"
+  enforceNotList: "enforce is not a list ({{type}}). Write each entry as \`- event: ...\`"
+  enforceItemNotMapping: "enforce[{{index}}] is not a mapping ({{type}})"
+  badRegex: "enforce[{{index}}].{{key}} is not a usable regular expression: {{error}}"
+  evalError: "enforce[{{index}}] failed to evaluate: {{error}}"
 
 guard:
   evaluating: "[feedback-guard] evaluating: {{rule}}"
@@ -8657,6 +8665,7 @@ correct:
   noEnforce: "Confirmed rule with count {{count}} but no enforce, so no hook can detect it (and it never appears in the violation log)"
   stale: "Has enforce but has never appeared in the violation log. Check that the enforce works and that the rule is not out of date"
   expiredAction: "{{reason}}. Consider deleting or updating it"
+  broken: "unreadable and disabled: {{reason}}. Fix the file"
   reportHeader: "[correct] last {{window}}: {{rules}} rules / {{violations}} violations"
   noProposals: "No proposals."
   applyNone: "apply: no files were rewritten."
@@ -8667,6 +8676,7 @@ correct:
     - For an enforce addition, derive a regex / glob from the body of the rule and propose a concrete entry (template: the enforce section of rules/feedback_rules.md).
     - Always ask the user before rewriting any file (as the rules in rules/feedback_rules.md say).
     - For stale / expired, ask the user whether to keep, update or delete the rule.
+    - For broken, explain why the file cannot be read (YAML syntax, regex syntax and so on) and propose a fix (rewrite Python-only regex syntax into a form JavaScript accepts).
   contextApplied: "- apply has already rewritten count in the following files. Tell the user so: {{list}}"
 
 band:
@@ -8735,6 +8745,14 @@ notify:
 inject:
   header: "# 確定フィードバックルール（count >= 3）\\nこれらは繰り返し指摘された確定ルール。違反すると hook がブロックする。\\n\\n"
   ruleTitle: "■ {{name}} (これまで {{count}} 回指摘されています)"
+  brokenRules: "# 読めない feedback ルール\\n次のルールファイルが読めず無効になっています（enforce の要素だけが不正なものは、その要素だけが無効）。直すまで、その強制は効きません。ユーザーに伝えてください:"
+
+rules:
+  unreadable: "ファイルを読めません: {{error}}"
+  enforceNotList: "enforce がリストではありません（{{type}}）。各要素を \`- event: ...\` の形で書いてください"
+  enforceItemNotMapping: "enforce[{{index}}] が辞書ではありません（{{type}}）"
+  badRegex: "enforce[{{index}}].{{key}} の正規表現が使えません: {{error}}"
+  evalError: "enforce[{{index}}] の評価に失敗しました: {{error}}"
 
 guard:
   evaluating: "[feedback-guard] 評価中: {{rule}}"
@@ -8789,6 +8807,7 @@ correct:
   noEnforce: "count {{count}} の確定ルールだが enforce が無く、hook が検知できない（違反ログにも出ない）"
   stale: "enforce ありで違反ログに一度も出ていない。enforce が効いているか、ルールが古くなっていないか確認"
   expiredAction: "{{reason}}。削除または更新を検討"
+  broken: "読めず無効になっている: {{reason}}。ファイルを直す"
   reportHeader: "[correct] 直近 {{window}}: ルール {{rules}} 件 / 違反 {{violations}} 件"
   noProposals: "提案はありません。"
   applyNone: "apply: 書き換えたファイルはありません。"
@@ -8799,6 +8818,7 @@ correct:
     - enforce の追加は、対象ルールの本文から正規表現 / glob を起こして具体案を提案する（雛形は rules/feedback_rules.md の enforce 節）。
     - ファイルを書き換える前に、必ずユーザーに確認する（rules/feedback_rules.md のルールどおり）。
     - stale / expired は、ルールを残すか更新・削除するかをユーザーに尋ねる。
+    - broken は、読めない理由（YAML の書き方・正規表現の書き方など）を説明し、直し方を提案する（Python 専用の正規表現の書き方は JavaScript で使える形に書き換える）。
   contextApplied: "- apply により次のファイルの count をすでに書き換えた。その事実をユーザーに伝えること: {{list}}"
 
 band:
@@ -8941,12 +8961,48 @@ function pyRegExp(source, flags = "") {
   const m = /^\(\?([aiLmsux]+)\)/.exec(src);
   if (m) {
     src = src.slice(m[0].length);
-    for (const c of m[1] ?? "")
+    const pyFlags = m[1] ?? "";
+    if (pyFlags.includes("x"))
+      throw new Error(`unsupported Python inline flag (?x): ${source}`);
+    for (const c of pyFlags)
       if ("ims".includes(c) && !fl.includes(c))
         fl += c;
   }
-  src = src.replace(/\(\?P<([A-Za-z_]\w*)>/g, "(?<$1>").replace(/\(\?P=([A-Za-z_]\w*)\)/g, "\\k<$1>");
+  src = replaceAnchors(src).replace(/\(\?P<([A-Za-z_]\w*)>/g, "(?<$1>").replace(/\(\?P=([A-Za-z_]\w*)\)/g, "\\k<$1>");
   return new RegExp(src, fl);
+}
+function replaceAnchors(src) {
+  let out = "";
+  let inClass = false;
+  for (let i = 0;i < src.length; i++) {
+    const c = src.charAt(i);
+    if (c === "\\") {
+      const next = src.charAt(i + 1);
+      if (!inClass && next === "A")
+        out += "(?<![\\s\\S])";
+      else if (!inClass && (next === "Z" || next === "z"))
+        out += "(?![\\s\\S])";
+      else
+        out += c + next;
+      i++;
+      continue;
+    }
+    if (c === "[" && !inClass) {
+      inClass = true;
+      out += c;
+      if (src.charAt(i + 1) === "^")
+        out += src.charAt(++i);
+      if (src.charAt(i + 1) === "]") {
+        i++;
+        out += "\\]";
+      }
+      continue;
+    }
+    if (c === "]" && inClass)
+      inClass = false;
+    out += c;
+  }
+  return out;
 }
 function jqStr(v) {
   if (v === null || v === undefined || v === false)
@@ -9263,6 +9319,7 @@ function projectFeedbackDir(io, projectDir) {
   return join(projectDir || io.projectDir || io.cwd, ".claude", "feedback");
 }
 var violationsLogPath = (io) => join(feedbackDir(io), ".violations.jsonl");
+var errorsLogPath = (io) => join(feedbackDir(io), ".errors.jsonl");
 var FRONTMATTER_RE = /^---\s*\n([\s\S]*?\n)---\s*\n?/;
 var BODY_STOP_RE = /\*\*(Why|言い訳|Excuse|How to apply)[:：]?\*\*/;
 var loadYamlText = (text) => parseYaml(text);
@@ -9284,6 +9341,41 @@ function parseExpires(v) {
   return DATE_ONLY_RE.test(text) ? t + DAY_MS - 1 : t;
 }
 var stringList = (v) => asList(v).filter((x) => typeof x === "string");
+var typeName = (v) => v === null || v === undefined ? "null" : Array.isArray(v) ? "list" : isDict(v) ? "mapping" : typeof v;
+var REGEX_FLAGS = { pre_bash: "", pre_edit: "m", post_edit: "m" };
+function normalizeEnforce(io, raw) {
+  const t = tr(io.lang);
+  const problems = [];
+  if (!truthy(raw))
+    return { enforce: [], problems };
+  if (!Array.isArray(raw))
+    return { enforce: [], problems: [t("rules.enforceNotList", { type: typeName(raw) })] };
+  const enforce = [];
+  raw.forEach((entry, index) => {
+    if (!isDict(entry)) {
+      problems.push(t("rules.enforceItemNotMapping", { index, type: typeName(entry) }));
+      return;
+    }
+    const flags = typeof entry.event === "string" ? REGEX_FLAGS[entry.event] : undefined;
+    if (flags !== undefined) {
+      for (const key of ["when", "unless"]) {
+        const v = entry[key];
+        if (!truthy(v))
+          continue;
+        try {
+          pyRegExp(String(v), flags);
+        } catch (e) {
+          problems.push(t("rules.badRegex", { index, key, error: errorText(e) }));
+          return;
+        }
+      }
+    }
+    enforce.push(entry);
+  });
+  return { enforce, problems };
+}
+var errorText = (e) => (e instanceof Error ? e.message : String(e)).split(`
+`)[0]?.trim() ?? "";
 async function loadRule(io, path) {
   const content = await io.readFile(path);
   if (content === undefined)
@@ -9294,11 +9386,13 @@ async function loadRule(io, path) {
   const data = loadYamlText(m[1] ?? "");
   if (!isDict(data) || !truthy(data.name))
     return null;
+  const { enforce, problems } = normalizeEnforce(io, data.enforce);
   return {
     name: String(data.name),
     description: truthy(data.description) ? String(data.description) : "",
     count: toCount(data.count),
-    enforce: truthy(data.enforce) ? data.enforce : [],
+    enforce,
+    ...problems.length > 0 ? { problems } : {},
     path,
     expires: parseExpires(data.expires),
     projects: stringList(data.projects),
@@ -9351,27 +9445,42 @@ async function loadBodyIntro(io, path) {
 
 `)[0] ?? "").trim();
 }
-async function listRulesIn(io, d) {
+async function listRulesIn(io, d, broken) {
   const rules = [];
   const names = (await io.list(d)).map((e) => e.name).sort();
   for (const name of names) {
     if (!name.endsWith(".md"))
       continue;
-    const rule = await loadRule(io, join(d, name));
-    if (rule)
-      rules.push(rule);
+    const path = join(d, name);
+    try {
+      const rule = await loadRule(io, path);
+      if (rule)
+        rules.push(rule);
+    } catch (e) {
+      broken.push({ path, reason: tr(io.lang)("rules.unreadable", { error: errorText(e) }) });
+    }
   }
   return rules;
 }
+var problemsOf = (rules) => rules.flatMap((r) => (r.problems ?? []).map((reason) => ({ path: r.path, reason })));
 async function listRules(io, feedbackDirPath) {
-  if (feedbackDirPath)
-    return listRulesIn(io, feedbackDirPath);
+  const { rules, broken } = await scanRules(io, feedbackDirPath);
+  for (const b of broken)
+    await logError(io, "rules", b.reason, b.path);
+  return rules;
+}
+async function scanRules(io, feedbackDirPath) {
+  const broken = [];
+  if (feedbackDirPath) {
+    const rules = await listRulesIn(io, feedbackDirPath, broken);
+    return { rules, broken: [...broken, ...problemsOf(rules)] };
+  }
   const globalDir = feedbackDir(io);
   const projectDir = projectFeedbackDir(io);
-  const globalRules = await listRulesIn(io, globalDir);
+  const globalRules = await listRulesIn(io, globalDir, broken);
   let merged = globalRules;
   if (projectDir !== globalDir) {
-    const projectRules = await listRulesIn(io, projectDir);
+    const projectRules = await listRulesIn(io, projectDir, broken);
     const overridden = new Set(projectRules.map((r) => r.name));
     merged = [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules];
   }
@@ -9379,7 +9488,7 @@ async function listRules(io, feedbackDirPath) {
   for (const r of merged)
     if (await isRuleActive(io, r))
       active.push(r);
-  return active;
+  return { rules: active, broken: [...broken, ...problemsOf(active)] };
 }
 function resolveSeverity(count, explicit, event) {
   if (truthy(explicit))
@@ -9405,6 +9514,34 @@ function logViolation(io, rule, count, severity, event, detail) {
   });
   logQueue = task;
   return task;
+}
+function logError(io, source, error, file) {
+  const task = logQueue.then(async () => {
+    try {
+      const path = errorsLogPath(io);
+      const existing = await io.readFile(path) ?? "";
+      const same = (line) => {
+        try {
+          const d = JSON.parse(line);
+          return isDict(d) && d.source === source && d.error === error && (d.file ?? undefined) === file;
+        } catch {
+          return false;
+        }
+      };
+      if (existing.split(`
+`).some(same))
+        return;
+      const ts = new Date(await io.now()).toISOString().replace("Z", "+00:00");
+      const entry = { ts, source, ...file !== undefined ? { file } : {}, error };
+      await io.writeFile(path, `${existing}${JSON.stringify(entry)}
+`);
+    } catch {}
+  });
+  logQueue = task;
+  return task;
+}
+async function logEntryError(io, rule, index, e) {
+  await logError(io, "enforce", tr(io.lang)("rules.evalError", { index, error: errorText(e) }), rule.path);
 }
 var AUTO_COUNT_MAX = 5;
 var COUNT_LINE_RE = /^count:[ \t]*(\d+)[ \t]*(?=\r?$)/m;
@@ -9535,165 +9672,170 @@ function extractPreEditContent(toolName, toolInput) {
   return "";
 }
 var SHELL = ["sh", "-c"];
-async function evalPreBash(io, rules, command, projectDir) {
-  const dir = projectDir || io.projectDir || io.cwd;
+async function evalEntries(io, rules, event, fn) {
   const violations = [];
-  if (!command)
-    return violations;
   for (const rule of rules) {
-    for (const entry of rule.enforce) {
-      if (entry.event !== "pre_bash")
+    const entries = Array.isArray(rule.enforce) ? rule.enforce : [];
+    for (const [index, entry] of entries.entries()) {
+      if (!isDict(entry) || entry.event !== event)
         continue;
-      const when = entry.when;
-      if (!truthy(when) || !pyRegExp(String(when)).test(command))
-        continue;
-      const unless = entry.unless;
-      if (truthy(unless) && pyRegExp(String(unless)).test(command))
-        continue;
-      const checkCmd = entry.check;
-      if (truthy(checkCmd)) {
-        io.progress?.(tr(io.lang)("guard.evaluating", { rule: rule.name }));
-        const r = await io.run([...SHELL, String(checkCmd)], { cwd: dir, env: { CLAUDE_PROJECT_DIR: dir }, timeoutMs: 1e4 });
-        if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
-          continue;
+      try {
+        const v = await fn(rule, entry);
+        if (v)
+          violations.push(v);
+      } catch (e) {
+        await logEntryError(io, rule, index, e);
       }
-      violations.push({
-        rule: rule.name,
-        count: rule.count,
-        severity: resolveSeverity(rule.count, entry.severity, "pre_bash"),
-        event: "pre_bash",
-        message: truthy(entry.message) ? String(entry.message) : "",
-        detail: `command matched: ${String(when)}`
-      });
     }
   }
   return violations;
+}
+async function evalPreBash(io, rules, command, projectDir) {
+  const dir = projectDir || io.projectDir || io.cwd;
+  if (!command)
+    return [];
+  return evalEntries(io, rules, "pre_bash", async (rule, entry) => {
+    const when = entry.when;
+    if (!truthy(when) || !pyRegExp(String(when)).test(command))
+      return;
+    const unless = entry.unless;
+    if (truthy(unless) && pyRegExp(String(unless)).test(command))
+      return;
+    const checkCmd = entry.check;
+    if (truthy(checkCmd)) {
+      io.progress?.(tr(io.lang)("guard.evaluating", { rule: rule.name }));
+      const r = await io.run([...SHELL, String(checkCmd)], { cwd: dir, env: { CLAUDE_PROJECT_DIR: dir }, timeoutMs: 1e4 });
+      if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
+        return;
+    }
+    return {
+      rule: rule.name,
+      count: rule.count,
+      severity: resolveSeverity(rule.count, entry.severity, "pre_bash"),
+      event: "pre_bash",
+      message: truthy(entry.message) ? String(entry.message) : "",
+      detail: `command matched: ${String(when)}`
+    };
+  });
 }
 async function evalPreEdit(io, rules, filePath, content, projectDir) {
   const dir = projectDir || io.projectDir || io.cwd;
   const [root, rel] = splitRoot(dir, filePath);
   const name = basename(filePath);
   const text = content || "";
-  const violations = [];
-  for (const rule of rules) {
-    for (const entry of rule.enforce) {
-      if (entry.event !== "pre_edit")
-        continue;
-      const patterns = asList(entry.path);
-      if (patterns.length === 0)
-        continue;
-      if (!compileGlobs(patterns).some((rx) => rx.test(rel)))
-        continue;
-      const exclPatterns = asList(entry.exclude_path);
-      if (exclPatterns.length > 0 && compileGlobs(exclPatterns).some((rx) => rx.test(rel)))
-        continue;
-      const absentSibling = entry.absent_sibling;
-      const absentGlobs = asList(entry.absent_glob);
-      let detail;
-      if (truthy(absentSibling) || absentGlobs.length > 0) {
-        if (looksLikeTestFile(name))
-          continue;
-        const candidates = [];
-        let found = false;
-        if (truthy(absentSibling)) {
-          const sibNames = expandStem(String(absentSibling), filePath);
-          candidates.push(...sibNames);
-          for (const sib of sibNames) {
-            if (await io.exists(join(dirname(filePath), sib))) {
-              found = true;
-              break;
-            }
-          }
-        }
-        for (const pat of absentGlobs) {
-          if (found)
+  return evalEntries(io, rules, "pre_edit", async (rule, entry) => {
+    const patterns = asList(entry.path);
+    if (patterns.length === 0)
+      return;
+    if (!compileGlobs(patterns).some((rx) => rx.test(rel)))
+      return;
+    const exclPatterns = asList(entry.exclude_path);
+    if (exclPatterns.length > 0 && compileGlobs(exclPatterns).some((rx) => rx.test(rel)))
+      return;
+    const absentSibling = entry.absent_sibling;
+    const absentGlobs = asList(entry.absent_glob);
+    let detail;
+    if (truthy(absentSibling) || absentGlobs.length > 0) {
+      if (looksLikeTestFile(name))
+        return;
+      const candidates = [];
+      let found = false;
+      if (truthy(absentSibling)) {
+        const sibNames = expandStem(String(absentSibling), filePath);
+        candidates.push(...sibNames);
+        for (const sib of sibNames) {
+          if (await io.exists(join(dirname(filePath), sib))) {
+            found = true;
             break;
-          for (const expanded of expandBraces(expandTestPattern(pat, rel))) {
-            candidates.push(expanded);
-            if (await globExists(io, join(root, expanded))) {
-              found = true;
-              break;
-            }
           }
         }
-        if (found)
-          continue;
-        detail = `missing test file: ${candidates.join(", ")}`;
-      } else {
-        const when = entry.when;
-        if (!truthy(when) || !pyRegExp(String(when), "m").test(text))
-          continue;
-        const unless = entry.unless;
-        if (truthy(unless) && pyRegExp(String(unless), "m").test(text))
-          continue;
-        detail = `content matched: ${String(when)}`;
       }
-      violations.push({
-        rule: rule.name,
-        count: rule.count,
-        severity: resolveSeverity(rule.count, entry.severity, "pre_edit"),
-        event: "pre_edit",
-        message: truthy(entry.message) ? String(entry.message) : "",
-        detail
-      });
+      for (const pat of absentGlobs) {
+        if (found)
+          break;
+        for (const expanded of expandBraces(expandTestPattern(pat, rel))) {
+          candidates.push(expanded);
+          if (await globExists(io, join(root, expanded))) {
+            found = true;
+            break;
+          }
+        }
+      }
+      if (found)
+        return;
+      detail = `missing test file: ${candidates.join(", ")}`;
+    } else {
+      const when = entry.when;
+      if (!truthy(when) || !pyRegExp(String(when), "m").test(text))
+        return;
+      const unless = entry.unless;
+      if (truthy(unless) && pyRegExp(String(unless), "m").test(text))
+        return;
+      detail = `content matched: ${String(when)}`;
     }
-  }
-  return violations;
+    return {
+      rule: rule.name,
+      count: rule.count,
+      severity: resolveSeverity(rule.count, entry.severity, "pre_edit"),
+      event: "pre_edit",
+      message: truthy(entry.message) ? String(entry.message) : "",
+      detail
+    };
+  });
 }
 async function evalPostEdit(io, rules, filePath, projectDir) {
   const dir = projectDir || io.projectDir || io.cwd;
   const [root, rel] = splitRoot(dir, filePath);
   const absPath = isAbsolute(filePath) ? filePath : join(dir, filePath);
-  const violations = [];
   let text;
-  for (const rule of rules) {
-    for (const entry of rule.enforce) {
-      if (entry.event !== "post_edit")
-        continue;
-      const patterns = asList(entry.path);
-      if (patterns.length === 0)
-        continue;
-      if (!compileGlobs(patterns).some((rx) => rx.test(rel)))
-        continue;
-      const exclPatterns = asList(entry.exclude_path);
-      if (exclPatterns.length > 0 && compileGlobs(exclPatterns).some((rx) => rx.test(rel)))
-        continue;
-      const when = entry.when;
-      const checkCmd = entry.check;
-      if (!truthy(when) && !truthy(checkCmd))
-        continue;
+  let unreadable = false;
+  return evalEntries(io, rules, "post_edit", async (rule, entry) => {
+    if (unreadable)
+      return;
+    const patterns = asList(entry.path);
+    if (patterns.length === 0)
+      return;
+    if (!compileGlobs(patterns).some((rx) => rx.test(rel)))
+      return;
+    const exclPatterns = asList(entry.exclude_path);
+    if (exclPatterns.length > 0 && compileGlobs(exclPatterns).some((rx) => rx.test(rel)))
+      return;
+    const when = entry.when;
+    const checkCmd = entry.check;
+    if (!truthy(when) && !truthy(checkCmd))
+      return;
+    if (text === undefined) {
+      text = await io.readFile(absPath);
       if (text === undefined) {
-        text = await io.readFile(absPath);
-        if (text === undefined)
-          return violations;
+        unreadable = true;
+        return;
       }
-      const details = [];
-      if (truthy(when)) {
-        if (!pyRegExp(String(when), "m").test(text))
-          continue;
-        const unless = entry.unless;
-        if (truthy(unless) && pyRegExp(String(unless), "m").test(text))
-          continue;
-        details.push(`content matched: ${String(when)}`);
-      }
-      if (truthy(checkCmd)) {
-        io.progress?.(tr(io.lang)("postEdit.checking", { rule: rule.name, file: absPath }));
-        const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: dir, FILE: absPath }, timeoutMs: 15000 });
-        if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
-          continue;
-        details.push(`check failed: ${String(checkCmd)}`);
-      }
-      violations.push({
-        rule: rule.name,
-        count: rule.count,
-        severity: resolveSeverity(rule.count, entry.severity, "post_edit"),
-        event: "post_edit",
-        message: truthy(entry.message) ? String(entry.message) : "",
-        detail: details.join(", ")
-      });
     }
-  }
-  return violations;
+    const details = [];
+    if (truthy(when)) {
+      if (!pyRegExp(String(when), "m").test(text))
+        return;
+      const unless = entry.unless;
+      if (truthy(unless) && pyRegExp(String(unless), "m").test(text))
+        return;
+      details.push(`content matched: ${String(when)}`);
+    }
+    if (truthy(checkCmd)) {
+      io.progress?.(tr(io.lang)("postEdit.checking", { rule: rule.name, file: absPath }));
+      const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: dir, FILE: absPath }, timeoutMs: 15000 });
+      if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
+        return;
+      details.push(`check failed: ${String(checkCmd)}`);
+    }
+    return {
+      rule: rule.name,
+      count: rule.count,
+      severity: resolveSeverity(rule.count, entry.severity, "post_edit"),
+      event: "post_edit",
+      message: truthy(entry.message) ? String(entry.message) : "",
+      detail: details.join(", ")
+    };
+  });
 }
 async function readLines(io, path) {
   const text = await io.readFile(path);
@@ -9757,62 +9899,56 @@ async function getChangedFiles(io, projectDir, sessionId, agentId) {
 }
 async function evalStopCheck(io, rules, projectDir, changedFiles) {
   const keyed = changedFiles.map((f) => splitRoot(projectDir, f));
-  const violations = [];
-  for (const rule of rules) {
-    for (const entry of rule.enforce) {
-      if (entry.event !== "stop_check")
-        continue;
-      const patterns = asList(entry.changed);
-      if (patterns.length === 0)
-        continue;
-      const rxs = compileGlobs(patterns);
-      const matchedKeys = new Set;
-      for (const [root, rel] of keyed)
-        if (rxs.some((rx) => rx.test(rel)))
-          matchedKeys.add(`${root}\x00${rel}`);
-      const matched = [...matchedKeys].sort().map((k) => k.split("\x00"));
-      if (matched.length === 0)
-        continue;
-      const checkCmd = entry.check;
-      const requireSibling = entry.require_sibling;
-      const badFiles = [];
-      for (const [root, rel] of matched) {
-        const absPath = join(root, rel);
-        let bad = false;
-        if (truthy(requireSibling)) {
-          const sibNames = expandStem(String(requireSibling), absPath);
-          let any = false;
-          for (const sib of sibNames) {
-            if (await io.exists(join(dirname(absPath), sib))) {
-              any = true;
-              break;
-            }
+  return evalEntries(io, rules, "stop_check", async (rule, entry) => {
+    const patterns = asList(entry.changed);
+    if (patterns.length === 0)
+      return;
+    const rxs = compileGlobs(patterns);
+    const matchedKeys = new Set;
+    for (const [root, rel] of keyed)
+      if (rxs.some((rx) => rx.test(rel)))
+        matchedKeys.add(`${root}\x00${rel}`);
+    const matched = [...matchedKeys].sort().map((k) => k.split("\x00"));
+    if (matched.length === 0)
+      return;
+    const checkCmd = entry.check;
+    const requireSibling = entry.require_sibling;
+    const badFiles = [];
+    for (const [root, rel] of matched) {
+      const absPath = join(root, rel);
+      let bad = false;
+      if (truthy(requireSibling)) {
+        const sibNames = expandStem(String(requireSibling), absPath);
+        let any = false;
+        for (const sib of sibNames) {
+          if (await io.exists(join(dirname(absPath), sib))) {
+            any = true;
+            break;
           }
-          if (!any)
-            bad = true;
         }
-        if (truthy(checkCmd)) {
-          io.progress?.(tr(io.lang)("stopCheck.checking", { rule: rule.name, file: absPath }));
-          const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: projectDir, FILE: absPath }, timeoutMs: 15000 });
-          if (r.exitCode !== 0 || r.timedOut || r.error !== undefined)
-            bad = true;
-        }
-        if (bad)
-          badFiles.push(root === projectDir ? rel : `${basename(root)}/${rel}`);
+        if (!any)
+          bad = true;
       }
-      if (badFiles.length > 0) {
-        violations.push({
-          rule: rule.name,
-          count: rule.count,
-          severity: resolveSeverity(rule.count, entry.severity, "stop_check"),
-          event: "stop_check",
-          message: truthy(entry.message) ? String(entry.message) : "",
-          detail: `changed files violating: ${badFiles.join(", ")}`
-        });
+      if (truthy(checkCmd)) {
+        io.progress?.(tr(io.lang)("stopCheck.checking", { rule: rule.name, file: absPath }));
+        const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: projectDir, FILE: absPath }, timeoutMs: 15000 });
+        if (r.exitCode !== 0 || r.timedOut || r.error !== undefined)
+          bad = true;
       }
+      if (bad)
+        badFiles.push(root === projectDir ? rel : `${basename(root)}/${rel}`);
     }
-  }
-  return violations;
+    if (badFiles.length === 0)
+      return;
+    return {
+      rule: rule.name,
+      count: rule.count,
+      severity: resolveSeverity(rule.count, entry.severity, "stop_check"),
+      event: "stop_check",
+      message: truthy(entry.message) ? String(entry.message) : "",
+      detail: `changed files violating: ${badFiles.join(", ")}`
+    };
+  });
 }
 
 // src/feedback-stop-check.ts
@@ -9878,7 +10014,8 @@ async function feedbackStopCheck(io, payload) {
   try {
     return await main(io, payload);
   } catch (e) {
-    return ok("", `[feedback-stop-check] internal error (ignored): ${e instanceof Error ? e.message : String(e)}
+    await logError(io, "feedback-stop-check", errorText(e));
+    return ok("", `[feedback-stop-check] internal error (ignored): ${errorText(e)}
 `);
   }
 }
@@ -11656,7 +11793,8 @@ async function feedbackGuard(io, payload) {
   try {
     return await main2(io, payload);
   } catch (e) {
-    return ok("", `[feedback-guard] internal error (ignored): ${e instanceof Error ? e.message : String(e)}
+    await logError(io, "feedback-guard", errorText(e));
+    return ok("", `[feedback-guard] internal error (ignored): ${errorText(e)}
 `);
   }
 }
@@ -11754,7 +11892,8 @@ async function feedbackBashEdits(io, payload, files, threshold) {
   try {
     return await main3(io, payload, files, threshold);
   } catch (e) {
-    return ok("", `[feedback-bash-edit] internal error (ignored): ${e instanceof Error ? e.message : String(e)}
+    await logError(io, "feedback-bash-edit", errorText(e));
+    return ok("", `[feedback-bash-edit] internal error (ignored): ${errorText(e)}
 `);
   }
 }
@@ -12043,7 +12182,7 @@ function inactiveReason(rule, now, lang) {
     parts.push("when_exists");
   return t("correct.notMatching", { what: parts.join(" / ") || t("correct.conditions") });
 }
-function buildProposals(rules, inactive, stats, opts) {
+function buildProposals(rules, inactive, stats, opts, broken = []) {
   const bumps = [];
   const enforces = [];
   const stales = [];
@@ -12106,8 +12245,14 @@ function buildProposals(rules, inactive, stats, opts) {
       reason: t("correct.expiredAction", { reason: inactiveReason(rule, opts.now, opts.lang) })
     });
   }
+  const brokens = broken.map((b) => ({
+    kind: "broken",
+    rule: basename(b.path).replace(/\.md$/, ""),
+    path: b.path,
+    reason: t("correct.broken", { reason: b.reason })
+  }));
   bumps.sort((a, b) => b.to - a.to || b.n - a.n);
-  return [...bumps.map(({ n: _n, ...p }) => p), ...enforces, ...stales, ...expireds];
+  return [...brokens, ...bumps.map(({ n: _n, ...p }) => p), ...enforces, ...stales, ...expireds];
 }
 function formatReport(proposals, stats, opts, rulesCount, applied) {
   const t = tr(opts.lang);
@@ -12181,23 +12326,26 @@ async function correctCommand(io, args) {
   try {
     const parsed = parseCorrectArgs(args);
     const now = await io.now();
-    const rules = await listRules(io);
+    const { rules, broken } = await scanRules(io);
+    for (const b of broken)
+      await logError(io, "rules", b.reason, b.path);
     const inactive = await listInactive(io, rules);
     const stats = aggregateViolations(await readViolations(io), now, parsed.window);
     const opts = { window: parsed.window, min: parsed.min, now, lang: io.lang };
-    const proposals = buildProposals(rules, inactive, stats, opts);
+    const proposals = buildProposals(rules, inactive, stats, opts, broken);
     const applied = parsed.apply ? await applyCountBumps(io, proposals) : undefined;
     return {
       text: formatReport(proposals, stats, { window: parsed.window, apply: parsed.apply, lang: io.lang }, rules.length, applied),
       context: buildContext(proposals, applied ?? [], io.lang)
     };
   } catch (e) {
+    await logError(io, "correct", e instanceof Error ? e.message : String(e));
     return { text: `[correct] internal error: ${e instanceof Error ? e.message : String(e)}`, context: [] };
   }
 }
 
 // src/engine-io.ts
-var errorText = (e) => e instanceof Error ? e.message : String(e);
+var errorText2 = (e) => e instanceof Error ? e.message : String(e);
 async function readEnv($) {
   const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG] = await Promise.all([
     $.env.get("HOME"),
@@ -12234,7 +12382,7 @@ async function createIo($, options = {}) {
       });
       return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, timedOut: false };
     } catch (e) {
-      return { exitCode: 1, stdout: "", stderr: "", timedOut: false, error: errorText(e) };
+      return { exitCode: 1, stdout: "", stderr: "", timedOut: false, error: errorText2(e) };
     }
   };
   const existing = async (paths) => {
@@ -12308,14 +12456,28 @@ async function buildOutput(io, rules) {
 
 `);
 }
+function brokenRulesText(io, broken) {
+  if (broken.length === 0)
+    return "";
+  return [tr(io.lang)("inject.brokenRules"), ...broken.map((b) => `- ${b.path}: ${b.reason}`)].join(`
+`);
+}
 async function feedbackInject(io) {
   try {
-    const rules = (await listRules(io)).filter((r) => r.count >= 3);
-    if (rules.length === 0)
-      return ok();
-    return ok(await buildOutput(io, rules));
+    const { rules: all, broken } = await scanRules(io);
+    for (const b of broken)
+      await logError(io, "rules", b.reason, b.path);
+    const rules = all.filter((r) => r.count >= 3);
+    const parts = [brokenRulesText(io, broken)];
+    if (rules.length > 0)
+      parts.push(await buildOutput(io, rules));
+    const text = parts.filter((p) => p !== "").join(`
+
+`);
+    return text === "" ? ok() : ok(text);
   } catch (e) {
-    return ok("", `[feedback-inject] internal error (ignored): ${e instanceof Error ? e.message : String(e)}
+    await logError(io, "feedback-inject", errorText(e));
+    return ok("", `[feedback-inject] internal error (ignored): ${errorText(e)}
 `);
   }
 }
@@ -12355,7 +12517,8 @@ async function feedbackPostEdit(io, payload) {
   try {
     return await main4(io, payload);
   } catch (e) {
-    return ok("", `[feedback-post-edit] internal error (ignored): ${e instanceof Error ? e.message : String(e)}
+    await logError(io, "feedback-post-edit", errorText(e));
+    return ok("", `[feedback-post-edit] internal error (ignored): ${errorText(e)}
 `);
   }
 }
