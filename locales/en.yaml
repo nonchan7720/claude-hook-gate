@@ -25,6 +25,9 @@ stopCheck:
   gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
   fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
 
+autoCount:
+  bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
+
 launch:
   checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"
   promptTo: "Prompt to send to {{agentType}}:"

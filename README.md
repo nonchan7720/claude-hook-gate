@@ -40,6 +40,18 @@ Anything else passes through to the normal permission flow. The target agent typ
 
 To enable it, turn on `agentLaunchGuard` on the settings screen shown when you install the plugin with `/plugin`, or change it later in the `/config` menu (the plugin's `agentLaunchGuard` row).
 
+### Automatic count increase
+
+When a hook (`pre_bash` / `pre_edit` on PreToolUse, `post_edit` on PostToolUse, `stop_check` on Stop / SubagentStop) detects a feedback rule violation, it raises that rule's `count` by 1 at the same time it writes the violation log. Repeating the same violation escalates enforcement from warn to ask / block to deny, instead of the rule staying at `count: 1` forever.
+
+- Only the `count: N` line inside the frontmatter of the rule file actually used is rewritten (when the global and project directories both have a rule with that name, the project one). The line must be a plain number; a rule without a numeric `count` line is left alone. The new text is written to a temporary file in the same directory and moved into place with `mv`.
+- Increases are limited per session and rule name: within one session a rule is raised at most once, however often it is violated (multiple matching `enforce` entries, repeated Stop blocks). A violation in a later session raises it again. The rules already raised are recorded in `~/.claude/feedback/.count_state/<session_id>.json`; calls without a `session_id` never raise a count.
+- The cap is `5` (the count that means deny when no `severity` is given); counts at or above it are not raised.
+- The current decision still uses the count from before the increase; the new enforcement applies from the next violation. When a count is raised, a line saying `count` went from N to N+1 is added to the deny / ask / block reason (or to stderr for warn), so the model sees it too.
+- A failed write never stops the hook.
+
+To turn it off, set `autoCount` in `userConfig` to `false` (default `true`; on the settings screen shown by `/plugin` at install time, or later in `/config`).
+
 ### Language of the messages
 
 Everything the hooks print (the feedback rules injected into the context, the block / warn reasons, the gate results, the band and the status line, the desktop notifications, the `/correct` report and the bundled rules file) is available in English and Japanese. The `language` option (`userConfig`, set on the `/plugin` install screen or later in `/config`) chooses it:
@@ -91,6 +103,8 @@ Unknown arguments are ignored. There are four kinds of proposals, listed in this
 | `expired` | A rule file is inactive because of `expires`, `projects` or `when_exists`. | Delete or update it. |
 
 `apply` rewrites only the `count:` line inside the frontmatter of the `bump` rules, and lists the changed files. Nothing else in the files is touched. `enforce` (and `stale` / `expired`) are proposals only: Claude is told to show them to you and to ask before editing any file.
+
+With the automatic increase (`autoCount`) on, `count` goes up by 1 per session in which the rule is violated. A `bump` proposal instead jumps to 3 or 5 based on the violations in the window; it always starts from the current `count`, and `apply` only rewrites a file whose `count` still matches the proposal, so the two never add up twice.
 
 ## Install
 
