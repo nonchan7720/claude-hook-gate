@@ -10,7 +10,7 @@
 // warn のみなら stderr に出して exit 0。
 //
 // 無限ループ防止のため、MAX_ATTEMPTS 回連続でブロックしたら諦めて exit 0 にする。
-import { evalStopCheck, getChangedFiles, listRules, logViolation } from './feedback-rules.ts'
+import { errorText, evalStopCheck, getChangedFiles, listRules, logError, logViolation } from './feedback-rules.ts'
 import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
@@ -83,7 +83,8 @@ export async function feedbackStopCheck(io: Io, payload: Dict): Promise<ScriptRe
   try {
     return await main(io, payload)
   } catch (e) {
-    // hook のバグで作業を止めない
-    return ok('', `[feedback-stop-check] internal error (ignored): ${e instanceof Error ? e.message : String(e)}\n`)
+    // hook のバグで作業を止めない（黙って全ルールが無効にならないよう .errors.jsonl に残す）
+    await logError(io, 'feedback-stop-check', errorText(e))
+    return ok('', `[feedback-stop-check] internal error (ignored): ${errorText(e)}\n`)
   }
 }

@@ -132,9 +132,24 @@ describe('feedback-guard', () => {
     expect(empty.exitCode).toBe(0)
     expect(empty.stdout).toBe('')
 
+    // 壊れたルール（不正な正規表現）はその要素だけが無効になり、他のルールは効き続ける
     writeRule('broken.md', 6, ['enforce:', '  - event: pre_bash', "    when: '(unclosed'", "    message: 'x'", ''].join('\n'))
     const r = await runGuard({ tool_name: 'Bash', tool_input: { command: 'ls' } }, tmp)
     expect(r.exitCode).toBe(0)
-    expect(r.stderr).toContain('internal error (ignored)')
+    expect(r.stdout).toBe('')
+    expect(r.stderr).toBe('')
+    const denied = await runGuard({ tool_name: 'Bash', tool_input: { command: 'go test ./...' } }, tmp)
+    expect(decision(denied.stdout).permissionDecision).toBe('deny')
+    expect(fs.readFileSync(path.join(tmp, '.errors.jsonl'), 'utf8')).toContain('broken.md')
+  })
+
+  test('an internal error is ignored but recorded in .errors.jsonl', async () => {
+    const io = { ...makeIo({ projectDir: process.cwd(), env: { CLAUDE_FEEDBACK_DIR: tmp } }), list: () => Promise.reject(new Error('boom')) }
+    const r = await feedbackGuard(io, { tool_name: 'Bash', tool_input: { command: 'go test ./...' } })
+    expect(r.exitCode).toBe(0)
+    expect(r.stderr).toBe('[feedback-guard] internal error (ignored): boom\n')
+    const entry = JSON.parse(fs.readFileSync(path.join(tmp, '.errors.jsonl'), 'utf8').trim()) as Dict
+    expect(entry.source).toBe('feedback-guard')
+    expect(entry.error).toBe('boom')
   })
 })

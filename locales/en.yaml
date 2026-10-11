@@ -9,6 +9,14 @@ notify:
 inject:
   header: "# Confirmed feedback rules (count >= 3)\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\n\n"
   ruleTitle: "■ {{name}} (pointed out {{count}} times so far)"
+  brokenRules: "# Unreadable feedback rules\nThe following rule files could not be read and are disabled (where only an enforce entry is invalid, only that entry is disabled). Their enforcement does not work until they are fixed. Tell the user:"
+
+rules:
+  unreadable: "cannot read the file: {{error}}"
+  enforceNotList: "enforce is not a list ({{type}}). Write each entry as `- event: ...`"
+  enforceItemNotMapping: "enforce[{{index}}] is not a mapping ({{type}})"
+  badRegex: "enforce[{{index}}].{{key}} is not a usable regular expression: {{error}}"
+  evalError: "enforce[{{index}}] failed to evaluate: {{error}}"
 
 guard:
   evaluating: "[feedback-guard] evaluating: {{rule}}"
@@ -56,6 +64,7 @@ correct:
   noEnforce: "Confirmed rule with count {{count}} but no enforce, so no hook can detect it (and it never appears in the violation log)"
   stale: "Has enforce but has never appeared in the violation log. Check that the enforce works and that the rule is not out of date"
   expiredAction: "{{reason}}. Consider deleting or updating it"
+  broken: "unreadable and disabled: {{reason}}. Fix the file"
   reportHeader: "[correct] last {{window}}: {{rules}} rules / {{violations}} violations"
   noProposals: "No proposals."
   applyNone: "apply: no files were rewritten."
@@ -66,6 +75,7 @@ correct:
     - For an enforce addition, derive a regex / glob from the body of the rule and propose a concrete entry (template: the enforce section of rules/feedback_rules.md).
     - Always ask the user before rewriting any file (as the rules in rules/feedback_rules.md say).
     - For stale / expired, ask the user whether to keep, update or delete the rule.
+    - For broken, explain why the file cannot be read (YAML syntax, regex syntax and so on) and propose a fix (rewrite Python-only regex syntax into a form JavaScript accepts).
   contextApplied: "- apply has already rewritten count in the following files. Tell the user so: {{list}}"
 
 band:
