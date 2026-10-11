@@ -10,7 +10,7 @@
 // warn のみなら stderr に出して exit 0。
 //
 // 無限ループ防止のため、MAX_ATTEMPTS 回連続でブロックしたら諦めて exit 0 にする。
-import { evalStopCheck, getChangedFiles, listRules, logViolation } from './feedback-rules.ts'
+import { autoBumpCounts, countBumpNotes, errorText, evalStopCheck, getChangedFiles, listRules, logError, logViolation } from './feedback-rules.ts'
 import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
@@ -54,6 +54,8 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
   }
 
   for (const v of violations) await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail)
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id))
+  const noteText = notes.map((l) => `${l}\n`).join('')
 
   const warnings = violations.filter((v) => v.severity === 'warn')
   const blocking = violations.filter((v) => v.severity !== 'warn')
@@ -62,17 +64,17 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
 
   if (blocking.length === 0) {
     await io.removeFiles([ap])
-    return ok('', stderr)
+    return ok('', stderr + noteText)
   }
 
   const attempts = await bumpAttempts(io, ap)
   if (attempts >= MAX_ATTEMPTS) {
     stderr += `${tr(io.lang)('stopCheck.gaveUp', { max: MAX_ATTEMPTS })}\n`
     await io.removeFiles([ap])
-    return ok('', stderr)
+    return ok('', stderr + noteText)
   }
 
-  const lines = blocking.map((v) => `[feedback-stop-check] ${v.rule} (count: ${v.count}): ${v.message} (${v.detail})`)
+  const lines = [...blocking.map((v) => `[feedback-stop-check] ${v.rule} (count: ${v.count}): ${v.message} (${v.detail})`), ...notes]
   lines.push(tr(io.lang)('stopCheck.fixAbove', { attempt: attempts, max: MAX_ATTEMPTS }))
   stderr += lines.map((l) => `${l}\n`).join('')
   const stdout = `${JSON.stringify({ decision: 'block', reason: lines.join('\n') })}\n`
@@ -83,7 +85,8 @@ export async function feedbackStopCheck(io: Io, payload: Dict): Promise<ScriptRe
   try {
     return await main(io, payload)
   } catch (e) {
-    // hook のバグで作業を止めない
-    return ok('', `[feedback-stop-check] internal error (ignored): ${e instanceof Error ? e.message : String(e)}\n`)
+    // hook のバグで作業を止めない（黙って全ルールが無効にならないよう .errors.jsonl に残す）
+    await logError(io, 'feedback-stop-check', errorText(e))
+    return ok('', `[feedback-stop-check] internal error (ignored): ${errorText(e)}\n`)
   }
 }

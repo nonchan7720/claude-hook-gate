@@ -18,6 +18,12 @@
       "description": "Ask for confirmation, showing the full prompt, before launching code-implementer or sending a message to any agent other than git-operator.",
       "default": false
     },
+    "autoCount": {
+      "type": "boolean",
+      "title": "Auto count",
+      "description": "When a hook detects a feedback rule violation, raise that rule's count by 1 (once per rule per session, up to 5 = deny). Only the count: line in the frontmatter is rewritten.",
+      "default": true
+    },
     "rulesFile": {
       "type": "string",
       "title": "Rules file",

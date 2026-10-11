@@ -9,6 +9,14 @@ notify:
 inject:
   header: "# Confirmed feedback rules (count >= 3)\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\n\n"
   ruleTitle: "■ {{name}} (pointed out {{count}} times so far)"
+  brokenRules: "# Unreadable feedback rules\nThe following rule files could not be read and are disabled (where only an enforce entry is invalid, only that entry is disabled). Their enforcement does not work until they are fixed. Tell the user:"
+
+rules:
+  unreadable: "cannot read the file: {{error}}"
+  enforceNotList: "enforce is not a list ({{type}}). Write each entry as `- event: ...`"
+  enforceItemNotMapping: "enforce[{{index}}] is not a mapping ({{type}})"
+  badRegex: "enforce[{{index}}].{{key}} is not a usable regular expression: {{error}}"
+  evalError: "enforce[{{index}}] failed to evaluate: {{error}}"
 
 guard:
   evaluating: "[feedback-guard] evaluating: {{rule}}"
@@ -16,10 +24,17 @@ guard:
 postEdit:
   checking: "[feedback-post-edit] checking: {{rule}} ({{file}})"
 
+bashEdit:
+  header: "[feedback] Files rewritten by Bash violate feedback rules (the same checks as Edit / Write)."
+  preEditAfter: "Note: this is a pre_edit rule, but with Bash the content cannot be known before it runs, so it was detected after the command (the file is already written; fix it to follow the rule)."
+
 stopCheck:
   checking: "[feedback-stop-check] checking: {{rule}} ({{file}})"
   gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
   fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
+
+autoCount:
+  bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
 
 launch:
   checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"
@@ -56,6 +71,7 @@ correct:
   noEnforce: "Confirmed rule with count {{count}} but no enforce, so no hook can detect it (and it never appears in the violation log)"
   stale: "Has enforce but has never appeared in the violation log. Check that the enforce works and that the rule is not out of date"
   expiredAction: "{{reason}}. Consider deleting or updating it"
+  broken: "unreadable and disabled: {{reason}}. Fix the file"
   reportHeader: "[correct] last {{window}}: {{rules}} rules / {{violations}} violations"
   noProposals: "No proposals."
   applyNone: "apply: no files were rewritten."
@@ -66,6 +82,7 @@ correct:
     - For an enforce addition, derive a regex / glob from the body of the rule and propose a concrete entry (template: the enforce section of rules/feedback_rules.md).
     - Always ask the user before rewriting any file (as the rules in rules/feedback_rules.md say).
     - For stale / expired, ask the user whether to keep, update or delete the rule.
+    - For broken, explain why the file cannot be read (YAML syntax, regex syntax and so on) and propose a fix (rewrite Python-only regex syntax into a form JavaScript accepts).
   contextApplied: "- apply has already rewritten count in the following files. Tell the user so: {{list}}"
 
 band:
@@ -102,7 +119,7 @@ gate:
   skipNoCwd: "[skip: no cwd]"
   noteNoCwd: "(cwd does not exist)"
   worktreeNotFound: "=== [gate] worktree not found: {{root}}. Excluding it. ==="
-  rulesFailed: "[gate] The rules phase failed (the conversation is not stopped). See the errors above and fix them."
+  rulesFailed: "[gate] Verification failed. Stopping (and reporting the work as done) is blocked until it is fixed. See the errors above and fix them now."
   rulesPassed: "[gate] rules phase passed:\n{{body}}"
   checkNotFound: "=== [gate] \"{{name}}\" was not found in consistency_checks. Skipping. ==="
   checkNotFoundSummary: "(check:{{name}}) not found, skipped"
@@ -113,7 +130,7 @@ gate:
   checksPassed: "[gate] {{title}} passed:\n{{body}}"
   checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
   checksGaveUp: "[gate] Gave up because consistency checks failed {{max}} times in a row. The target files were returned to CHANGED unverified. Please check them manually. To clear this now, start a new session or run /clear (reset-gate on SessionStart removes the state files)."
-  checksFailed: "consistency checks failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
+  checksFailed: "[gate] Verification failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
   ymlTypo: "[gate] .claude/gate.yaml was not found but .claude/gate.yml exists. Check whether the extension is yml instead of yaml."
   policyUnevaluated: "=== [gate] ({{label}}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [{{reason}}] $ {{cmd}} ==="
   policySkipped: "=== [gate] ({{label}}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ {{cmd}} ==="

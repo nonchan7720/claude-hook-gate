@@ -38,7 +38,10 @@ export function toCount(v: unknown): number {
 
 /**
  * Python の re 形式の正規表現を JavaScript の RegExp にする。
- * 先頭の (?i) / (?s) / (?m) と名前付きグループ (?P<name>...) だけは読み替える。
+ * 先頭の (?i) / (?s) / (?m) と名前付きグループ (?P<name>...) / (?P=name) を読み替える。
+ * JS では黙って意味が変わる \A（文字列の先頭）と \Z / \z（文字列の末尾）は、m フラグの有無によらず
+ * 同じ意味になる後読み・先読み（(?<![\s\S]) / (?![\s\S])）に置き換える（m フラグ付きの ^ / $ は行頭・行末にも一致するため）。
+ * 対応できない書き方（先頭の (?x) など）や JS で不正な正規表現は例外を投げる（呼び出し側がその要素だけを無効にする）。
  */
 export function pyRegExp(source: string, flags = ''): RegExp {
   let src = source
@@ -46,10 +49,45 @@ export function pyRegExp(source: string, flags = ''): RegExp {
   const m = /^\(\?([aiLmsux]+)\)/.exec(src)
   if (m) {
     src = src.slice(m[0].length)
-    for (const c of m[1] ?? '') if ('ims'.includes(c) && !fl.includes(c)) fl += c
+    const pyFlags = m[1] ?? ''
+    if (pyFlags.includes('x')) throw new Error(`unsupported Python inline flag (?x): ${source}`)
+    for (const c of pyFlags) if ('ims'.includes(c) && !fl.includes(c)) fl += c
   }
-  src = src.replace(/\(\?P<([A-Za-z_]\w*)>/g, '(?<$1>').replace(/\(\?P=([A-Za-z_]\w*)\)/g, '\\k<$1>')
+  src = replaceAnchors(src)
+    .replace(/\(\?P<([A-Za-z_]\w*)>/g, '(?<$1>')
+    .replace(/\(\?P=([A-Za-z_]\w*)\)/g, '\\k<$1>')
   return new RegExp(src, fl)
+}
+
+/** 文字クラスの外にある \A / \Z / \z を、文字列の先頭・末尾にだけ一致する先読み・後読みに置き換える。 */
+function replaceAnchors(src: string): string {
+  let out = ''
+  let inClass = false
+  for (let i = 0; i < src.length; i++) {
+    const c = src.charAt(i)
+    if (c === '\\') {
+      const next = src.charAt(i + 1)
+      if (!inClass && next === 'A') out += '(?<![\\s\\S])'
+      else if (!inClass && (next === 'Z' || next === 'z')) out += '(?![\\s\\S])'
+      else out += c + next
+      i++
+      continue
+    }
+    if (c === '[' && !inClass) {
+      inClass = true
+      out += c
+      // 先頭の ^ の直後の ] はクラスの中身（Python では []] / [^]] の ] は文字。JS では [] が空のクラスになるのでエスケープする）
+      if (src.charAt(i + 1) === '^') out += src.charAt(++i)
+      if (src.charAt(i + 1) === ']') {
+        i++
+        out += '\\]'
+      }
+      continue
+    }
+    if (c === ']' && inClass) inClass = false
+    out += c
+  }
+  return out
 }
 
 /** jq の `.x // empty`（null / false は空）+ `-r`（文字列はそのまま）に相当する取り出し。 */

@@ -11,8 +11,15 @@ const BUNDLED = /\/rules\/feedback_rules(\.en)?\.md$/
 type Run = { exitCode: number; stdout: string }
 
 // run: process.run の応答（argv ごと）。既定はすべて成功。
-// biome-ignore lint/suspicious/noExplicitAny: エンジンの On 型は Claude Code の外では参照できないため緩く受ける
-const setup = (on: any, files: Files = {}, env: Record<string, string> = {}, run: (argv: string[]) => Run = () => ({ exitCode: 0, stdout: '' })) => {
+// mtimeMs: fs.stat / fs.list が返す mtime（既定 0。Bash の変更検出のテストでは開始時刻以降にする）。
+const setup = (
+  // biome-ignore lint/suspicious/noExplicitAny: エンジンの On 型は Claude Code の外では参照できないため緩く受ける
+  on: any,
+  files: Files = {},
+  env: Record<string, string> = {},
+  run: (argv: string[]) => Run = () => ({ exitCode: 0, stdout: '' }),
+  mtimeMs = 0,
+) => {
   const dirs = new Set<string>(['/proj'])
   for (const f of Object.keys(files)) for (let d = f.slice(0, f.lastIndexOf('/')); d.length > 0; d = d.slice(0, d.lastIndexOf('/'))) dirs.add(d)
   const runs: string[][] = []
@@ -33,16 +40,23 @@ const setup = (on: any, files: Files = {}, env: Record<string, string> = {}, run
   on('fs.list', (_$: unknown, e: { path?: string }) => ({
     value: Object.keys(files)
       .filter((p) => p.startsWith(`${e.path}/`) && !p.slice((e.path ?? '').length + 1).includes('/'))
-      .map((p) => ({ name: p.slice((e.path ?? '').length + 1), kind: 'file', size: 0, mtimeMs: 0, isLink: false })),
+      .map((p) => ({ name: p.slice((e.path ?? '').length + 1), kind: 'file', size: 0, mtimeMs, isLink: false })),
   }))
   on('fs.stat', (_$: unknown, e: { path: string }) => {
-    if (e.path in files) return { value: { kind: 'file', size: 0, mtimeMs: 0, isLink: false } }
+    if (e.path in files) return { value: { kind: 'file', size: 0, mtimeMs, isLink: false } }
     if (dirs.has(e.path)) return { value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } }
     throw new Error('ENOENT')
   })
   on('process.run', (_$: unknown, e: { argv: string[] }) => {
     runs.push([...e.argv])
     if (e.argv[0] === 'rm') for (const p of e.argv.slice(1).filter((a) => !a.startsWith('-'))) delete files[p]
+    if (e.argv[0] === 'mv') {
+      const [src, dst] = e.argv.slice(-2) as [string, string]
+      if (src in files) {
+        files[dst] = files[src] as string
+        delete files[src]
+      }
+    }
     const r = run(e.argv)
     return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
@@ -102,6 +116,47 @@ test('PreToolUse: ルール違反の Bash は deny、stdin 相当の組み立て
   const r = await $.tool.call({ tool: 'Bash', command: 'rm -rf x' })
   expect(r.isError).toBe(true)
   expect(r.text).toContain('no_rm (count: 6): forbidden')
+})
+
+test('PreToolUse: 別ファイルのルールが壊れていても（YAML・正規表現・enforce の形）他の deny は効き、壊れたファイルは記録・注入される', async ($, on) => {
+  const { files } = setup(on, {
+    '/h/.claude/feedback/no_rm.md': rule('no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    message: forbidden\n    severity: deny\n"),
+    '/h/.claude/feedback/aa_regex.md': rule('aa_regex', 6, "enforce:\n  - event: pre_bash\n    when: 'go\\s+test(?i)\\s'\n    message: x\n"),
+    '/h/.claude/feedback/aa_null.md': rule('aa_null', 6, 'enforce:\n  -\n'),
+    '/h/.claude/feedback/aa_dict.md': rule('aa_dict', 6, 'enforce:\n  event: pre_bash\n  when: rm\n'),
+    '/h/.claude/feedback/zz_yaml.md': rule('zz_yaml', 3, "enforce:\n  - event: pre_bash\n    when: 'it's'\n    message: x\n"),
+  })
+  const r = await $.tool.call({ tool: 'Bash', command: 'rm -rf x' })
+  expect(r.isError).toBe(true)
+  expect(r.text).toContain('no_rm (count: 6): forbidden')
+  expect(files['/h/.claude/feedback/.violations.jsonl']).toContain('no_rm')
+  const errors = files['/h/.claude/feedback/.errors.jsonl'] ?? ''
+  for (const f of ['aa_regex', 'aa_null', 'aa_dict', 'zz_yaml']) expect(errors).toContain(`/h/.claude/feedback/${f}.md`)
+  const p = await $.classic.UserPromptSubmit({ prompt: 'hi' })
+  expect(p.additionalContext?.[1]).toContain('次のルールファイルが読めず無効になっています')
+  expect(p.additionalContext?.[1]).toContain('- /h/.claude/feedback/zz_yaml.md: ファイルを読めません: ')
+})
+
+test('PreToolUse: 違反したルールの count を自動で上げ、同じセッションでは 1 回だけ', async ($, on) => {
+  const { files } = setup(on, {
+    '/h/.claude/feedback/no_rm.md': rule('no_rm', 3, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    message: forbidden\n    severity: deny\n"),
+  })
+  const r = await $.tool.call({ tool: 'Bash', command: 'rm -rf x' })
+  expect(r.text).toContain('no_rm (count: 3): forbidden')
+  expect(r.text).toContain('count を 3 → 4 に上げました')
+  expect(files['/h/.claude/feedback/no_rm.md']).toContain('\ncount: 4\n')
+  await $.tool.call({ tool: 'Bash', command: 'rm -rf y' })
+  expect(files['/h/.claude/feedback/no_rm.md']).toContain('\ncount: 4\n')
+  expect(Object.keys(files).filter((f) => f.endsWith('.tmp'))).toEqual([])
+})
+
+test('PreToolUse: autoCount が false なら count を上げない', { options: { autoCount: false } }, async ($, on) => {
+  const { files } = setup(on, {
+    '/h/.claude/feedback/no_rm.md': rule('no_rm', 3, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    message: forbidden\n    severity: deny\n"),
+  })
+  const r = await $.tool.call({ tool: 'Bash', command: 'rm -rf x' })
+  expect(r.text).not.toContain('上げました')
+  expect(files['/h/.claude/feedback/no_rm.md']).toContain('\ncount: 3\n')
 })
 
 test('PreToolUse: 違反が無ければ通し、対象外ツールは何も実行しない', async ($, on) => {
@@ -166,6 +221,57 @@ test('PostToolUse: 変更ファイルを記録し、rules フェーズの失敗�
   expect(files['/proj/.claude/.gate-status/changed_files.sess-1.txt']).toBe('x.py\n')
   expect(runs.some((a) => a[0] === 'sh')).toBe(true)
   expect(r.block).toContain('lint failed')
+})
+
+// Bash の変更検出: git rev-parse は /proj、ls-files は src/a.ts（未追跡）を返す。それ以外の git は空で成功。
+const bashGit = (argv: string[]): Run => {
+  if (argv[0] !== 'git') return { exitCode: 0, stdout: '' }
+  if (argv.includes('rev-parse')) return { exitCode: 0, stdout: '/proj\n' }
+  if (argv.includes('--others')) return { exitCode: 0, stdout: 'src/a.ts\0' }
+  return { exitCode: 0, stdout: '' }
+}
+const consoleLogRule = rule(
+  'no_console_log',
+  4,
+  "enforce:\n  - event: post_edit\n    path: 'src/**/*.ts'\n    when: 'console\\.log'\n    message: no console.log\n",
+)
+
+/** Bash の PreToolUse を通し、gate.yaml の無い PJ で feedback 側に置かれた開始時刻ファイルの tool_use_id を返す。 */
+// biome-ignore lint/suspicious/noExplicitAny: 同上
+const startBash = async ($: any, files: Files, command: string): Promise<string> => {
+  await $.tool.call({ tool: 'Bash', command })
+  const started = Object.keys(files).filter((f) => f.startsWith('/h/.claude/feedback/.bash_started/bash_started.sess-1--'))
+  expect(started.length).toBe(1)
+  return String(JSON.parse(files[started[0] as string] as string).tool_use_id)
+}
+
+test('PostToolUse(Bash): gate.yaml が無くても、Bash が書いたファイルに post_edit がかかり block になる', async ($, on) => {
+  const files: Files = { '/h/.claude/feedback/ncl.md': consoleLogRule, '/proj/src/a.ts': 'console.log(1)\n' }
+  setup(on, files, {}, bashGit, 1_700_000_000_000)
+  const toolUseId = await startBash($, files, 'cat > src/a.ts <<EOF')
+  const r = await $.classic.PostToolUse({
+    session_id: 'sess-1',
+    tool_name: 'Bash',
+    tool_input: { command: 'cat > src/a.ts <<EOF' },
+    tool_response: {},
+    tool_use_id: toolUseId,
+  } as never)
+  expect(r.block).toContain('no_console_log (count: 4): no console.log (src/a.ts: content matched')
+  expect(Object.keys(files).some((f) => f.startsWith('/proj/.claude/'))).toBe(false)
+})
+
+test('PostToolUse(Bash): git の履歴操作では検査しない', async ($, on) => {
+  const files: Files = { '/h/.claude/feedback/ncl.md': consoleLogRule, '/proj/src/a.ts': 'console.log(1)\n' }
+  setup(on, files, {}, bashGit, 1_700_000_000_000)
+  const toolUseId = await startBash($, files, 'git rebase main')
+  const r = await $.classic.PostToolUse({
+    session_id: 'sess-1',
+    tool_name: 'Bash',
+    tool_input: { command: 'git rebase main' },
+    tool_response: {},
+    tool_use_id: toolUseId,
+  } as never)
+  expect(r.block).toBeUndefined()
 })
 
 test('PostToolUse: 実行中はステータス行を使わず帯を描き直させ、終わったら結果を 1 行でステータス行に残す', async ($, on) => {

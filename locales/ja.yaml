@@ -9,6 +9,14 @@ notify:
 inject:
   header: "# 確定フィードバックルール（count >= 3）\nこれらは繰り返し指摘された確定ルール。違反すると hook がブロックする。\n\n"
   ruleTitle: "■ {{name}} (これまで {{count}} 回指摘されています)"
+  brokenRules: "# 読めない feedback ルール\n次のルールファイルが読めず無効になっています（enforce の要素だけが不正なものは、その要素だけが無効）。直すまで、その強制は効きません。ユーザーに伝えてください:"
+
+rules:
+  unreadable: "ファイルを読めません: {{error}}"
+  enforceNotList: "enforce がリストではありません（{{type}}）。各要素を `- event: ...` の形で書いてください"
+  enforceItemNotMapping: "enforce[{{index}}] が辞書ではありません（{{type}}）"
+  badRegex: "enforce[{{index}}].{{key}} の正規表現が使えません: {{error}}"
+  evalError: "enforce[{{index}}] の評価に失敗しました: {{error}}"
 
 guard:
   evaluating: "[feedback-guard] 評価中: {{rule}}"
@@ -16,10 +24,17 @@ guard:
 postEdit:
   checking: "[feedback-post-edit] 検査中: {{rule}} ({{file}})"
 
+bashEdit:
+  header: "[feedback] Bash が書き換えたファイルが feedback ルールに違反しています（Edit / Write と同じ検査）。"
+  preEditAfter: "※ pre_edit のルールですが、Bash では書かれる内容が事前に分からないため、実行後に検知しました（書き込みは済んでいます。ルールに沿って直してください）。"
+
 stopCheck:
   checking: "[feedback-stop-check] 検査中: {{rule}} ({{file}})"
   gaveUp: "[feedback-stop-check] {{max}} 回連続でブロックしました。ループを打ち切ります。手動確認を。"
   fixAbove: "[feedback-stop-check] 上記を修正してください（試行 {{attempt}}/{{max}}）。"
+
+autoCount:
+  bumped: "[feedback-gate] 違反を検出したため {{rule}} の count を {{from}} → {{to}} に上げました（{{path}}）。同じ違反を繰り返すと強制力（warn → ask/block → deny）が上がります。"
 
 launch:
   checklist: "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件"
@@ -56,6 +71,7 @@ correct:
   noEnforce: "count {{count}} の確定ルールだが enforce が無く、hook が検知できない（違反ログにも出ない）"
   stale: "enforce ありで違反ログに一度も出ていない。enforce が効いているか、ルールが古くなっていないか確認"
   expiredAction: "{{reason}}。削除または更新を検討"
+  broken: "読めず無効になっている: {{reason}}。ファイルを直す"
   reportHeader: "[correct] 直近 {{window}}: ルール {{rules}} 件 / 違反 {{violations}} 件"
   noProposals: "提案はありません。"
   applyNone: "apply: 書き換えたファイルはありません。"
@@ -66,6 +82,7 @@ correct:
     - enforce の追加は、対象ルールの本文から正規表現 / glob を起こして具体案を提案する（雛形は rules/feedback_rules.md の enforce 節）。
     - ファイルを書き換える前に、必ずユーザーに確認する（rules/feedback_rules.md のルールどおり）。
     - stale / expired は、ルールを残すか更新・削除するかをユーザーに尋ねる。
+    - broken は、読めない理由（YAML の書き方・正規表現の書き方など）を説明し、直し方を提案する（Python 専用の正規表現の書き方は JavaScript で使える形に書き換える）。
   contextApplied: "- apply により次のファイルの count をすでに書き換えた。その事実をユーザーに伝えること: {{list}}"
 
 band:
@@ -102,7 +119,7 @@ gate:
   skipNoCwd: "[skip: cwd無し]"
   noteNoCwd: "(cwd が存在しません)"
   worktreeNotFound: "=== [gate] worktree が見つかりません: {{root}}。対象から外します。 ==="
-  rulesFailed: "[gate] rules フェーズの検証に失敗しました（会話は止まりません）。上のエラーを見て修正してください。"
+  rulesFailed: "[gate] 検証に失敗しました。直すまで終了（Stop）はブロックされ、完了報告もできません。上のエラーを見て、今ここで修正してください。"
   rulesPassed: "[gate] rules フェーズ成功:\n{{body}}"
   checkNotFound: "=== [gate] consistency_checks に \"{{name}}\" が見つかりません。スキップします。 ==="
   checkNotFoundSummary: "(check:{{name}}) 見つかりません、スキップ"
@@ -113,7 +130,7 @@ gate:
   checksPassed: "[gate] {{title}} 成功:\n{{body}}"
   checksGaveUpStderr: "consistency checks が {{max}} 回連続失敗。ループを打ち切ります。手動確認を。"
   checksGaveUp: "[gate] consistency checks が{{max}}回連続で失敗したため打ち切りました。対象ファイルは未検証のまま CHANGED へ戻しました。手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか /clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。"
-  checksFailed: "consistency checks 失敗（試行 {{attempt}}/{{max}}）。上のエラーを見て修正を継続してください。"
+  checksFailed: "[gate] 検証に失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て修正を継続してください。"
   ymlTypo: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
   policyUnevaluated: "=== [gate] ({{label}}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［{{reason}}］ $ {{cmd}} ==="
   policySkipped: "=== [gate] ({{label}}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ {{cmd}} ==="

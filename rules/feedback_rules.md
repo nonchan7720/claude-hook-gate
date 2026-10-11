@@ -123,4 +123,4 @@ glob は `*` が `/` を跨がない、`**` が跨ぐ、`{a,b}` 展開に対応�
   `post_edit` で明示した場合は `block` 扱い）
 - `warn`：stderr に警告を出すのみで、処理は継続する
 
-違反は `~/.claude/feedback/.violations.jsonl` に追記される（`count` 自体は書き換えない）。
+違反は `~/.claude/feedback/.violations.jsonl` に追記され、同時に hook がそのルールの `count` を 1 上げる（同じセッションでは同じルールにつき 1 回、5 まで。プラグイン設定 `autoCount: false` で無効）。hook が検出した違反について、自分で `count` を重ねて上げる必要はない。

@@ -10,6 +10,7 @@ import {
   checks,
   exists,
   gate,
+  lines,
   newGate,
   pendingPath,
   read,
@@ -234,6 +235,83 @@ describe('rules phase does not block the conversation', () => {
       expect(r.exitCode).toBe(2)
       expect(r.stderr).toContain('BOOM')
       expect(r.stdout).not.toContain('decision')
+    }))
+})
+
+describe('checks phase reruns rules that failed and were not fixed', () => {
+  const failedPath = (proj: string, id: string) => statePath(proj, 'gate_failed', id, 'txt')
+  /** proj/broken があるあいだ失敗する lint。run_checks を足すと consistency_check "chk"（常に成功）を予約する。 */
+  const setup = (proj: string, session: string, withCheck = false) => {
+    const rule: Record<string, unknown> = { match: '**/*.py', run: [{ name: 'lint', cmd: '[ ! -f broken ] || { echo LINT-FAIL; exit 1; }' }] }
+    if (withCheck) rule.run_checks = ['chk']
+    writeGateYaml(proj, { rules: [rule], consistency_checks: [{ name: 'chk', run: [{ name: 'build', cmd: 'true' }] }] })
+    touch(proj, 'broken')
+    writeChangedFiles(proj, session, 'x.py')
+  }
+  const decisionOf = (stdout: string) => JSON.parse(stdout.trim().split('\n').pop() ?? '{}') as { decision?: string; reason?: string }
+
+  test('a stop after an unfixed rules failure reruns the rule and blocks', () =>
+    withTmp(async (proj) => {
+      setup(proj, 'sess1')
+      expect((await rules(proj)).exitCode).toBe(2)
+      expect(lines(failedPath(proj, 'sess1'))).toEqual(['x.py'])
+      const r = await checks(proj)
+      expect(r.exitCode).toBe(2)
+      expect(r.stderr).toContain('LINT-FAIL')
+      expect(decisionOf(r.stdout).decision).toBe('block')
+      expect(decisionOf(r.stdout).reason).toContain('検証に失敗しました（試行 1/5）')
+      expect(lines(failedPath(proj, 'sess1'))).toEqual(['x.py'])
+    }))
+
+  test('once fixed, the stop reruns the rule, clears the failure and reports success', () =>
+    withTmp(async (proj) => {
+      setup(proj, 'sess1')
+      expect((await rules(proj)).exitCode).toBe(2)
+      fs.rmSync(path.join(proj, 'broken'))
+      const r = await checks(proj)
+      expect(decisionOf(r.stdout).reason).toContain('検証がすべて通りました: lint ✓')
+      expect(exists(failedPath(proj, 'sess1'))).toBe(false)
+      expect(exists(changedPath(proj, 'sess1'))).toBe(false)
+    }))
+
+  test('a passing reserved check no longer hides the failed rule behind a success report', () =>
+    withTmp(async (proj) => {
+      setup(proj, 'sess1', true)
+      expect((await rules(proj)).exitCode).toBe(2)
+      const r = await checks(proj)
+      expect(r.exitCode).toBe(2)
+      expect(decisionOf(r.stdout).reason).not.toContain('検証がすべて通りました')
+      expect(decisionOf(r.stdout).reason).toContain('検証に失敗しました')
+    }))
+
+  test('a later rules run that passes drops the file from the failures', () =>
+    withTmp(async (proj) => {
+      setup(proj, 'sess1')
+      expect((await rules(proj)).exitCode).toBe(2)
+      fs.rmSync(path.join(proj, 'broken'))
+      ok(await rules(proj))
+      expect(exists(failedPath(proj, 'sess1'))).toBe(false)
+      ok(await checks(proj))
+    }))
+
+  test('gives up after MAX_ATTEMPTS: the failure is dropped, the file stays in changed', () =>
+    withTmp(async (proj) => {
+      setup(proj, 'sess1')
+      expect((await rules(proj)).exitCode).toBe(2)
+      let r = await checks(proj)
+      for (let i = 1; i < 5; i++) r = await checks(proj, 'sess1', { stopHookActive: true })
+      expect(r.exitCode).toBe(0)
+      expect(exists(failedPath(proj, 'sess1'))).toBe(false)
+      expect(changedLines(proj, 'sess1')).toEqual(['x.py'])
+      ok(await checks(proj))
+    }))
+
+  test('a subagent stop blocks on its own failures', () =>
+    withTmp(async (proj) => {
+      setup(proj, 'sess1--a1')
+      expect((await rules(proj, 'sess1', { agentId: 'a1' })).exitCode).toBe(2)
+      ok(await checks(proj, 'sess1'))
+      expect((await checks(proj, 'sess1', { agentId: 'a1' })).exitCode).toBe(2)
     }))
 })
 
@@ -629,7 +707,7 @@ describe('checks phase reports success once', () => {
       ok(await rules(proj))
       const first = await checks(proj)
       expect(first.exitCode).toBe(2)
-      expect(reasonOf(first.stdout)).toContain('consistency checks 失敗')
+      expect(reasonOf(first.stdout)).toContain('検証に失敗しました（試行')
       expect(exists(reportedPath(proj, 'sess1'))).toBe(false)
       const second = await checks(proj, 'sess1', { stopHookActive: true })
       expect(second.exitCode).toBe(2)

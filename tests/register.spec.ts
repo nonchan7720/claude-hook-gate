@@ -370,7 +370,7 @@ describe('Stop / SubagentStop / Notification', () => {
       })
       await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
       const r = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
-      expect(String(r.block)).toContain('consistency checks 失敗')
+      expect(String(r.block)).toContain('検証に失敗しました（試行')
     }))
 
   test('Stop blocks once to report success, then the follow-up Stop passes', () =>
@@ -439,7 +439,7 @@ describe('Stop / SubagentStop / Notification', () => {
       )
       await m.call('classic.PostToolUse', { session_id: 'sess-1', agent_id: 'a1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
       const r = (await m.call('classic.SubagentStop', { session_id: 'sess-1', agent_id: 'a1', stop_hook_active: false })) as Out
-      expect(String(r.block)).toContain('consistency checks 失敗')
+      expect(String(r.block)).toContain('検証に失敗しました（試行')
     }))
 
   test('a blocked gate run never draws on the status line while running, and leaves its result there', () =>
@@ -452,7 +452,7 @@ describe('Stop / SubagentStop / Notification', () => {
       statusLog.length = 0
       invalidateLog.length = 0
       const blocked = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
-      expect(String(blocked.block)).toContain('consistency checks 失敗')
+      expect(String(blocked.block)).toContain('検証に失敗しました（試行')
       expect(statusLog.some((t) => t?.startsWith('[gate] 実行中'))).toBe(false)
       expect(statusLog.at(-1)).toMatch(/^\[gate\] 完了: ✗ 1 \(\d+\.\ds\)$/)
       expect(invalidateLog).toContain('ui.render')
