@@ -8615,6 +8615,9 @@ stopCheck:
   gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
   fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
 
+autoCount:
+  bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
+
 launch:
   checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"
   promptTo: "Prompt to send to {{agentType}}:"
@@ -8739,6 +8742,9 @@ stopCheck:
   checking: "[feedback-stop-check] 検査中: {{rule}} ({{file}})"
   gaveUp: "[feedback-stop-check] {{max}} 回連続でブロックしました。ループを打ち切ります。手動確認を。"
   fixAbove: "[feedback-stop-check] 上記を修正してください（試行 {{attempt}}/{{max}}）。"
+
+autoCount:
+  bumped: "[feedback-gate] 違反を検出したため {{rule}} の count を {{from}} → {{to}} に上げました（{{path}}）。同じ違反を繰り返すと強制力（warn → ask/block → deny）が上がります。"
 
 launch:
   checklist: "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件"
@@ -9392,6 +9398,84 @@ function logViolation(io, rule, count, severity, event, detail) {
   logQueue = task;
   return task;
 }
+var AUTO_COUNT_MAX = 5;
+var COUNT_LINE_RE = /^count:[ \t]*(\d+)[ \t]*(?=\r?$)/m;
+function readCountLine(content) {
+  const fm = FRONTMATTER_RE.exec(content);
+  if (!fm)
+    return;
+  const m = COUNT_LINE_RE.exec(fm[0]);
+  return m ? Number(m[1]) : undefined;
+}
+function replaceCountLine(content, to) {
+  const fm = FRONTMATTER_RE.exec(content);
+  if (!fm)
+    return;
+  const head = fm[0];
+  if (!COUNT_LINE_RE.test(head))
+    return;
+  return head.replace(COUNT_LINE_RE, `count: ${to}`) + content.slice(head.length);
+}
+async function writeFileAtomic(io, path, text) {
+  const tmp = join(dirname(path), `.${basename(path)}.${Math.floor(await io.now())}-${Math.random().toString(36).slice(2, 8)}.tmp`);
+  try {
+    await io.writeFile(tmp, text);
+    const r = await io.run(["mv", "-f", "--", tmp, path], { timeoutMs: 5000 });
+    if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
+      return;
+  } catch {}
+  await io.removeFiles([tmp]).catch(() => {
+    return;
+  });
+  await io.writeFile(path, text);
+}
+var countStatePath = (io, sessionId) => join(feedbackDir(io), ".count_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
+async function loadBumpedRules(io, sessionId) {
+  try {
+    const text = await io.readFile(countStatePath(io, sessionId));
+    if (text === undefined)
+      return new Set;
+    const data = JSON.parse(text);
+    if (isDict(data) && Array.isArray(data.bumped))
+      return new Set(data.bumped.map(String));
+  } catch {}
+  return new Set;
+}
+async function autoBumpCounts(io, rules, violations, sessionId) {
+  const bumps = [];
+  if (io.autoCount === false || !truthy(sessionId) || violations.length === 0)
+    return bumps;
+  try {
+    const sid = String(sessionId);
+    const done = await loadBumpedRules(io, sid);
+    const names = [...new Set(violations.map((v) => v.rule))].filter((n) => !done.has(n));
+    if (names.length === 0)
+      return bumps;
+    for (const name of names) {
+      const rule = rules.find((r) => r.name === name);
+      if (!rule)
+        continue;
+      try {
+        const content = await io.readFile(rule.path);
+        if (content === undefined)
+          continue;
+        const from = readCountLine(content);
+        if (from === undefined || from >= AUTO_COUNT_MAX)
+          continue;
+        const next = replaceCountLine(content, from + 1);
+        if (next === undefined)
+          continue;
+        await writeFileAtomic(io, rule.path, next);
+        bumps.push({ rule: name, path: rule.path, from, to: from + 1 });
+        done.add(name);
+      } catch {}
+    }
+    if (bumps.length > 0)
+      await io.writeFile(countStatePath(io, sid), JSON.stringify({ bumped: [...done].sort() }));
+  } catch {}
+  return bumps;
+}
+var countBumpNotes = (lang, bumps) => bumps.map((b) => tr(lang)("autoCount.bumped", { rule: b.rule, from: b.from, to: b.to, path: b.path }));
 function looksLikeTestFile(name) {
   if (/_test\.go$/.test(name))
     return true;
@@ -9755,22 +9839,25 @@ async function main(io, payload) {
   }
   for (const v of violations)
     await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
+  const noteText = notes.map((l) => `${l}
+`).join("");
   const warnings = violations.filter((v) => v.severity === "warn");
   const blocking = violations.filter((v) => v.severity !== "warn");
   let stderr = warnings.map((v) => `[feedback-stop-check] warn: ${v.rule} (count: ${v.count}): ${v.message}
 `).join("");
   if (blocking.length === 0) {
     await io.removeFiles([ap]);
-    return ok("", stderr);
+    return ok("", stderr + noteText);
   }
   const attempts = await bumpAttempts(io, ap);
   if (attempts >= MAX_ATTEMPTS) {
     stderr += `${tr(io.lang)("stopCheck.gaveUp", { max: MAX_ATTEMPTS })}
 `;
     await io.removeFiles([ap]);
-    return ok("", stderr);
+    return ok("", stderr + noteText);
   }
-  const lines = blocking.map((v) => `[feedback-stop-check] ${v.rule} (count: ${v.count}): ${v.message} (${v.detail})`);
+  const lines = [...blocking.map((v) => `[feedback-stop-check] ${v.rule} (count: ${v.count}): ${v.message} (${v.detail})`), ...notes];
   lines.push(tr(io.lang)("stopCheck.fixAbove", { attempt: attempts, max: MAX_ATTEMPTS }));
   stderr += lines.map((l) => `${l}
 `).join("");
@@ -11844,18 +11931,12 @@ async function applyCountBumps(io, proposals) {
     if (p.kind !== "bump")
       continue;
     const content = await io.readFile(p.path);
-    if (content === undefined)
+    if (content === undefined || readCountLine(content) !== p.from)
       continue;
-    const fm = FRONTMATTER_RE.exec(content);
-    if (!fm)
+    const next = replaceCountLine(content, p.to);
+    if (next === undefined)
       continue;
-    const head = fm[0];
-    const re = /^count:[ \t]*(\d+)[ \t]*(?=\r?$)/m;
-    const m = re.exec(head);
-    if (!m || Number(m[1]) !== p.from)
-      continue;
-    const next = head.replace(re, `count: ${p.to}`);
-    await io.writeFile(p.path, next + content.slice(head.length));
+    await writeFileAtomic(io, p.path, next);
     applied.push({ path: p.path, from: p.from, to: p.to });
   }
   return applied;
@@ -11958,6 +12039,7 @@ async function createIo($, options = {}) {
   return {
     env,
     lang,
+    autoCount: options.autoCount !== false,
     projectDir,
     cwd,
     pluginRoot: $.plugin.root,
@@ -12064,6 +12146,7 @@ async function main2(io, payload) {
   await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
   for (const v of violations)
     await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
   const blocking = violations.filter((v) => v.severity !== "warn");
   const warnings = violations.filter((v) => v.severity === "warn");
   let stdout = "";
@@ -12073,12 +12156,13 @@ async function main2(io, payload) {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: decisionFor(top.severity),
-        permissionDecisionReason: buildReason(blocking)
+        permissionDecisionReason: [buildReason(blocking), ...notes].join(`
+`)
       }
     })}
 `;
   }
-  const stderr = warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}
+  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}`), ...notes].map((l) => `${l}
 `).join("");
   return ok(stdout, stderr);
 }
@@ -12136,13 +12220,15 @@ async function main3(io, payload) {
     return ok();
   for (const v of violations)
     await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
   const warnings = violations.filter((v) => v.severity === "warn");
   const blocking = violations.filter((v) => v.severity !== "warn");
   let stderr = warnings.map((v) => `[feedback-post-edit] warn: ${v.rule} (count: ${v.count}): ${v.message}
 `).join("");
   if (blocking.length === 0)
-    return ok("", stderr);
-  const lines = blocking.map((v) => `[feedback-post-edit] ${v.rule} (count: ${v.count}): ${v.message} (${v.detail})`);
+    return ok("", stderr + notes.map((l) => `${l}
+`).join(""));
+  const lines = [...blocking.map((v) => `[feedback-post-edit] ${v.rule} (count: ${v.count}): ${v.message} (${v.detail})`), ...notes];
   stderr += lines.map((l) => `${l}
 `).join("");
   const stdout = `${JSON.stringify({ decision: "block", reason: lines.join(`
