@@ -8610,6 +8610,10 @@ guard:
 postEdit:
   checking: "[feedback-post-edit] checking: {{rule}} ({{file}})"
 
+bashEdit:
+  header: "[feedback] Files rewritten by Bash violate feedback rules (the same checks as Edit / Write)."
+  preEditAfter: "Note: this is a pre_edit rule, but with Bash the content cannot be known before it runs, so it was detected after the command (the file is already written; fix it to follow the rule)."
+
 stopCheck:
   checking: "[feedback-stop-check] checking: {{rule}} ({{file}})"
   gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
@@ -8737,6 +8741,10 @@ guard:
 
 postEdit:
   checking: "[feedback-post-edit] 検査中: {{rule}} ({{file}})"
+
+bashEdit:
+  header: "[feedback] Bash が書き換えたファイルが feedback ルールに違反しています（Edit / Write と同じ検査）。"
+  preEditAfter: "※ pre_edit のルールですが、Bash では書かれる内容が事前に分からないため、実行後に検知しました（書き込みは済んでいます。ルールに沿って直してください）。"
 
 stopCheck:
   checking: "[feedback-stop-check] 検査中: {{rule}} ({{file}})"
@@ -11560,6 +11568,197 @@ async function allStop(io, payload) {
   return { exitCode: 0, stdout, stderr };
 }
 
+// src/feedback-guard.ts
+var SEVERITY_ORDER = { warn: 0, ask: 1, block: 2, deny: 3 };
+var decisionFor = (severity) => severity === "deny" || severity === "block" ? "deny" : "ask";
+var buildReason = (violations) => violations.map((v) => `${v.rule} (count: ${v.count}): ${v.message}`).join(`
+`);
+var askStatePath = (io, sessionId) => join(feedbackDir(io), ".ask_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
+async function loadAskedKeys(io, sessionId) {
+  try {
+    const text = await io.readFile(askStatePath(io, sessionId));
+    if (text === undefined)
+      return new Set;
+    const data = JSON.parse(text);
+    if (isDict(data) && Array.isArray(data.asked))
+      return new Set(data.asked.map(String));
+  } catch {}
+  return new Set;
+}
+async function saveAskedKeys(io, sessionId, askedKeys) {
+  try {
+    await io.writeFile(askStatePath(io, sessionId), JSON.stringify({ asked: [...askedKeys].sort() }));
+  } catch {}
+}
+function askKey(v, toolInput) {
+  const target = v.event === "pre_edit" ? truthy(toolInput.file_path) ? String(toolInput.file_path) : "" : "";
+  return `${v.rule}|${v.event}|${target}`;
+}
+async function downgradeRepeatedAsks(io, violations, sessionId, toolInput) {
+  if (!truthy(sessionId))
+    return;
+  const sid = String(sessionId);
+  const asked = await loadAskedKeys(io, sid);
+  const newlyAsked = new Set;
+  for (const v of violations) {
+    if (v.severity !== "ask")
+      continue;
+    const key = askKey(v, toolInput);
+    if (asked.has(key))
+      v.severity = "warn";
+    else
+      newlyAsked.add(key);
+  }
+  if (newlyAsked.size > 0)
+    await saveAskedKeys(io, sid, new Set([...asked, ...newlyAsked]));
+}
+async function main2(io, payload) {
+  const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
+  const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
+  const rules = await listRules(io);
+  let violations;
+  if (toolName === "Bash") {
+    violations = await evalPreBash(io, rules, truthy(toolInput.command) ? String(toolInput.command) : "");
+  } else if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit") {
+    const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : "";
+    if (!filePath)
+      return ok();
+    violations = await evalPreEdit(io, rules, filePath, extractPreEditContent(toolName, toolInput));
+  } else {
+    return ok();
+  }
+  if (violations.length === 0)
+    return ok();
+  await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
+  for (const v of violations)
+    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
+  const blocking = violations.filter((v) => v.severity !== "warn");
+  const warnings = violations.filter((v) => v.severity === "warn");
+  let stdout = "";
+  if (blocking.length > 0) {
+    const top = blocking.reduce((a, b) => (SEVERITY_ORDER[b.severity] ?? 0) > (SEVERITY_ORDER[a.severity] ?? 0) ? b : a);
+    stdout = `${JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: decisionFor(top.severity),
+        permissionDecisionReason: [buildReason(blocking), ...notes].join(`
+`)
+      }
+    })}
+`;
+  }
+  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}`), ...notes].map((l) => `${l}
+`).join("");
+  return ok(stdout, stderr);
+}
+async function feedbackGuard(io, payload) {
+  try {
+    return await main2(io, payload);
+  } catch (e) {
+    return ok("", `[feedback-guard] internal error (ignored): ${e instanceof Error ? e.message : String(e)}
+`);
+  }
+}
+
+// src/feedback-bash-edit.ts
+var EVENTS = new Set(["post_edit", "pre_edit"]);
+var wantsBashEdits = (rules) => rules.some((r) => r.enforce.some((e) => isDict(e) && EVENTS.has(String(e.event))));
+var hasPreEditContent = (rules) => rules.some((r) => r.enforce.some((e) => isDict(e) && e.event === "pre_edit" && truthy(e.when)));
+function addedLines(diff) {
+  const out = [];
+  let inHunk = false;
+  for (const line of diff.split(`
+`)) {
+    if (line.startsWith("diff --git "))
+      inHunk = false;
+    else if (line.startsWith("@@"))
+      inHunk = true;
+    else if (inHunk && line.startsWith("+"))
+      out.push(line.slice(1));
+  }
+  return out;
+}
+async function writtenContent(io, file, threshold) {
+  const dir = dirname(file);
+  const name = basename(file);
+  const opts = { timeoutMs: 1e4 };
+  const whole = async () => await io.readFile(file) ?? "";
+  const tracked = await io.run(["git", "-C", dir, "ls-files", "--error-unmatch", "--", name], opts);
+  if (tracked.exitCode !== 0)
+    return whole();
+  const diff = await io.run(["git", "-C", dir, "diff", "--no-color", "--no-ext-diff", "-U0", "HEAD", "--", name], opts);
+  if (diff.exitCode !== 0)
+    return whole();
+  let added = addedLines(diff.stdout);
+  if (added.length === 0) {
+    const since = `--since=@${Math.floor(threshold / 1000)}`;
+    const log = await io.run(["git", "-C", dir, "log", since, "--no-merges", "-p", "--no-color", "--no-ext-diff", "-U0", "--format=", "--", name], opts);
+    if (log.exitCode === 0)
+      added = addedLines(log.stdout);
+  }
+  return added.join(`
+`);
+}
+var label = (projectDir, file) => {
+  if (!isAbsolute(file))
+    return file;
+  const rel = relpath(file, projectDir);
+  return rel.startsWith("../") || rel === ".." ? file : rel;
+};
+async function main3(io, payload, files, threshold) {
+  const rules = await listRules(io);
+  if (!wantsBashEdits(rules))
+    return ok();
+  const projectDir = io.projectDir || io.cwd;
+  const needContent = hasPreEditContent(rules);
+  const found = [];
+  for (const file of [...files].sort()) {
+    const abs = isAbsolute(file) ? file : join(projectDir, file);
+    for (const v of await evalPostEdit(io, rules, abs))
+      found.push({ file: abs, v });
+    const content = needContent ? await writtenContent(io, abs, threshold) : "";
+    const pre = await evalPreEdit(io, rules, abs, content);
+    if (pre.length === 0)
+      continue;
+    await downgradeRepeatedAsks(io, pre, payload.session_id, { file_path: abs });
+    for (const v of pre)
+      found.push({ file: abs, v });
+  }
+  if (found.length === 0)
+    return ok();
+  for (const { v } of found)
+    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
+  const violations = found.map(({ v }) => v);
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
+  const t = tr(io.lang);
+  const tag = (v) => v.event === "pre_edit" ? "[feedback-guard]" : "[feedback-post-edit]";
+  const after = (v) => v.event === "pre_edit" ? ` ${t("bashEdit.preEditAfter")}` : "";
+  const warnings = found.filter(({ v }) => v.severity === "warn");
+  const blocking = found.filter(({ v }) => v.severity !== "warn");
+  let stderr = warnings.map(({ file, v }) => `${tag(v)} warn: ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)})${after(v)}
+`).join("");
+  if (blocking.length === 0)
+    return ok("", stderr + notes.map((l) => `${l}
+`).join(""));
+  const lines = blocking.map(({ file, v }) => `${tag(v)} ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)}: ${v.detail})${after(v)}`);
+  lines.unshift(t("bashEdit.header"));
+  lines.push(...notes);
+  stderr += lines.map((l) => `${l}
+`).join("");
+  return ok(`${JSON.stringify({ decision: "block", reason: lines.join(`
+`) })}
+`, stderr);
+}
+async function feedbackBashEdits(io, payload, files, threshold) {
+  try {
+    return await main3(io, payload, files, threshold);
+  } catch (e) {
+    return ok("", `[feedback-bash-edit] internal error (ignored): ${e instanceof Error ? e.message : String(e)}
+`);
+  }
+}
+
 // src/bash-changes.ts
 var SKIP_COMMAND_RE = /\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?:=\S+)?))*\s+(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/;
 var MTIME_SLACK_MS = 2000;
@@ -11577,83 +11776,87 @@ var startedKey = (payload) => {
   const sessionId = jqStr(payload.session_id) || "unknown";
   return `${sessionId}--${toolUseId}`;
 };
-var startedPath = (projectDir, payload) => join(projectDir, ".claude", STATE_DIR, `bash_started.${startedKey(payload)}.json`);
+var hasGate = (io, projectDir) => io.exists(join(projectDir, ".claude", "gate.yaml"));
+var startedDir = (io, projectDir, gate) => gate ? join(projectDir, ".claude", STATE_DIR) : join(feedbackDir(io), ".bash_started");
+var startedPath = (dir, payload) => join(dir, `bash_started.${startedKey(payload)}.json`);
 async function bashStarted(io, payload) {
   try {
     const projectDir = io.projectDir || io.cwd;
-    if (!await io.exists(join(projectDir, ".claude", "gate.yaml")))
+    const gate = await hasGate(io, projectDir);
+    if (!gate && !wantsBashEdits(await listRules(io)))
       return ok();
+    const dir = startedDir(io, projectDir, gate);
     const started = await io.now();
-    await io.writeFile(startedPath(projectDir, payload), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}
+    await io.writeFile(startedPath(dir, payload), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}
 `);
-    await sweepStale(io, projectDir, jqStr(payload.session_id) || "unknown", started);
+    await sweepStale(io, dir, jqStr(payload.session_id) || "unknown", started);
   } catch {}
   return ok();
 }
-async function sweepStale(io, projectDir, sessionId, now) {
-  const stateDir = join(projectDir, ".claude", STATE_DIR);
+async function sweepStale(io, stateDir, sessionId, now) {
   const prefix = `bash_started.${sessionId}--`;
   const stale = (await io.list(stateDir)).filter((e) => e.kind === "file" && e.name.startsWith(prefix) && e.name.endsWith(".json") && e.mtimeMs < now - STALE_STARTED_MS).map((e) => join(stateDir, e.name));
   if (stale.length > 0)
     await io.removeFiles(stale);
 }
-async function recordBashChanges(io, payload) {
+var NONE = { changed: [], recorded: [], threshold: 0, gate: false };
+async function detectBashChanges(io, payload) {
   try {
     const projectDir = io.projectDir || io.cwd;
-    if (!await io.exists(join(projectDir, ".claude", "gate.yaml")))
-      return [];
-    const stateId = stateIdOf(payload);
-    const startedFile = startedPath(projectDir, payload);
+    const gate = await hasGate(io, projectDir);
+    const dir = startedDir(io, projectDir, gate);
+    const startedFile = startedPath(dir, payload);
     const raw = await io.readFile(startedFile);
     if (raw === undefined)
-      return [];
+      return NONE;
     try {
-      return await record(io, projectDir, stateId, raw, payload);
+      return await detect(io, projectDir, gate, dir, raw, payload);
     } finally {
       await io.removeFiles([startedFile]);
     }
   } catch {
-    return [];
+    return NONE;
   }
 }
-async function record(io, projectDir, stateId, raw, payload) {
+async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
   let saved;
   try {
     saved = JSON.parse(raw);
   } catch {
-    return [];
+    return NONE;
   }
   if (!isDict(saved) || typeof saved.started !== "number")
-    return [];
+    return NONE;
   if (jqStr(saved.tool_use_id) !== jqStr(payload.tool_use_id))
-    return [];
+    return NONE;
   const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
   if (SKIP_COMMAND_RE.test(command))
-    return [];
+    return NONE;
   const threshold = saved.started - MTIME_SLACK_MS;
   const stateDir = join(projectDir, ".claude", STATE_DIR);
   const picked = new Set;
   for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd)) {
     for (const rel of await candidates(io, root, threshold)) {
       const abs = join(root, rel);
-      if (abs.startsWith(`${stateDir}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
+      if (abs.startsWith(`${stateDir}/`) || abs.startsWith(`${startedDirPath}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
         continue;
       const st = await io.stat(abs);
       if (st?.kind === "file" && st.mtimeMs >= threshold)
         picked.add(abs);
     }
   }
-  if (picked.size === 0)
-    return [];
-  const memo = join(stateDir, `changed_files.${stateId}.txt`);
+  const changed = [...picked];
+  if (changed.length === 0 || !gate)
+    return { changed, recorded: [], threshold, gate };
+  const memo = join(stateDir, `changed_files.${stateIdOf(payload)}.txt`);
   const existing = await io.readFile(memo) ?? "";
   const have = new Set(existing.split(`
 `));
-  const added = [...picked].filter((p) => !have.has(p));
-  if (added.length > 0)
-    await io.writeFile(memo, `${existing}${added.map((p) => `${p}
+  const recorded = changed.filter((p) => !have.has(p));
+  if (recorded.length > 0)
+    await io.writeFile(memo, `${existing}${recorded.map((p) => `${p}
 `).join("")}`);
-  return added;
+  return { changed, recorded, threshold, gate };
 }
 var gitTop = async (io, dir) => {
   const top = await io.run(["git", "-C", dir, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 });
@@ -11690,11 +11893,16 @@ async function candidates(io, root, threshold) {
   }
   return [...out];
 }
-async function bashChanges(io, payload) {
-  const recorded = await recordBashChanges(io, payload);
-  if (recorded.length === 0)
-    return ok();
-  return stopTestGate(io, "rules", payload);
+function bashChangeSteps(payload) {
+  let found = NONE;
+  return [
+    async (io) => {
+      found = await detectBashChanges(io, payload);
+      return ok();
+    },
+    (io) => found.changed.length > 0 ? feedbackBashEdits(io, payload, found.changed, found.threshold) : Promise.resolve(ok()),
+    (io) => found.recorded.length > 0 ? stopTestGate(io, "rules", payload) : Promise.resolve(ok())
+  ];
 }
 
 // src/correct.ts
@@ -12082,99 +12290,6 @@ async function createIo($, options = {}) {
   };
 }
 
-// src/feedback-guard.ts
-var SEVERITY_ORDER = { warn: 0, ask: 1, block: 2, deny: 3 };
-var decisionFor = (severity) => severity === "deny" || severity === "block" ? "deny" : "ask";
-var buildReason = (violations) => violations.map((v) => `${v.rule} (count: ${v.count}): ${v.message}`).join(`
-`);
-var askStatePath = (io, sessionId) => join(feedbackDir(io), ".ask_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
-async function loadAskedKeys(io, sessionId) {
-  try {
-    const text = await io.readFile(askStatePath(io, sessionId));
-    if (text === undefined)
-      return new Set;
-    const data = JSON.parse(text);
-    if (isDict(data) && Array.isArray(data.asked))
-      return new Set(data.asked.map(String));
-  } catch {}
-  return new Set;
-}
-async function saveAskedKeys(io, sessionId, askedKeys) {
-  try {
-    await io.writeFile(askStatePath(io, sessionId), JSON.stringify({ asked: [...askedKeys].sort() }));
-  } catch {}
-}
-function askKey(v, toolInput) {
-  const target = v.event === "pre_edit" ? truthy(toolInput.file_path) ? String(toolInput.file_path) : "" : "";
-  return `${v.rule}|${v.event}|${target}`;
-}
-async function downgradeRepeatedAsks(io, violations, sessionId, toolInput) {
-  if (!truthy(sessionId))
-    return;
-  const sid = String(sessionId);
-  const asked = await loadAskedKeys(io, sid);
-  const newlyAsked = new Set;
-  for (const v of violations) {
-    if (v.severity !== "ask")
-      continue;
-    const key = askKey(v, toolInput);
-    if (asked.has(key))
-      v.severity = "warn";
-    else
-      newlyAsked.add(key);
-  }
-  if (newlyAsked.size > 0)
-    await saveAskedKeys(io, sid, new Set([...asked, ...newlyAsked]));
-}
-async function main2(io, payload) {
-  const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
-  const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
-  const rules = await listRules(io);
-  let violations;
-  if (toolName === "Bash") {
-    violations = await evalPreBash(io, rules, truthy(toolInput.command) ? String(toolInput.command) : "");
-  } else if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit") {
-    const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : "";
-    if (!filePath)
-      return ok();
-    violations = await evalPreEdit(io, rules, filePath, extractPreEditContent(toolName, toolInput));
-  } else {
-    return ok();
-  }
-  if (violations.length === 0)
-    return ok();
-  await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
-  for (const v of violations)
-    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
-  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
-  const blocking = violations.filter((v) => v.severity !== "warn");
-  const warnings = violations.filter((v) => v.severity === "warn");
-  let stdout = "";
-  if (blocking.length > 0) {
-    const top = blocking.reduce((a, b) => (SEVERITY_ORDER[b.severity] ?? 0) > (SEVERITY_ORDER[a.severity] ?? 0) ? b : a);
-    stdout = `${JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: decisionFor(top.severity),
-        permissionDecisionReason: [buildReason(blocking), ...notes].join(`
-`)
-      }
-    })}
-`;
-  }
-  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}`), ...notes].map((l) => `${l}
-`).join("");
-  return ok(stdout, stderr);
-}
-async function feedbackGuard(io, payload) {
-  try {
-    return await main2(io, payload);
-  } catch (e) {
-    return ok("", `[feedback-guard] internal error (ignored): ${e instanceof Error ? e.message : String(e)}
-`);
-  }
-}
-
 // src/feedback-inject.ts
 async function formatFull(io, rule) {
   const lines = [tr(io.lang)("inject.ruleTitle", { name: rule.name, count: rule.count }), rule.description];
@@ -12206,7 +12321,7 @@ async function feedbackInject(io) {
 }
 
 // src/feedback-post-edit.ts
-async function main3(io, payload) {
+async function main4(io, payload) {
   const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
   if (toolName !== "Edit" && toolName !== "Write" && toolName !== "MultiEdit")
     return ok();
@@ -12238,7 +12353,7 @@ async function main3(io, payload) {
 }
 async function feedbackPostEdit(io, payload) {
   try {
-    return await main3(io, payload);
+    return await main4(io, payload);
   } catch (e) {
     return ok("", `[feedback-post-edit] internal error (ignored): ${e instanceof Error ? e.message : String(e)}
 `);
@@ -12513,7 +12628,7 @@ export const register = (on, options) => {
   });
   on("classic.PostToolUse", async ($, e, next) => {
     if (str(e.tool_name) === "Bash") {
-      const mine = await runSteps($, options, "PostToolUse", [(io) => bashChanges(io, e)]);
+      const mine = await runSteps($, options, "PostToolUse", bashChangeSteps(e));
       return withNext(next, e, mine);
     }
     if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name)))
