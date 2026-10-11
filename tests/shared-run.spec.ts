@@ -3,7 +3,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { hashKey, runShared, type SharedOutcome, shareId } from '../src/shared-run.ts'
-import { makeIo, waitForSharedLock, withTmp } from './helpers/node-io.ts'
+import { makeIo, sharedDirOf, waitForSharedLock, withTmp } from './helpers/node-io.ts'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const outcome = (out: string, ok = true): SharedOutcome => ({ out, ok, timedOut: false, logpath: `/log/${out}` })
@@ -55,7 +55,7 @@ describe('runShared', () => {
 
   test('a marker older than the timeout is taken over', () =>
     withTmp(async (proj) => {
-      const shared = path.join(proj, '.claude', '.gate-status', 'shared')
+      const shared = await sharedDirOf(proj)
       const lock = path.join(shared, `${shareId('k', [])}.run`)
       fs.mkdirSync(lock, { recursive: true })
       fs.writeFileSync(path.join(lock, 'info.json'), JSON.stringify({ started: 1000, timeoutMs: 1000, key: 'k', files: [] }))
@@ -184,7 +184,7 @@ describe('runShared with file lists', () => {
 
   test('a stale serial lock is taken over', () =>
     withTmp(async (proj) => {
-      const shared = path.join(proj, '.claude', '.gate-status', 'shared')
+      const shared = await sharedDirOf(proj)
       const lock = path.join(shared, `${hashKey('k')}.serial`)
       fs.mkdirSync(lock, { recursive: true })
       fs.writeFileSync(path.join(lock, 'info.json'), JSON.stringify({ started: 1000, timeoutMs: 1000 }))
@@ -194,8 +194,8 @@ describe('runShared with file lists', () => {
     }))
 
   // ESC などで hook が止められ、ロックが残ったままになった状態を作る。
-  const leftLock = (proj: string, serial: string, info: Record<string, unknown>, pid?: number) => {
-    const lock = path.join(proj, '.claude', '.gate-status', 'shared', `${hashKey(serial)}.serial`)
+  const leftLock = async (proj: string, serial: string, info: Record<string, unknown>, pid?: number) => {
+    const lock = path.join(await sharedDirOf(proj), `${hashKey(serial)}.serial`)
     fs.mkdirSync(lock, { recursive: true })
     fs.writeFileSync(path.join(lock, 'info.json'), JSON.stringify(info))
     if (pid !== undefined) fs.writeFileSync(path.join(lock, 'pid'), `${pid}\n`)
@@ -205,7 +205,7 @@ describe('runShared with file lists', () => {
   test('a serial lock whose command process is gone is taken over at once, well before its timeout', () =>
     withTmp(async (proj) => {
       const dead = spawnSync('sh', ['-c', 'echo $$']).stdout.toString().trim()
-      const lock = leftLock(proj, 'k', { started: Date.now(), timeoutMs: 600_000 }, Number(dead))
+      const lock = await leftLock(proj, 'k', { started: Date.now(), timeoutMs: 600_000 }, Number(dead))
       const t0 = Date.now()
       const r = await runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => outcome('mine'))
       expect(r.outcome.out).toBe('mine')
@@ -215,7 +215,7 @@ describe('runShared with file lists', () => {
 
   test('a serial lock without a pid long after its start is taken over', () =>
     withTmp(async (proj) => {
-      leftLock(proj, 'k', { started: Date.now() - 60_000, timeoutMs: 600_000 })
+      await leftLock(proj, 'k', { started: Date.now() - 60_000, timeoutMs: 600_000 })
       const t0 = Date.now()
       const r = await runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => outcome('mine'))
       expect(r.outcome.out).toBe('mine')
@@ -225,7 +225,7 @@ describe('runShared with file lists', () => {
   test('a serial lock whose command is still running is waited for until the command ends', () =>
     withTmp(async (proj) => {
       const child = spawn('sleep', ['1'])
-      const lock = leftLock(proj, 'k', { started: Date.now(), timeoutMs: 600_000 }, child.pid)
+      const lock = await leftLock(proj, 'k', { started: Date.now(), timeoutMs: 600_000 }, child.pid)
       let endedAt = 0
       child.on('exit', () => {
         endedAt = Date.now()
@@ -244,8 +244,9 @@ describe('runShared with file lists', () => {
   test('when no lock can be created, it gives up coordinating and runs the command itself', () =>
     withTmp(async (proj) => {
       // shared/ がファイルなので mkdir できない。待ち続けず、ラウンドが尽きたら自分で実行する。
-      fs.mkdirSync(path.join(proj, '.claude', '.gate-status'), { recursive: true })
-      fs.writeFileSync(path.join(proj, '.claude', '.gate-status', 'shared'), '')
+      const shared = await sharedDirOf(proj)
+      fs.mkdirSync(path.dirname(shared), { recursive: true })
+      fs.writeFileSync(shared, '')
       const r = await Promise.race([
         runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => outcome('mine')),
         sleep(4000).then(() => undefined),
@@ -258,13 +259,13 @@ describe('runShared with file lists', () => {
     withTmp(async (proj) => {
       // 実行側のコマンドは終わった（PID は死んでいる）が、結果を書いてロックを外すのはこれから、という瞬間を作る。
       const dead = Number(spawnSync('sh', ['-c', 'echo $$']).stdout.toString().trim())
-      const shared = path.join(proj, '.claude', '.gate-status', 'shared')
+      const shared = await sharedDirOf(proj)
       const id = shareId('k', ['a.py'])
       const run = path.join(shared, `${id}.run`)
       fs.mkdirSync(run, { recursive: true })
       fs.writeFileSync(path.join(run, 'info.json'), JSON.stringify({ started: Date.now(), timeoutMs: 600_000, key: 'k', files: ['a.py'] }))
       fs.writeFileSync(path.join(run, 'pid'), `${dead}\n`)
-      const serial = leftLock(proj, 'k', { started: Date.now(), timeoutMs: 600_000 }, dead)
+      const serial = await leftLock(proj, 'k', { started: Date.now(), timeoutMs: 600_000 }, dead)
       const finish = sleep(400).then(() => {
         const leader = outcome('leader')
         fs.writeFileSync(path.join(shared, `${id}.result.json`), JSON.stringify({ key: 'k', files: ['a.py'], ...leader }))
@@ -291,7 +292,7 @@ describe('runShared with file lists', () => {
       })
       expect(got.map((f) => path.basename(path.dirname(f)).split('.').pop())).toEqual(['serial', 'run'])
       expect(got.every((f) => path.basename(f) === 'pid')).toBe(true)
-      expect(fs.readdirSync(path.join(proj, '.claude', '.gate-status', 'shared')).filter((n) => !n.endsWith('.result.json'))).toEqual([])
+      expect(fs.readdirSync(await sharedDirOf(proj)).filter((n) => !n.endsWith('.result.json'))).toEqual([])
     }))
 
   test('a run with a different key is not joined even when the files match', () =>
@@ -311,7 +312,7 @@ describe('runShared with file lists', () => {
 
   test('a stale superset lock is taken over instead of waited for', () =>
     withTmp(async (proj) => {
-      const lock = path.join(proj, '.claude', '.gate-status', 'shared', `${shareId('k', ['a.py', 'b.py'])}.run`)
+      const lock = path.join(await sharedDirOf(proj), `${shareId('k', ['a.py', 'b.py'])}.run`)
       fs.mkdirSync(lock, { recursive: true })
       fs.writeFileSync(path.join(lock, 'info.json'), JSON.stringify({ started: 1000, timeoutMs: 1000, key: 'k', files: ['a.py', 'b.py'] }))
       const r = await runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => outcome('mine'))
@@ -321,7 +322,7 @@ describe('runShared with file lists', () => {
 
   test('a lock that has no info.json yet is waited on, then joined once the info appears', () =>
     withTmp(async (proj) => {
-      const lock = path.join(proj, '.claude', '.gate-status', 'shared', `${shareId('k', ['a.py', 'b.py'])}.run`)
+      const lock = path.join(await sharedDirOf(proj), `${shareId('k', ['a.py', 'b.py'])}.run`)
       fs.mkdirSync(lock, { recursive: true })
       let runs = 0
       const waiter = runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => outcome(`run${++runs}`))
@@ -338,7 +339,7 @@ describe('runShared with file lists', () => {
 
   test('a lock that never gets an info.json is taken over after the grace period', () =>
     withTmp(async (proj) => {
-      const lock = path.join(proj, '.claude', '.gate-status', 'shared', `${shareId('k', ['a.py', 'b.py'])}.run`)
+      const lock = path.join(await sharedDirOf(proj), `${shareId('k', ['a.py', 'b.py'])}.run`)
       fs.mkdirSync(lock, { recursive: true })
       const old = new Date(Date.now() - 60_000)
       fs.utimesSync(lock, old, old)

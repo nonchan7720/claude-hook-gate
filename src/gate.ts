@@ -59,7 +59,8 @@
 //              実行中でも待たずに自分で実行する（既定は共有: 進行中の実行があれば起動せず完了を待って同じ結果を
 //              受け取る。ただし進行中の実行の対象ファイルが自分の対象ファイルをすべて含むときだけ。含まないときや
 //              環境変数・root・cwd が違うときも、name（無ければ cmd）が同じ実行が走っている間は起動せず、終わるのを待って
-//              から実行する＝同じコマンドは直列。src/shared-run.ts）。
+//              から実行する＝同じコマンドは直列。同じリポジトリの別の git worktree で動くエージェントの間でも直列になる
+//              （ロックは ~/.claude/.gate-status/shared/<project_id>/ に置く）。src/shared-run.ts）。
 //              files: false を書くと、そのコマンドは対象ファイルを使わないものとして、共有の判定上の対象ファイルを
 //              空として扱う（対象ファイルが違っても共有される）。CLAUDE_GATE_FILES 自体は従来どおり渡る。
 //              share: false と併記した場合は share: false が優先される。
@@ -116,7 +117,7 @@ import {
   saveSummary,
   withdrawRunning,
 } from './running-registry.ts'
-import { runShared } from './shared-run.ts'
+import { runShared, sharedDir } from './shared-run.ts'
 import { shellQuote, shellSplit } from './shell.ts'
 import { which } from './which.ts'
 
@@ -480,13 +481,13 @@ export class Gate {
   private async pruneShared(): Promise<void> {
     const now = await this.io.now()
     const stale = async (dir: string, suffix: string, maxAge: number): Promise<void> => {
-      const old = (await this.io.list(join(this.stateDir, dir)))
+      const old = (await this.io.list(dir))
         .filter((e) => e.kind === 'file' && e.name.endsWith(suffix) && e.mtimeMs < now - maxAge * 1000)
-        .map((e) => join(this.stateDir, dir, e.name))
+        .map((e) => join(dir, e.name))
       if (old.length > 0) await this.io.removeFiles(old)
     }
-    await stale('shared', '.result.json', LOG_STALE_GRACE)
-    await stale('running', '.json', LOG_MAX_AGE)
+    await stale(await sharedDir(this.io), '.result.json', LOG_STALE_GRACE)
+    await stale(join(this.stateDir, 'running'), '.json', LOG_MAX_AGE)
   }
 
   /** 現セッション分は LOG_MAX_AGE、他セッション分は LOG_STALE_GRACE を超えたら削除。 */

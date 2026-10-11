@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import type { Lang } from '../../src/i18n.ts'
 import type { DirEntry, EnvVars, Io, RunOptions, RunResult, Stat } from '../../src/io.ts'
 import { mergeRunning, runningBand, runningLines } from '../../src/running-registry.ts'
+import { sharedDir } from '../../src/shared-run.ts'
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -14,6 +15,14 @@ export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url
 // 拾ってしまう。既定で存在しないパスを差して「dogwood 未導入」を作り、偽バイナリを明示したテストだけが判定経路に
 // 乗るようにする。
 export const MISSING_DOGWOOD_BIN = path.join(REPO_ROOT, 'tests', 'no-such-dogwood')
+
+// 共有・直列化のロックは ~/.claude/.gate-status/shared/ に置かれるので、本物の HOME を汚さないよう既定の HOME を
+// 一時ディレクトリに向ける（プロセスの終了時に消す）。
+export const TEST_HOME = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gate-home-')))
+process.on('exit', () => fs.rmSync(TEST_HOME, { recursive: true, force: true }))
+
+/** projectDir（と HOME）に対応する共有ディレクトリ（src/shared-run.ts の sharedDir）。 */
+export const sharedDirOf = (projectDir: string, home: string = TEST_HOME): Promise<string> => sharedDir(makeIo({ projectDir, env: { HOME: home } }))
 
 export type NodeIoOptions = {
   projectDir: string
@@ -47,7 +56,7 @@ function snapshotBand(projectDir: string, now: number, lang: Lang): string | und
 const kindOf = (s: fs.Stats): 'file' | 'dir' | 'other' => (s.isFile() ? 'file' : s.isDirectory() ? 'dir' : 'other')
 
 export function makeIo(opts: NodeIoOptions): Io {
-  const env: EnvVars = { HOME: process.env.HOME, PATH: process.env.PATH, DOGWOOD_BIN: MISSING_DOGWOOD_BIN, ...opts.env }
+  const env: EnvVars = { HOME: TEST_HOME, PATH: process.env.PATH, DOGWOOD_BIN: MISSING_DOGWOOD_BIN, ...opts.env }
   const stat = async (p: string): Promise<Stat | undefined> => {
     try {
       const s = fs.statSync(p)
@@ -198,7 +207,7 @@ export async function withTmp<T>(body: (dir: string) => Promise<T> | T): Promise
 
 /** 実行側のロック（<ハッシュ>.*.run/info.json）が現れるまで待つ。sleep で「先に始まっている」ことを仮定しないための順序付け。 */
 export async function waitForSharedLock(proj: string, timeoutMs = 10_000): Promise<void> {
-  const dir = path.join(proj, '.claude', '.gate-status', 'shared')
+  const dir = await sharedDirOf(proj)
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const has = fs.existsSync(dir) && fs.readdirSync(dir).some((f) => f.endsWith('.run') && fs.existsSync(path.join(dir, f, 'info.json')))

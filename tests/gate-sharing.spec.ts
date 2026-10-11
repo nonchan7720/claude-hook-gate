@@ -3,7 +3,7 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { filesEnv, Gate, runGate } from '../src/gate.ts'
 import { checks, readTraceRecords, rules, writeChangedFiles, writeDeferred, writeGateYaml } from './helpers/gate.ts'
-import { MISSING_DOGWOOD_BIN, makeIo, waitForSharedLock, withTmp } from './helpers/node-io.ts'
+import { MISSING_DOGWOOD_BIN, makeIo, sharedDirOf, waitForSharedLock, withTmp } from './helpers/node-io.ts'
 
 const count = (file: string): number => (fs.existsSync(file) ? fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).length : 0)
 const logFiles = (proj: string, stateId: string): string[] => {
@@ -198,7 +198,7 @@ describe('the share key', () => {
 
   test('the command pid is written into the lock while it runs', () =>
     withTmp(async (proj) => {
-      const shared = path.join(proj, '.claude', '.gate-status', 'shared')
+      const shared = await sharedDirOf(proj)
       const seen = path.join(proj, 'seen.txt')
       // 実行中のコマンド自身から、ロックの pid が自分の PID（$$）と一致するかを書き出す。
       const c = `for f in ${shared}/*.serial/pid; do [ "$(cat "$f")" = "$$" ] && echo same >> ${seen}; done; true`
@@ -288,5 +288,60 @@ describe('deferred commands in the checks phase', () => {
       writeDeferred(proj, 'sess1', [{ root: proj, cwd: proj, name: 'chk-cmd', cmd, timeout: 300, label: '.' }])
       expect((await checks(proj, 'sess1', { stopHookActive: true })).exitCode).toBe(0)
       expect(count(counter)).toBe(1)
+    }))
+})
+
+describe('serializing across git worktrees of one repository', () => {
+  const git = (cwd: string, ...args: string[]) => {
+    const r = Bun.spawnSync(['git', '-C', cwd, ...args], {
+      env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' },
+    })
+    if (r.exitCode !== 0) throw new Error(r.stderr.toString())
+  }
+  const repoWithWorktrees = (base: string) => {
+    const main = path.join(base, 'repo')
+    fs.mkdirSync(main)
+    git(main, 'init', '-q')
+    git(main, 'commit', '-q', '--allow-empty', '-m', 'init')
+    const inner = path.join(main, '.claude', 'worktrees', 'w')
+    const outer = path.join(base, 'outside')
+    git(main, 'worktree', 'add', '-q', '-b', 'w', inner)
+    git(main, 'worktree', 'add', '-q', '-b', 'o', outer)
+    return [main, inner, outer]
+  }
+  const runAll = (dirs: string[], marker: string, counter: string) => {
+    const c = `echo start >> ${marker}; echo x >> ${counter}; sleep 0.4; echo end >> ${marker}`
+    return Promise.all(dirs.map((d, i) => agentGate(d, `a${i}`).execOne('l', c, d, 10, '', 'heavy', filesEnv(['x.py']), { root: d })))
+  }
+
+  test('the main checkout and two worktrees run the same name one at a time, without sharing results', () =>
+    withTmp(async (base) => {
+      const dirs = repoWithWorktrees(base)
+      const ids = await Promise.all(dirs.map((d) => sharedDirOf(d)))
+      expect(new Set(ids).size).toBe(1)
+      const marker = path.join(base, 'm.txt')
+      const counter = path.join(base, 'c.txt')
+      await runAll(dirs, marker, counter)
+      expect(fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean)).toEqual(['start', 'end', 'start', 'end', 'start', 'end'])
+      expect(count(counter)).toBe(3)
+    }))
+
+  test('different repositories get different shared directories', () =>
+    withTmp(async (base) => {
+      for (const d of ['x', 'y']) fs.mkdirSync(path.join(base, d))
+      const a = repoWithWorktrees(path.join(base, 'x'))
+      const b = repoWithWorktrees(path.join(base, 'y'))
+      expect(await sharedDirOf(String(a[0]))).not.toBe(await sharedDirOf(String(b[0])))
+    }))
+
+  test('outside git, the same name in one project is still serialized', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const counter = path.join(proj, 'c.txt')
+      // 同じ projectDir・同じキーなので結果は共有され得る（1 回か 2 回）。どちらでも重ならないこと
+      await runAll([proj, proj], marker, counter)
+      const lines = fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean)
+      expect(lines).toEqual(lines.map((_, i) => (i % 2 === 0 ? 'start' : 'end')))
+      expect(count(counter)).toBeGreaterThanOrEqual(1)
     }))
 })
