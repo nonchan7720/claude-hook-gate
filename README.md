@@ -88,10 +88,11 @@ Unknown arguments are ignored. There are four kinds of proposals, listed in this
 ## Install
 
 ```
-/plugin install feedback-gate --marketplace nonchan7720/claude-hook-gate
+/plugin marketplace add nonchan7720/claude-hook-gate
+/plugin install feedback-gate@claude-hook-gate
 ```
 
-Answer `y` to add the marketplace, then choose the scope.
+The first command adds this repository as the `claude-hook-gate` marketplace; the second installs the `feedback-gate` plugin from it. Then choose the scope.
 
 ## Requirements
 
