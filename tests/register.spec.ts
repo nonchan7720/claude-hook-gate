@@ -263,6 +263,9 @@ describe('PreToolUse', () => {
     ))
 })
 
+// Bash の変更追跡は直近のコミットが触ったファイルも拾う。準備のコミットが拾われないよう、日時を過去にしておく。
+const OLD_COMMIT_ENV = { ...process.env, GIT_AUTHOR_DATE: '@1600000000 +0000', GIT_COMMITTER_DATE: '@1600000000 +0000' }
+
 describe('PostToolUse', () => {
   test('records the changed file and runs the rules phase; failures block', () =>
     withMod(async (m, proj) => {
@@ -287,7 +290,7 @@ describe('PostToolUse', () => {
         ['add', '.'],
         ['commit', '-q', '-m', 'init'],
       ])
-        execFileSync('git', args, { cwd: proj })
+        execFileSync('git', args, { cwd: proj, env: OLD_COMMIT_ENV })
       await m.call('classic.PreToolUse', { tool: 'Bash', command: 'gen', tool_use_id: 'tu1' })
       fs.writeFileSync(path.join(proj, 'x.py'), 'x = 1\n')
       const r = (await m.call('classic.PostToolUse', {
@@ -314,7 +317,7 @@ describe('PostToolUse', () => {
         ['add', '.'],
         ['commit', '-q', '-m', 'init'],
       ])
-        execFileSync('git', args, { cwd: proj })
+        execFileSync('git', args, { cwd: proj, env: OLD_COMMIT_ENV })
       // エンジンは classic.PreToolUse のイベントからエージェント ID を落とす（tool / tool_use_id と入力だけ）。
       await m.call('classic.PreToolUse', { tool: 'Bash', command: 'gen', tool_use_id: 'tu1' })
       fs.writeFileSync(path.join(proj, 'x.py'), 'x = 1\n')
