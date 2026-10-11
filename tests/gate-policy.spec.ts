@@ -1,6 +1,5 @@
 import { describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'
-import * as os from 'node:os'
 import * as path from 'node:path'
 import { cedarString, PolicyState, slug, traceLine } from '../src/gate.ts'
 import {
@@ -22,7 +21,7 @@ import {
   writePolicy,
   writeTraceRecords,
 } from './helpers/gate.ts'
-import { withTmp } from './helpers/node-io.ts'
+import { TEST_HOME, withTmp } from './helpers/node-io.ts'
 
 const ok = (r: { exitCode: number; stderr?: string }) => expect(r.exitCode, r.stderr).toBe(0)
 const names = (proj: string) => readTraceRecords(proj, 'sess1').map((r) => r.name)
@@ -82,7 +81,7 @@ describe('policy path resolution', () => {
     withTmp(async (proj) => {
       const g = newGate(proj)
       expect(g.resolvePolicyPath('/root', '/abs/gate.dw')).toBe('/abs/gate.dw')
-      expect(g.resolvePolicyPath('/root', '~/gate.dw')).toBe(path.join(os.homedir(), 'gate.dw'))
+      expect(g.resolvePolicyPath('/root', '~/gate.dw')).toBe(path.join(TEST_HOME, 'gate.dw'))
     }))
 
   test('rule policy overrides top level', () =>

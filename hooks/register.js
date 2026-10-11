@@ -10284,11 +10284,40 @@ function hashKey(key) {
   h2 = Math.imul(h2 ^ h2 >>> 16, 2246822507) ^ Math.imul(h1 ^ h1 >>> 13, 3266489909);
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, "0");
 }
+var sharedDirCache = new Map;
+function sharedDir(io) {
+  const base = io.projectDir || io.cwd;
+  const home = io.env.HOME;
+  const cacheKey = JSON.stringify([home, base]);
+  let cached = sharedDirCache.get(cacheKey);
+  if (!cached) {
+    cached = (async () => {
+      if (!home)
+        return join(gateStatusDir(io), "shared");
+      const ask = async (args) => {
+        try {
+          const r = await io.run(["git", "-C", base, "rev-parse", ...args, "--git-common-dir"], { timeoutMs: 1e4 });
+          const out = r.stdout.trim();
+          return r.exitCode === 0 && out && !out.includes(`
+`) ? out : undefined;
+        } catch {
+          return;
+        }
+      };
+      const common = await ask(["--path-format=absolute"]) ?? await ask([]);
+      const anchor = common ? normpath(isAbsolute(common) ? common : join(base, common)) : normpath(base);
+      const label = (common && basename(anchor) === ".git" ? basename(dirname(anchor)) : basename(anchor)).replace(/[^A-Za-z0-9._-]/g, "_") || "project";
+      return join(home, ".claude", ".gate-status", "shared", `${label}-${hashKey(anchor)}`);
+    })();
+    sharedDirCache.set(cacheKey, cached);
+  }
+  return cached;
+}
 var normalizeFiles = (files) => [...new Set(files)].sort();
 var shareId = (key, files) => `${hashKey(key)}.${hashKey(JSON.stringify(normalizeFiles(files)))}`;
 async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
   const mine = normalizeFiles(files);
-  const dir = join(gateStatusDir(io), "shared");
+  const dir = await sharedDir(io);
   const keyPrefix = `${hashKey(key)}.`;
   const ownLock = join(dir, `${shareId(key, mine)}.run`);
   const resultOf = (lock) => `${lock.slice(0, -".run".length)}.result.json`;
@@ -10713,12 +10742,12 @@ class Gate {
   async pruneShared() {
     const now = await this.io.now();
     const stale = async (dir, suffix, maxAge) => {
-      const old = (await this.io.list(join(this.stateDir, dir))).filter((e) => e.kind === "file" && e.name.endsWith(suffix) && e.mtimeMs < now - maxAge * 1000).map((e) => join(this.stateDir, dir, e.name));
+      const old = (await this.io.list(dir)).filter((e) => e.kind === "file" && e.name.endsWith(suffix) && e.mtimeMs < now - maxAge * 1000).map((e) => join(dir, e.name));
       if (old.length > 0)
         await this.io.removeFiles(old);
     };
-    await stale("shared", ".result.json", LOG_STALE_GRACE);
-    await stale("running", ".json", LOG_MAX_AGE);
+    await stale(await sharedDir(this.io), ".result.json", LOG_STALE_GRACE);
+    await stale(join(this.stateDir, "running"), ".json", LOG_MAX_AGE);
   }
   async pruneLogs() {
     await this.pruneShared();

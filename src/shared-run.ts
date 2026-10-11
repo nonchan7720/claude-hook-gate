@@ -1,7 +1,7 @@
 // 同じキーのコマンド実行を、複数のエージェント（hook）の間で 1 本にまとめる（single-flight）。
 //
 // メインとサブエージェントの hook が同じプロセスで動く保証はないので、プロセス内の状態には頼らず、
-// .gate-status/shared/ 配下のファイルで調停する:
+// 共有ディレクトリ（下記 sharedDir）配下のファイルで調停する:
 //   - <キーのハッシュ>.<ファイル一覧のハッシュ>.run/   ロックディレクトリ。`mkdir` は原子的なので、作れた側が
 //                   実行側（先着 1 名）になる。中の info.json にキー・ファイル一覧・開始時刻・タイムアウトを書く。
 //   - <同じ名前>.result.json  実行側が完了時、ロックを外す前に書く結果（キーとファイル一覧付き）。
@@ -23,8 +23,12 @@
 // 結果を受け取れない（ファイル一覧を含まない・環境変数が違う）同じコマンドが走っているときも、並行して起動せず、
 // それが終わるのを待ってから、改めて受け取れる実行を探すか自分で実行する。重いコマンド（go test ./... など）を
 // エージェントの数だけ同時に走らせないため。
+//
+// これらのファイルは同じリポジトリのすべての git worktree で共通の場所（~/.claude/.gate-status/shared/<project_id>/。
+// sharedDir）に置く。サブエージェントが別の worktree で動いても、直列化（serial）は worktree をまたいで効く。
+// キーには root・cwd が入るので、worktree が違えば結果は共有されない（別のコードを見ているため）。
 import type { Io } from './io.ts'
-import { join } from './path.ts'
+import { basename, dirname, isAbsolute, join, normpath } from './path.ts'
 import { isDict } from './pyutil.ts'
 import { gateStatusDir } from './running-registry.ts'
 
@@ -50,6 +54,42 @@ export function hashKey(key: string): string {
   return (4294967296 * (2097151 & h2) + (h1 >>> 0)).toString(16).padStart(14, '0')
 }
 
+const sharedDirCache = new Map<string, Promise<string>>()
+
+/**
+ * 共有・直列化のロックと結果の置き場所: ~/.claude/.gate-status/shared/<project_id>/。project_id は
+ * `git rev-parse --git-common-dir` の絶対パス（同じリポジトリならどの worktree からでも同じ）から作る
+ * `<名前>-<ハッシュ>`。git でない・失敗したときは projectDir の絶対パスから作る。HOME が無ければ従来どおり
+ * gateStatusDir(io)/shared。git の呼び出しを毎回しないよう、プロセス内でキャッシュする。
+ */
+export function sharedDir(io: Io): Promise<string> {
+  const base = io.projectDir || io.cwd
+  const home = io.env.HOME
+  const cacheKey = JSON.stringify([home, base])
+  let cached = sharedDirCache.get(cacheKey)
+  if (!cached) {
+    cached = (async () => {
+      if (!home) return join(gateStatusDir(io), 'shared')
+      const ask = async (args: string[]): Promise<string | undefined> => {
+        try {
+          const r = await io.run(['git', '-C', base, 'rev-parse', ...args, '--git-common-dir'], { timeoutMs: 10_000 })
+          const out = r.stdout.trim()
+          return r.exitCode === 0 && out && !out.includes('\n') ? out : undefined
+        } catch {
+          return undefined
+        }
+      }
+      // 古い git は --path-format を知らない。そのときは相対パスを projectDir 基準で解決する
+      const common = (await ask(['--path-format=absolute'])) ?? (await ask([]))
+      const anchor = common ? normpath(isAbsolute(common) ? common : join(base, common)) : normpath(base)
+      const label = (common && basename(anchor) === '.git' ? basename(dirname(anchor)) : basename(anchor)).replace(/[^A-Za-z0-9._-]/g, '_') || 'project'
+      return join(home, '.claude', '.gate-status', 'shared', `${label}-${hashKey(anchor)}`)
+    })()
+    sharedDirCache.set(cacheKey, cached)
+  }
+  return cached
+}
+
 /** serial: 直列化の単位（省略時は key）。onWait: 待機側になったとき（最初の 1 回）に呼ばれる。 */
 type Hooks = { onWait?: () => void | Promise<void>; serial?: string }
 
@@ -71,7 +111,7 @@ export async function runShared(
   hooks: Hooks = {},
 ): Promise<{ outcome: SharedOutcome; shared: boolean }> {
   const mine = normalizeFiles(files)
-  const dir = join(gateStatusDir(io), 'shared')
+  const dir = await sharedDir(io)
   const keyPrefix = `${hashKey(key)}.`
   const ownLock = join(dir, `${shareId(key, mine)}.run`)
   const resultOf = (lock: string): string => `${lock.slice(0, -'.run'.length)}.result.json`

@@ -1,7 +1,7 @@
 // テスト用の擬似エンジン: register() が登録する hook を保持し、`$`（Engine）を Node の fs / プロセスで実装する。
 import * as fs from 'node:fs'
 import type { Engine, Hook, HookEvent, HookResult, PluginOptions, Register } from 'claude-code'
-import { makeIo, REPO_ROOT } from './node-io.ts'
+import { makeIo, REPO_ROOT, TEST_HOME } from './node-io.ts'
 
 export type FakeEngineOptions = {
   projectDir: string
@@ -32,7 +32,7 @@ export type FakeEngine = {
 
 export function makeEngine(opts: FakeEngineOptions): FakeEngine {
   // 既定の言語は日本語（テストの期待値は日本語で書かれている）。opts.env の LANG / options.language で切り替えられる。
-  const env = { HOME: process.env.HOME ?? '', PATH: process.env.PATH ?? '', LANG: 'ja_JP.UTF-8', ...opts.env } as Record<string, string | undefined>
+  const env = { HOME: TEST_HOME, PATH: process.env.PATH ?? '', LANG: 'ja_JP.UTF-8', ...opts.env } as Record<string, string | undefined>
   const io = makeIo({ projectDir: opts.projectDir })
   const $: Engine = {
     plugin: { root: REPO_ROOT },
