@@ -8,6 +8,7 @@
   "homepage": "https://github.com/nonchan7720/claude-hook-gate",
   "repository": "https://github.com/nonchan7720/claude-hook-gate",
   "license": "MIT",
+  "privacyPolicyUrl": "https://github.com/nonchan7720/claude-hook-gate#security-and-permissions",
   "userConfig": {
     "language": {
       "type": "string",
