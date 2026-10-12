@@ -4322,6 +4322,20 @@ async function withNext(next, e, mine) {
   const rest = await next(e);
   return merge(mine, rest);
 }
+function preToolUsePayload(event, tool, sessionId, cwd) {
+  const { tool: _tool, tool_use_id, agentId, ...toolInput } = event;
+  const payload = {
+    session_id: sessionId,
+    cwd,
+    hook_event_name: "PreToolUse",
+    tool_name: tool,
+    tool_input: toolInput,
+    tool_use_id
+  };
+  if (typeof agentId === "string" && agentId !== "")
+    payload.agent_id = agentId;
+  return payload;
+}
 export const register = (on, options) => {
   on("session.start", async ($, e, next) => {
     try {
@@ -4352,17 +4366,7 @@ export const register = (on, options) => {
     const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
     if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool))
       return guardNext(guardEvent);
-    const { tool: _tool, tool_use_id, agentId, ...toolInput } = guardEvent;
-    const payload = {
-      session_id: await $guard.session.id(),
-      cwd: await $guard.session.cwd(),
-      hook_event_name: "PreToolUse",
-      tool_name: tool,
-      tool_input: toolInput,
-      tool_use_id
-    };
-    if (typeof agentId === "string" && agentId !== "")
-      payload.agent_id = agentId;
+    const payload = preToolUsePayload(guardEvent, tool, await $guard.session.id(), await $guard.session.cwd());
     const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
     const steps = tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
     const mine = await runSteps($guard, options, "PreToolUse", steps);

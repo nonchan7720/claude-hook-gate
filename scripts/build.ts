@@ -71,6 +71,22 @@ if (!/^export const register = /m.test(code)) throw new Error('register export n
     const outside = lines.findIndex((l, i) => (i < start || i > end) && rx.test(l))
     if (outside >= 0) throw new Error(`classic.PreToolUse parameter ${name} also appears outside the hook (line ${outside + 1})`)
   }
+  // 検査はフックの中のイベント引数を、メンバーの読み取り（e.tool）か、関数の引数として丸ごと渡す形しか読まない
+  // （分割代入・テンプレート・オブジェクトやリストの中などに置くと、判定をユーザーに残していると確かめられない）。
+  const [, eventName] = params
+  const body = lines.slice(start + 1, end + 1).join('\n')
+  const uses = body.matchAll(new RegExp(`(?<![\\w$.])${eventName}(?![\\w$])`, 'g'))
+  for (const use of uses) {
+    const before = body.slice(0, use.index).trimEnd()
+    const after = body.slice((use.index ?? 0) + eventName.length).trimStart()
+    const member = after.startsWith('.') && !after.startsWith('...')
+    const argument = /[(,]$/.test(before) && /^[),]/.test(after) && !before.endsWith('...')
+    if (!member && !argument) {
+      throw new Error(
+        `classic.PreToolUse uses its event parameter ${eventName} outside a member read or a call argument: ...${before.slice(-40)}${eventName}${after.slice(0, 20)}...`,
+      )
+    }
+  }
 }
 outputs[path.join(hooksDir, 'register.js')] = code
 
