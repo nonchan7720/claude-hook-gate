@@ -4347,15 +4347,15 @@ export const register = (on, options) => {
     const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io)]);
     return withNext(next, e, merge(mine, inject));
   });
-  on("classic.PreToolUse", async ($, e, next) => {
-    const tool = str(e.tool);
+  on("classic.PreToolUse", async ($guard, guardEvent, guardNext) => {
+    const tool = str(guardEvent.tool);
     const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
     if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool))
-      return next(e);
-    const { tool: _tool, tool_use_id, agentId, ...toolInput } = e;
+      return guardNext(guardEvent);
+    const { tool: _tool, tool_use_id, agentId, ...toolInput } = guardEvent;
     const payload = {
-      session_id: await $.session.id(),
-      cwd: await $.session.cwd(),
+      session_id: await $guard.session.id(),
+      cwd: await $guard.session.cwd(),
       hook_event_name: "PreToolUse",
       tool_name: tool,
       tool_input: toolInput,
@@ -4365,12 +4365,12 @@ export const register = (on, options) => {
       payload.agent_id = agentId;
     const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
     const steps = tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
-    const mine = await runSteps($, options, "PreToolUse", steps);
+    const mine = await runSteps($guard, options, "PreToolUse", steps);
     if (mine.deny !== undefined)
       return { deny: mine.deny };
     if (mine.ask !== undefined)
       return { ask: mine.ask };
-    return next(e);
+    return guardNext(guardEvent);
   });
   on("classic.PostToolUse", async ($, e, next) => {
     if (/^(Agent|Task)$/.test(str(e.tool_name))) {
