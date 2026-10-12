@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.4](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.3...v0.7.4) (2026-10-12)
+
+
+### Bug Fixes
+
+* add privacyPolicyUrl to the plugin manifest ([#44](https://github.com/nonchan7720/claude-hook-gate/issues/44)) ([bbf5cd2](https://github.com/nonchan7720/claude-hook-gate/commit/bbf5cd262eabb3b8d14525dff65ecc1e22f3ddb2))
+
 ## [0.7.3](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.2...v0.7.3) (2026-10-12)
 
 
