@@ -56,6 +56,24 @@ code = code.replace(/^var register = /m, 'export const register = ').replace(/\n
 if (!/^export const register = /m.test(code)) throw new Error('register export not found in bundle')
 outputs[path.join(hooksDir, 'register.js')] = code
 
+// 見えない文字（改行・タブ以外の制御文字、半角スペース以外の空白、書式文字）を \uXXXX に書き換える。
+// ディレクトリの検査は、文字列やコメントに生の見えない文字があると保留にする（yaml の "\x85" / "\xa0" など）。
+// minify 後のこれらは文字列リテラルの中にしか現れないので、エスケープしても意味は変わらない。書き換え後に構文を確かめる。
+const invisible = /[\p{Cc}\p{Cf}\p{Zs}\p{Zl}\p{Zp}]/gu
+const escapeInvisible = (text: string) =>
+  text.replace(invisible, (ch) => {
+    if (ch === '\n' || ch === '\t' || ch === '\r' || ch === ' ') return ch
+    const cp = ch.codePointAt(0) ?? 0
+    return cp > 0xffff ? `\\u{${cp.toString(16)}}` : `\\u${cp.toString(16).padStart(4, '0')}`
+  })
+const transpiler = new Bun.Transpiler({ loader: 'js' })
+for (const [file, text] of Object.entries(outputs)) {
+  const escaped = escapeInvisible(text)
+  if (escaped === text) continue
+  transpiler.transformSync(escaped)
+  outputs[file] = escaped
+}
+
 // 実行環境が解決できない import が残っていないことを確かめる（claude-code と相対パス以外は不可）。
 const forbidden = [/(^|[;}\s])import\s*[^'"(]*from\s*['"](?!\.{1,2}\/|claude-code['"])/m, /(^|[;}\s])import\s*['"]/m, /\bimport\(/, /['"]node:/, /\brequire\(/]
 for (const [file, text] of Object.entries(outputs)) {

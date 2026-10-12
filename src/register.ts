@@ -11,7 +11,7 @@ import { feedbackStopCheck } from './feedback-stop-check.ts'
 import { tr } from './i18n.ts'
 import type { Io, ScriptResult } from './io.ts'
 import { notification } from './notification.ts'
-import { decided, merge, type Outcome, toOutcome } from './outcome.ts'
+import { merge, type Outcome, toOutcome } from './outcome.ts'
 import type { Dict } from './pyutil.ts'
 import { recordChanges } from './record-changes.ts'
 import { resetGate } from './reset-gate.ts'
@@ -132,8 +132,11 @@ export const register: Register = (on, options) => {
     // Bash は、開始時刻を控えてから guard を評価する（終了後の変更ファイル追跡用）。
     const steps: Step[] = tool === 'Bash' ? [(io) => bashStarted(io, payload), step] : [step]
     const mine = await runSteps($, options, 'PreToolUse', steps)
-    if (decided(mine)) return mine as HookResult
-    return withNext(next, e, mine)
+    // 返す判定は deny / ask だけ（allow は返さず、ユーザーの判断に委ねる）。他の出力（warn）は stderr なので返す値に載らない。
+    // ディレクトリの検査が判定の種類を読み取れるよう、返り値は固定のキーで書き、判定しないときはイベントをそのまま次へ渡す。
+    if (mine.deny !== undefined) return { deny: mine.deny }
+    if (mine.ask !== undefined) return { ask: mine.ask }
+    return next(e)
   })
 
   on('classic.PostToolUse', async ($, e, next) => {
