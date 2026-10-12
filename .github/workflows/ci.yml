@@ -31,3 +31,12 @@ jobs:
       # （検査は scripts/build.ts の中にある）。
       - name: Build bundle
         run: bun run build
+      # Claude Code 自身の検査。マニフェストとフックモジュールを読む検証（--strict で警告もエラー扱い）と、
+      # 実際のエンジンの上でのテスト（hooks/register.test.ts を、直前に作ったバンドルに対して実行）。ログインは不要。
+      # CLI の版はここで固定する（上げるときはこの 1 行を変える）。
+      - name: Install Claude Code CLI
+        run: npm install -g @anthropic-ai/claude-code@2.1.296
+      - name: Validate plugin (claude plugin validate --strict)
+        run: claude plugin validate . --strict
+      - name: Plugin tests on the real engine (claude plugin test)
+        run: claude plugin test .
