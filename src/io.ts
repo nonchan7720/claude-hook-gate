@@ -80,6 +80,7 @@ export interface Io {
 
 /** Hook スクリプト相当の結果（classic コマンド hook の終了コード・stdout・stderr）。 */
 /** reportConsumed: gate が成功報告の印を消費し、検証を走らせずに Stop を通した（成功報告の直後の Stop だった）。 */
-export type ScriptResult = { exitCode: number; stdout: string; stderr: string; reportConsumed?: boolean }
+/** report: gate の checks フェーズの最終結果の要約（サブエージェントの結果を呼び出し元へ渡すのに使う）。 */
+export type ScriptResult = { exitCode: number; stdout: string; stderr: string; reportConsumed?: boolean; report?: string }
 
 export const ok = (stdout = '', stderr = ''): ScriptResult => ({ exitCode: 0, stdout, stderr })

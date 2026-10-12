@@ -442,6 +442,65 @@ describe('Stop / SubagentStop / Notification', () => {
       expect(String(r.block)).toContain('検証に失敗しました（試行')
     }))
 
+  test('the host gets the gate result of a finished subagent on PostToolUse(Agent), once', () =>
+    withMod(async (m, proj) => {
+      writeGateYaml(proj, {
+        rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+        consistency_checks: [{ name: 'chk', run: [{ cmd: 'true', name: 'lint' }] }],
+      })
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', agent_id: 'a1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      const sub = { session_id: 'sess-1', agent_id: 'a1', agent_type: 'impl' }
+      const first = (await m.call('classic.SubagentStop', { ...sub, stop_hook_active: false })) as Out
+      expect(String(first.block)).toContain('検証がすべて通りました: lint ✓')
+      // 成功報告の直後の回は gate を走らせないが、控えた「すべて通った」は残る。
+      await m.call('classic.SubagentStop', { ...sub, stop_hook_active: true })
+      const agent = { session_id: 'sess-1', tool_name: 'Agent', tool_input: { prompt: 'p' }, tool_response: { agentId: 'a1', status: 'completed' } }
+      const r = (await m.call('classic.PostToolUse', agent)) as Out
+      const ctx = (r.additionalContext as string[]).join('\n')
+      expect(ctx).toContain('サブエージェント impl (a1)')
+      expect(ctx).toContain('[gate] 検証がすべて通りました: lint ✓')
+      expect(ctx).not.toContain('ユーザーに報告して')
+      expect(r.block).toBeUndefined()
+      // 渡したら消す。
+      const again = (await m.call('classic.PostToolUse', agent)) as Out
+      expect(again.additionalContext).toBeUndefined()
+    }))
+
+  test('the host gets the gate give-up and the stop_check warnings of a subagent', () =>
+    withMod(async (m, proj, feedback) => {
+      writeGateYaml(proj, {
+        rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+        consistency_checks: [{ name: 'chk', run: ['echo broken; exit 1'] }],
+      })
+      writeRule(
+        feedback,
+        'readme',
+        3,
+        "enforce:\n  - event: stop_check\n    changed: '**/*.py'\n    check: 'exit 1'\n    message: 'update README'\n    severity: warn\n",
+      )
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', agent_id: 'a1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      for (let i = 0; i < 5; i++) await m.call('classic.SubagentStop', { session_id: 'sess-1', agent_id: 'a1', stop_hook_active: i > 0 })
+      const r = (await m.call('classic.PostToolUse', {
+        session_id: 'sess-1',
+        tool_name: 'Agent',
+        tool_input: {},
+        tool_response: { agentId: 'a1' },
+      })) as Out
+      const ctx = (r.additionalContext as string[]).join('\n')
+      expect(ctx).toContain('5回連続で失敗したため打ち切りました')
+      expect(ctx).toContain('✗')
+      expect(ctx).toContain('readme')
+      expect(ctx).toContain('update README')
+    }))
+
+  test('PostToolUse(Agent) adds nothing when the subagent ran no hook result', () =>
+    withMod(async (m, proj) => {
+      writeGateYaml(proj, { rules: [] })
+      await m.call('classic.SubagentStop', { session_id: 'sess-1', agent_id: 'a1', stop_hook_active: false })
+      const r = (await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Agent', tool_input: {}, tool_response: { agentId: 'a1' } })) as Out
+      expect(r.additionalContext).toBeUndefined()
+    }))
+
   test('a blocked gate run never draws on the status line while running, and leaves its result there', () =>
     withMod(async (m, proj) => {
       writeGateYaml(proj, {

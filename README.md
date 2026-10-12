@@ -23,11 +23,23 @@ The hooks are registered in `src/register.ts` (bundled into `hooks/register.js` 
 | PreToolUse (Agent / SendMessage), opt-in | `src/agent-launch-guard.ts` | Only when `agentLaunchGuard` is `true`: asks before sending instructions to a subagent, showing the full text. |
 | Notification | `src/notification.ts` (`notify`) | Desktop notification when Claude waits for you (needs `terminal-notifier`, macOS). |
 | Stop | `src/all-stop.ts` | Runs, in order: the gate `checks` phase (reruns the rules that failed and were not fixed, then the reserved consistency checks), `src/feedback-stop-check.ts`, then the `stop` notification. |
-| SubagentStop | gate `checks` phase, `src/feedback-stop-check.ts` | Same gate and `stop_check` rules for subagents. |
+| SubagentStop | gate `checks` phase, `src/feedback-stop-check.ts`, then `src/subagent-report.ts` (`saveSubagentReport`) | Same gate and `stop_check` rules for subagents. The result is kept so it can be handed to the calling agent (see [Results of subagents](#results-of-subagents)). |
+| PostToolUse (Agent) | `src/subagent-report.ts` (`subagentReport`) | Adds the gate / `stop_check` result of the subagent that just finished to the calling agent's context. |
 
 ### Files written by Bash
 
 A Bash command cannot be checked by `pre_edit` before it runs, since what it will write is unknown until then. After the command, `src/feedback-bash-edit.ts` evaluates the `pre_edit` entries on each file it rewrote with the same conditions: `path` / `exclude_path`, `absent_sibling` / `absent_glob` (the test file must exist once the command is done, so writing the test in the same command is fine), and `when` / `unless` against the content the command wrote: for a file git tracks, the lines added relative to `HEAD` (or, when the command committed them, the lines added by the commits made since it started); for an untracked file (a new file, or a file outside git), the whole content, as with the `content` of Write. As the file is already written, `deny` / `ask` become a PostToolUse `block` (Claude is told to fix the file), and the message says the rule was only caught after the command. An `ask` already raised for the same rule and file in this session is downgraded to `warn`, as with Edit. Warnings and blocks carry the file path. The checks only see files git can list (tracked, or untracked and not ignored); files written outside a git working tree, or ignored by `.gitignore`, are not checked.
+
+### Results of subagents
+
+<a id="results-of-subagents"></a>The gate and `stop_check` results of a subagent's SubagentStop only reach the subagent itself (a block reason) or you (a `systemMessage`); the calling agent sees only the subagent's final message, and had to read the gate logs to know whether the checks passed. So on every SubagentStop the result of that round is kept in `~/.claude/feedback/.subagent_reports/<session>--<agent>.json` (under `CLAUDE_FEEDBACK_DIR` when set, outside the working tree, so it also works without `gate.yaml`), and on the calling agent's PostToolUse for `Agent` the file of the `agentId` in the tool result is added to its context and removed, e.g.
+
+```
+[feedback-gate] Results of the hooks run when subagent code-implementer (a1b2c3) stopped (gate checks and feedback stop_check). Use these instead of reading the gate logs or re-running the checks:
+[gate] All checks passed: lint ✓ / typecheck ✓ / test ✓
+```
+
+What is handed over is the result of the last SubagentStop (the one that let the subagent stop): `[gate] All checks passed: ...`, the `checks` phase summary, or the give-up message with the failures after `MAX_ATTEMPTS`; and the `stop_check` warnings (or its give-up). The stop right after a success report runs no gate command, so it keeps the `All checks passed` of the round before. When nothing ran and nothing was found, nothing is added. A subagent started in the background finishes after its PostToolUse, so its result is not handed over; such files are removed after 24 hours.
 
 ### Agent launch guard (optional)
 
