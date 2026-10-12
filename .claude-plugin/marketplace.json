@@ -3,6 +3,7 @@
   "owner": {
     "name": "nonchan7720"
   },
+  "description": "feedback-gate: Claude Code hooks for feedback rules and per-project quality gates",
   "plugins": [
     {
       "name": "feedback-gate",
