@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.3](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.2...v0.7.3) (2026-10-12)
+
+
+### Bug Fixes
+
+* clear remaining plugin directory findings ([#41](https://github.com/nonchan7720/claude-hook-gate/issues/41)) ([0a6a43b](https://github.com/nonchan7720/claude-hook-gate/commit/0a6a43b5fb82e493325f95648b7518172aa132db))
+* hand the PreToolUse event whole to a helper instead of destructuring it ([#43](https://github.com/nonchan7720/claude-hook-gate/issues/43)) ([5413633](https://github.com/nonchan7720/claude-hook-gate/commit/5413633122caac78360ef91529e4bd816c238fb9))
+
 ## [0.7.2](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.1...v0.7.2) (2026-10-12)
 
 
