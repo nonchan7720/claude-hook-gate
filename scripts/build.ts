@@ -54,6 +54,24 @@ for (const name of Object.keys(vendors)) {
 }
 code = code.replace(/^var register = /m, 'export const register = ').replace(/\nexport \{\n {2}register\n\};\n?$/, '\n')
 if (!/^export const register = /m.test(code)) throw new Error('register export not found in bundle')
+// ディレクトリの検査は、権限を判定するフック（classic.PreToolUse）の引数と同じ名前が、そのフックの外を含めて
+// ファイルのどこかで宣言・代入されていると、判定をユーザーに残していることを確かめられず提出を止める。
+// 引数名がフックの中にしか出てこないことをここで確かめる。
+{
+  const lines = code.split('\n')
+  const start = lines.findIndex((l) => l.includes('on("classic.PreToolUse", async ('))
+  const end = lines.findIndex((l, i) => i > start && l.startsWith('  });'))
+  const params = lines[start]
+    ?.match(/async \(([^)]*)\) =>/)?.[1]
+    ?.split(',')
+    .map((p) => p.trim())
+  if (start < 0 || end < 0 || params?.length !== 3) throw new Error('classic.PreToolUse hook not found in bundle')
+  for (const name of params) {
+    const rx = new RegExp(`(?<![\\w$])${name.replace(/\$/g, '\\$')}(?![\\w$])`)
+    const outside = lines.findIndex((l, i) => (i < start || i > end) && rx.test(l))
+    if (outside >= 0) throw new Error(`classic.PreToolUse parameter ${name} also appears outside the hook (line ${outside + 1})`)
+  }
+}
 outputs[path.join(hooksDir, 'register.js')] = code
 
 // 見えない文字（改行・タブ以外の制御文字、半角スペース以外の空白、書式文字）を \uXXXX に書き換える。

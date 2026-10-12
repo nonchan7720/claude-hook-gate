@@ -223,10 +223,11 @@ bun run lint         # Biome (lint + format check); `bun run format` fixes
 bun run typecheck    # tsc --noEmit
 bun run test         # bun test (tests/*.spec.ts)
 bun run build        # bundle src/register.ts -> hooks/register.js (+ hooks/vendor/*.js)
-bun run test:plugin  # build, then run hooks/register.test.ts on the real engine (needs the `claude` CLI)
+bun run test:plugin  # build, then run hooks/register.test.ts on the real engine
+bun run validate:plugin  # claude plugin validate . --strict
 ```
 
-The bundle (`hooks/register.js` and `hooks/vendor/`) is generated and committed by CI on the pull request; contributors do not commit it (it is not in the repository until CI adds it). The "Build bundle" workflow builds it on every pull request (same-repo branches) and pushes a `chore: build bundle` commit to the branch, adding the file or updating it if it changed. Run `bun run build` to produce it locally (e.g. for `bun run test:plugin`) and leave it uncommitted. Do not edit it by hand. `scripts/build.ts` fails the build if the bundle imports anything but relative paths and `claude-code`, or if any output file is 200 KiB or larger.
+The bundle (`hooks/register.js` and `hooks/vendor/`) is generated and committed by CI on the pull request; contributors do not commit it (it is not in the repository until CI adds it). The "Build bundle" workflow builds it on every pull request (same-repo branches) and pushes a `chore: build bundle` commit to the branch, adding the file or updating it if it changed. Run `bun run build` to produce it locally (e.g. for `bun run test:plugin`) and leave it uncommitted. Do not edit it by hand. `scripts/build.ts` fails the build if the bundle imports anything but relative paths and `claude-code`, or if any output file is 200 KiB or larger. It also writes invisible characters in the output as `\uXXXX` escapes, and fails if a parameter name of the `classic.PreToolUse` hook appears anywhere else in `hooks/register.js` (the plugin directory refuses a permission hook whose `next` it cannot trace). The CI workflow then runs `claude plugin validate . --strict` and `claude plugin test .` on the built bundle, using the Claude Code CLI from `devDependencies` (`@anthropic-ai/claude-code`, pinned by `bun.lock` and updated by Dependabot).
 
 Dependencies have a 7-day freeze period: `bunfig.toml` sets `minimumReleaseAge` so `bun install` only resolves versions published at least 7 days ago, and Dependabot (`.github/dependabot.yml`) waits 7 days (`cooldown`) before proposing npm or GitHub Actions updates. Actions are pinned to commit SHAs.
 

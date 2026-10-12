@@ -31,3 +31,10 @@ jobs:
       # （検査は scripts/build.ts の中にある）。
       - name: Build bundle
         run: bun run build
+      # Claude Code 自身の検査。マニフェストとフックモジュールを読む検証（--strict で警告もエラー扱い）と、
+      # 実際のエンジンの上でのテスト（hooks/register.test.ts を、作ったバンドルに対して実行）。ログインは不要。
+      # CLI は devDependencies の @anthropic-ai/claude-code（bun.lock で固定、dependabot が更新）を使う。
+      - name: Validate plugin (claude plugin validate --strict)
+        run: bun run validate:plugin
+      - name: Plugin tests on the real engine (claude plugin test)
+        run: bun run test:plugin
