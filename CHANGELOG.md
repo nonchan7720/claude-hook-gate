@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.1...v0.7.2) (2026-10-12)
+
+
+### Bug Fixes
+
+* address plugin directory validation findings ([#39](https://github.com/nonchan7720/claude-hook-gate/issues/39)) ([d26dc04](https://github.com/nonchan7720/claude-hook-gate/commit/d26dc04dfe041cdcbbec2b14507e83c33be61ebc))
+
 ## [0.7.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.0...v0.7.1) (2026-10-12)
 
 
