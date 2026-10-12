@@ -13,11 +13,6 @@ coverage
 .cache/
 dist
 
-# Local environment files
-.env
-.env.*
-!.env.example
-
 # Claude Code
 .claude-plugin/types/
 .claude/.gate-status/

@@ -79,6 +79,26 @@ async function withNext(next: (e: HookEvent) => Promise<HookResult>, e: HookEven
   return merge(mine, rest) as HookResult
 }
 
+// classic.PreToolUse のイベントを、classic コマンド hook が stdin で受け取っていた JSON の形に組み立てる。
+// ディレクトリの検査はフックの中でイベントを分割代入すると読めない（判定をユーザーに残していると確かめられない）ので、
+// イベントはこの関数に丸ごと渡し、分割はここで行う。
+function preToolUsePayload(event: Dict, tool: string, sessionId: string, cwd: string): Dict {
+  const { tool: _tool, tool_use_id, agentId, ...toolInput } = event
+  const payload: Dict = {
+    session_id: sessionId,
+    cwd,
+    hook_event_name: 'PreToolUse',
+    tool_name: tool,
+    tool_input: toolInput,
+    tool_use_id,
+  }
+  // エンジンは classic.PreToolUse のイベントにエージェント ID を入れない（tool.call の入力から agentId を落として
+  // tool / tool_use_id を足した形）。入っていたときだけ揃えておく。bash_started は tool_use_id で引くので、
+  // サブエージェントの中でもここに agent_id が無いことは問題にならない（src/bash-changes.ts）。
+  if (typeof agentId === 'string' && agentId !== '') payload.agent_id = agentId
+  return payload
+}
+
 export const register: Register = (on, options) => {
   // /correct: feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する。
   on('session.start', async ($, e, next) => {
@@ -114,19 +134,7 @@ export const register: Register = (on, options) => {
     const tool = str(guardEvent.tool)
     const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool)
     if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool)) return guardNext(guardEvent)
-    const { tool: _tool, tool_use_id, agentId, ...toolInput } = guardEvent
-    const payload: Dict = {
-      session_id: await $guard.session.id(),
-      cwd: await $guard.session.cwd(),
-      hook_event_name: 'PreToolUse',
-      tool_name: tool,
-      tool_input: toolInput,
-      tool_use_id,
-    }
-    // エンジンは classic.PreToolUse のイベントにエージェント ID を入れない（tool.call の入力から agentId を落として
-    // tool / tool_use_id を足した形）。入っていたときだけ揃えておく。bash_started は tool_use_id で引くので、
-    // サブエージェントの中でもここに agent_id が無いことは問題にならない（src/bash-changes.ts）。
-    if (typeof agentId === 'string' && agentId !== '') payload.agent_id = agentId
+    const payload = preToolUsePayload(guardEvent, tool, await $guard.session.id(), await $guard.session.cwd())
     // settings では `|| true` 付きなので、deny 以外（exit 2 以外）は無視していた。
     const step: Step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload)
     // Bash は、開始時刻を控えてから guard を評価する（終了後の変更ファイル追跡用）。
