@@ -110,14 +110,14 @@ export const register: Register = (on, options) => {
     return withNext(next, e, merge(mine, inject))
   })
 
-  on('classic.PreToolUse', async ($, e, next) => {
-    const tool = str(e.tool)
+  on('classic.PreToolUse', async ($guard, guardEvent, guardNext) => {
+    const tool = str(guardEvent.tool)
     const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool)
-    if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool)) return next(e)
-    const { tool: _tool, tool_use_id, agentId, ...toolInput } = e
+    if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool)) return guardNext(guardEvent)
+    const { tool: _tool, tool_use_id, agentId, ...toolInput } = guardEvent
     const payload: Dict = {
-      session_id: await $.session.id(),
-      cwd: await $.session.cwd(),
+      session_id: await $guard.session.id(),
+      cwd: await $guard.session.cwd(),
       hook_event_name: 'PreToolUse',
       tool_name: tool,
       tool_input: toolInput,
@@ -131,12 +131,13 @@ export const register: Register = (on, options) => {
     const step: Step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload)
     // Bash は、開始時刻を控えてから guard を評価する（終了後の変更ファイル追跡用）。
     const steps: Step[] = tool === 'Bash' ? [(io) => bashStarted(io, payload), step] : [step]
-    const mine = await runSteps($, options, 'PreToolUse', steps)
+    const mine = await runSteps($guard, options, 'PreToolUse', steps)
     // 返す判定は deny / ask だけ（allow は返さず、ユーザーの判断に委ねる）。他の出力（warn）は stderr なので返す値に載らない。
     // ディレクトリの検査が判定の種類を読み取れるよう、返り値は固定のキーで書き、判定しないときはイベントをそのまま次へ渡す。
+    // 検査はファイル全体（バンドル）で引数と同じ名前の変数があると next に渡るイベントを確定できないので、引数名はこのフック専用にしている。
     if (mine.deny !== undefined) return { deny: mine.deny }
     if (mine.ask !== undefined) return { ask: mine.ask }
-    return next(e)
+    return guardNext(guardEvent)
   })
 
   on('classic.PostToolUse', async ($, e, next) => {
