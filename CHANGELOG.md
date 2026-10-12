@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.0...v0.7.1) (2026-10-12)
+
+
+### Build System
+
+* split vendor libraries out of the bundle and fill plugin manifests for directory submission ([#37](https://github.com/nonchan7720/claude-hook-gate/issues/37)) ([3fed91b](https://github.com/nonchan7720/claude-hook-gate/commit/3fed91beaea179254abaa44f58d4820e3115d06a))
+
 ## [0.7.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.6.0...v0.7.0) (2026-10-12)
 
 
