@@ -4101,7 +4101,6 @@ var merge = (first, second) => {
     delete out.additionalContext;
   return out;
 };
-var decided = (o) => o.block !== undefined || o.deny !== undefined || o.ask !== undefined || o.allow === true;
 
 // src/record-changes.ts
 async function recordChanges(io, payload) {
@@ -4367,9 +4366,11 @@ export const register = (on, options) => {
     const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
     const steps = tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
     const mine = await runSteps($, options, "PreToolUse", steps);
-    if (decided(mine))
-      return mine;
-    return withNext(next, e, mine);
+    if (mine.deny !== undefined)
+      return { deny: mine.deny };
+    if (mine.ask !== undefined)
+      return { ask: mine.ask };
+    return next(e);
   });
   on("classic.PostToolUse", async ($, e, next) => {
     if (/^(Agent|Task)$/.test(str(e.tool_name))) {
