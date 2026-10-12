@@ -2,6 +2,7 @@
   "name": "claude-hook-gate",
   "version": "0.7.2",
   "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.289",
     "@biomejs/biome": "2.5.14",
     "@types/bun": "1.4.2",
     "@types/node": "26.6.3",
@@ -20,6 +21,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.src.json",
     "test": "bun test --parallel --timeout 30000 tests",
     "test:plugin": "bun run build && claude plugin test .",
+    "validate:plugin": "claude plugin validate . --strict",
     "build": "bun scripts/build.ts"
   },
   "type": "module"
