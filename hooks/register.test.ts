@@ -458,5 +458,5 @@ test('PostToolUse(Agent): 終わったサブエージェントの SubagentStop �
   } as never)
   expect(String(r.additionalContext)).toContain('サブエージェント t (a)')
   expect(String(r.additionalContext)).toContain('chk')
-  expect(Object.keys(files).some((f) => f.includes('.subagent_reports'))).toBe(false)
+  expect(Object.keys(files).some((f) => f.includes('subagent_report.'))).toBe(false)
 })

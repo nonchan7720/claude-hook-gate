@@ -23,6 +23,7 @@ const STATE_FILES: ReadonlyArray<readonly [string, string]> = [
   ['gate_failed', '.txt'],
   ['bash_started', '.json'],
   ['feedback_gate_attempts', '.txt'],
+  ['subagent_report', '.json'],
   ['summary', '.txt'],
 ]
 const DAY_MS = 1440 * 60 * 1000

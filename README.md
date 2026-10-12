@@ -32,14 +32,14 @@ A Bash command cannot be checked by `pre_edit` before it runs, since what it wil
 
 ### Results of subagents
 
-<a id="results-of-subagents"></a>The gate and `stop_check` results of a subagent's SubagentStop only reach the subagent itself (a block reason) or you (a `systemMessage`); the calling agent sees only the subagent's final message, and had to read the gate logs to know whether the checks passed. So on every SubagentStop the result of that round is kept in `~/.claude/feedback/.subagent_reports/<session>--<agent>.json` (under `CLAUDE_FEEDBACK_DIR` when set, outside the working tree, so it also works without `gate.yaml`), and on the calling agent's PostToolUse for `Agent` the file of the `agentId` in the tool result is added to its context and removed, e.g.
+<a id="results-of-subagents"></a>The gate and `stop_check` results of a subagent's SubagentStop only reach the subagent itself (a block reason) or you (a `systemMessage`); the calling agent sees only the subagent's final message, and had to read the gate logs to know whether the checks passed. So on every SubagentStop the result of that round is kept in `.claude/.gate-status/subagent_report.<session>--<agent>.json` in the project, next to the other state files (without `gate.yaml`, only when `stop_check` found something), and on the calling agent's PostToolUse for `Agent` the file of the `agentId` in the tool result is added to its context and removed, e.g.
 
 ```
 [feedback-gate] Results of the hooks run when subagent code-implementer (a1b2c3) stopped (gate checks and feedback stop_check). Use these instead of reading the gate logs or re-running the checks:
 [gate] All checks passed: lint ✓ / typecheck ✓ / test ✓
 ```
 
-What is handed over is the result of the last SubagentStop (the one that let the subagent stop): `[gate] All checks passed: ...`, the `checks` phase summary, or the give-up message with the failures after `MAX_ATTEMPTS`; and the `stop_check` warnings (or its give-up). The stop right after a success report runs no gate command, so it keeps the `All checks passed` of the round before. When nothing ran and nothing was found, nothing is added. A subagent started in the background finishes after its PostToolUse, so its result is not handed over; such files are removed after 24 hours.
+What is handed over is the result of the last SubagentStop (the one that let the subagent stop): `[gate] All checks passed: ...`, the `checks` phase summary, or the give-up message with the failures after `MAX_ATTEMPTS`; and the `stop_check` warnings (or its give-up). The stop right after a success report runs no gate command, so it keeps the `All checks passed` of the round before. When nothing ran and nothing was found, nothing is added. A subagent started in the background finishes after its PostToolUse, so its result is not handed over; like the other state files, such files are removed by `reset-gate` at session start (`startup` / `clear`, or after 24 hours).
 
 ### Agent launch guard (optional)
 

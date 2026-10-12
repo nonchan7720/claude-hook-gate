@@ -454,6 +454,8 @@ describe('Stop / SubagentStop / Notification', () => {
       expect(String(first.block)).toContain('検証がすべて通りました: lint ✓')
       // 成功報告の直後の回は gate を走らせないが、控えた「すべて通った」は残る。
       await m.call('classic.SubagentStop', { ...sub, stop_hook_active: true })
+      const saved = path.join(proj, '.claude', '.gate-status', 'subagent_report.sess-1--a1.json')
+      expect(exists(saved)).toBe(true)
       const agent = { session_id: 'sess-1', tool_name: 'Agent', tool_input: { prompt: 'p' }, tool_response: { agentId: 'a1', status: 'completed' } }
       const r = (await m.call('classic.PostToolUse', agent)) as Out
       const ctx = (r.additionalContext as string[]).join('\n')
@@ -462,6 +464,7 @@ describe('Stop / SubagentStop / Notification', () => {
       expect(ctx).not.toContain('ユーザーに報告して')
       expect(r.block).toBeUndefined()
       // 渡したら消す。
+      expect(exists(saved)).toBe(false)
       const again = (await m.call('classic.PostToolUse', agent)) as Out
       expect(again.additionalContext).toBeUndefined()
     }))

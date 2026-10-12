@@ -4,30 +4,25 @@
 // （block の reason はサブエージェントへ、systemMessage はユーザーへ）。呼び出し元は Agent ツールの結果（サブ
 // エージェントの最後の発言）しか見えないので、検証が通ったのかを知るには gate のログを読むしかなかった。
 //
-// そこで SubagentStop のたびに、その回の結果を <feedbackDir>/.subagent_reports/<session>--<agent>.json に書き
+// そこで SubagentStop のたびに、その回の結果を <projectDir>/.claude/.gate-status/subagent_report.<session>--<agent>.json に書き
 // （saveSubagentReport）、呼び出し元の PostToolUse(Agent) で tool_response.agentId から引いて additionalContext と
 // して渡し、ファイルを消す（subagentReport）。SubagentStop は block のたびに繰り返されるので、最後の回（サブエージェントが
 // 実際に止まった回）の結果が残る。ただし成功報告の直後の Stop（gate が印を消費して素通しした回）は gate の結果を
 // 上書きせず、直前の「すべて通った」を残す。
 //
-// 置き場所は作業ツリーの外（feedback の状態置き場。.bash_started / .count_state と同じ流儀）。gate.yaml の無い PJ でも
-// stop_check の結果は渡したいが、その PJ の作業ツリーに状態ファイルを作りたくないため。バックグラウンドで起動した
-// サブエージェントは PostToolUse(Agent) が先に来るので引き取られず残る。書くたびに 24h より古いものを掃く。
-import { feedbackDir } from './feedback-rules.ts'
+// 置き場所は gate の他の状態ファイルと同じ .claude/.gate-status/ で、名前も <base>.<session>--<agent>.<ext> に揃えている。
+// 掃除は SessionStart の reset-gate に任せる（startup / clear で自セッションの分を、24h 超は全セッションの分を消す）。
+// バックグラウンドで起動したサブエージェントは PostToolUse(Agent) が先に来るので引き取られず、そうして残った分もここで消える。
+// gate.yaml の無い PJ でも、stop_check が何か見つけたときだけは書く（feedback_gate_attempts と同じ）。
 import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, isDict, jqStr } from './pyutil.ts'
 
-const DAY_MS = 1440 * 60 * 1000
-
 type Report = { agentType?: string; gate?: string; feedback?: string }
 
-const reportsDir = (io: Io): string => join(feedbackDir(io), '.subagent_reports')
-
-const safe = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, '_')
-
-const reportPath = (io: Io, sessionId: string, agentId: string): string => join(reportsDir(io), `${safe(sessionId)}--${safe(agentId)}.json`)
+const reportPath = (io: Io, sessionId: string, agentId: string): string =>
+  join(io.projectDir || io.cwd, '.claude', '.gate-status', `subagent_report.${sessionId}--${agentId}.json`)
 
 const blockReason = (stdout: string): string => {
   for (const line of stdout.split('\n')) {
@@ -55,12 +50,6 @@ async function loadReport(io: Io, path: string): Promise<Report | undefined> {
   }
 }
 
-async function sweepStale(io: Io, now: number): Promise<void> {
-  const dir = reportsDir(io)
-  const old = (await io.list(dir)).filter((e) => e.kind === 'file' && e.mtimeMs < now - DAY_MS).map((e) => join(dir, e.name))
-  await io.removeFiles(old)
-}
-
 /** SubagentStop: その回の gate と stop_check の結果を控える。常に ok() を返す（作業を止めない）。 */
 export async function saveSubagentReport(io: Io, payload: Dict, gate: ScriptResult | undefined, feedback: ScriptResult | undefined): Promise<ScriptResult> {
   try {
@@ -79,8 +68,6 @@ export async function saveSubagentReport(io: Io, payload: Dict, gate: ScriptResu
       ...(gateText ? { gate: gateText } : {}),
       ...(fbText ? { feedback: fbText } : {}),
     }
-    // 古い控えを掃いてから書く（書いたばかりのものを掃かないように）。
-    await sweepStale(io, await io.now())
     await io.writeFile(path, `${JSON.stringify(report)}\n`)
   } catch {
     // 控えられなくても作業は止めない。
