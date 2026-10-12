@@ -33,6 +33,9 @@ stopCheck:
   gaveUp: "[feedback-stop-check] {{max}} 回連続でブロックしました。ループを打ち切ります。手動確認を。"
   fixAbove: "[feedback-stop-check] 上記を修正してください（試行 {{attempt}}/{{max}}）。"
 
+subagentReport:
+  header: "[feedback-gate] サブエージェント {{agent}} の停止時に実行された hook（gate の検証と feedback の stop_check）の結果です。gate のログを読んだり検証を再実行したりせず、これを使ってください:"
+
 autoCount:
   bumped: "[feedback-gate] 違反を検出したため {{rule}} の count を {{from}} → {{to}} に上げました（{{path}}）。同じ違反を繰り返すと強制力（warn → ask/block → deny）が上がります。"
 
@@ -126,6 +129,7 @@ gate:
   skipCheckUndefined: "[gate] skip: check:{{name}} (consistency_checks に定義がありません)"
   nothingToRun: "（対象なし）"
   allPassed: "[gate] 検証がすべて通りました: {{labels}}。この結果をユーザーに報告して終了してください。"
+  passedReport: "[gate] 検証がすべて通りました: {{labels}}"
   deferredTitle: "後回しにした検証コマンド"
   checksPassed: "[gate] {{title}} 成功:\n{{body}}"
   checksGaveUpStderr: "consistency checks が {{max}} 回連続失敗。ループを打ち切ります。手動確認を。"

@@ -8627,6 +8627,9 @@ stopCheck:
   gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
   fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
 
+subagentReport:
+  header: "[feedback-gate] Results of the hooks run when subagent {{agent}} stopped (gate checks and feedback stop_check). Use these instead of reading the gate logs or re-running the checks:"
+
 autoCount:
   bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
 
@@ -8720,6 +8723,7 @@ gate:
   skipCheckUndefined: "[gate] skip: check:{{name}} (not defined in consistency_checks)"
   nothingToRun: "(nothing to run)"
   allPassed: "[gate] All checks passed: {{labels}}. Report this result to the user and finish."
+  passedReport: "[gate] All checks passed: {{labels}}"
   deferredTitle: "deferred verification commands"
   checksPassed: "[gate] {{title}} passed:\\n{{body}}"
   checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
@@ -8768,6 +8772,9 @@ stopCheck:
   checking: "[feedback-stop-check] 検査中: {{rule}} ({{file}})"
   gaveUp: "[feedback-stop-check] {{max}} 回連続でブロックしました。ループを打ち切ります。手動確認を。"
   fixAbove: "[feedback-stop-check] 上記を修正してください（試行 {{attempt}}/{{max}}）。"
+
+subagentReport:
+  header: "[feedback-gate] サブエージェント {{agent}} の停止時に実行された hook（gate の検証と feedback の stop_check）の結果です。gate のログを読んだり検証を再実行したりせず、これを使ってください:"
 
 autoCount:
   bumped: "[feedback-gate] 違反を検出したため {{rule}} の count を {{from}} → {{to}} に上げました（{{path}}）。同じ違反を繰り返すと強制力（warn → ask/block → deny）が上がります。"
@@ -8862,6 +8869,7 @@ gate:
   skipCheckUndefined: "[gate] skip: check:{{name}} (consistency_checks に定義がありません)"
   nothingToRun: "（対象なし）"
   allPassed: "[gate] 検証がすべて通りました: {{labels}}。この結果をユーザーに報告して終了してください。"
+  passedReport: "[gate] 検証がすべて通りました: {{labels}}"
   deferredTitle: "後回しにした検証コマンド"
   checksPassed: "[gate] {{title}} 成功:\\n{{body}}"
   checksGaveUpStderr: "consistency checks が {{max}} 回連続失敗。ループを打ち切ります。手動確認を。"
@@ -10678,6 +10686,7 @@ class Gate {
   stdout = "";
   stderr = "";
   reportConsumed = false;
+  report;
   running = [];
   stopTicking;
   runningOwner;
@@ -11637,14 +11646,17 @@ ${details}` : "");
       if (this.executedLabels.length > 0 && !this.stopHookActive && mainCfg?.report_success !== false) {
         await this.io.writeFile(this.reported, `1
 `);
-        const reason = this.t("gate.allPassed", { labels: this.executedLabels.map((l) => `${l} ✓`).join(" / ") });
+        const labels = this.executedLabels.map((l) => `${l} ✓`).join(" / ");
+        const reason = this.t("gate.allPassed", { labels });
+        this.report = this.t("gate.passedReport", { labels });
         this.writeErr(`${reason}
 `);
         this.print({ decision: "block", reason });
         return 2;
       }
       const title = Object.keys(pending).length > 0 ? "consistency checks" : failedFiles.order.length > 0 ? "rules" : this.t("gate.deferredTitle");
-      this.print({ systemMessage: this.t("gate.checksPassed", { title, body }) });
+      this.report = this.t("gate.checksPassed", { title, body });
+      this.print({ systemMessage: this.report });
       return 0;
     }
     this.writeErr(`${[...this.status, ...logs].join(`
@@ -11666,6 +11678,7 @@ ${details}` : "");
       const msg = `${this.t("gate.checksGaveUp", { max: MAX_ATTEMPTS2 })}
 ${summary.map((s) => `✗ ${s}`).join(`
 `)}${this.withDetails("")}`;
+      this.report = msg;
       this.print({ systemMessage: msg });
       return 0;
     }
@@ -11674,6 +11687,7 @@ ${summary.map((s) => `✗ ${s}`).join(`
 `)}${this.withDetails("")}`;
     this.writeErr(`${reason}
 `);
+    this.report = reason;
     this.print({ decision: "block", reason });
     return 2;
   }
@@ -11740,13 +11754,20 @@ async function runGate(io, opts = {}) {
     gate.stderr += `[gate] internal error:
 ${e instanceof Error ? e.stack ?? e.message : String(e)}
 `;
-    gate.stdout += `${JSON.stringify({ systemMessage: tr(io.lang)("gate.internalError") })}
+    gate.report = tr(io.lang)("gate.internalError");
+    gate.stdout += `${JSON.stringify({ systemMessage: gate.report })}
 `;
     exitCode = 0;
   } finally {
     await gate.finishProgress();
   }
-  return { exitCode, stdout: gate.stdout, stderr: gate.stderr, ...gate.reportConsumed ? { reportConsumed: true } : {} };
+  return {
+    exitCode,
+    stdout: gate.stdout,
+    stderr: gate.stderr,
+    ...gate.reportConsumed ? { reportConsumed: true } : {},
+    ...gate.report !== undefined ? { report: gate.report } : {}
+  };
 }
 
 // src/stop-test-gate.ts
@@ -12703,6 +12724,7 @@ var STATE_FILES = [
   ["gate_failed", ".txt"],
   ["bash_started", ".json"],
   ["feedback_gate_attempts", ".txt"],
+  ["subagent_report", ".json"],
   ["summary", ".txt"]
 ];
 var DAY_MS3 = 1440 * 60 * 1000;
@@ -12772,6 +12794,70 @@ async function loadRules(io, rulesFile) {
       return (await io.readFile(path) ?? "").trim();
   }
   return "";
+}
+
+// src/subagent-report.ts
+var reportPath = (io, sessionId, agentId) => join(io.projectDir || io.cwd, ".claude", ".gate-status", `subagent_report.${sessionId}--${agentId}.json`);
+var blockReason = (stdout) => {
+  for (const line of stdout.split(`
+`)) {
+    try {
+      const v = JSON.parse(line);
+      if (isDict(v) && v.decision === "block" && typeof v.reason === "string")
+        return v.reason;
+    } catch {}
+  }
+  return "";
+};
+var feedbackText = (r) => (r.exitCode === 2 ? blockReason(r.stdout) || r.stderr : r.stderr).trim();
+async function loadReport(io, path) {
+  const text = await io.readFile(path);
+  if (text === undefined)
+    return;
+  try {
+    const v = JSON.parse(text);
+    return isDict(v) ? v : undefined;
+  } catch {
+    return;
+  }
+}
+async function saveSubagentReport(io, payload, gate, feedback) {
+  try {
+    const agentId = jqStr(payload.agent_id);
+    if (agentId === "")
+      return ok();
+    const path = reportPath(io, jqStr(payload.session_id) || "unknown", agentId);
+    const gateText = gate?.reportConsumed ? (await loadReport(io, path))?.gate ?? "" : (gate?.report ?? "").trim();
+    const fbText = feedback ? feedbackText(feedback) : "";
+    if (gateText === "" && fbText === "") {
+      await io.removeFiles([path]);
+      return ok();
+    }
+    const report = {
+      ...jqStr(payload.agent_type) ? { agentType: jqStr(payload.agent_type) } : {},
+      ...gateText ? { gate: gateText } : {},
+      ...fbText ? { feedback: fbText } : {}
+    };
+    await io.writeFile(path, `${JSON.stringify(report)}
+`);
+  } catch {}
+  return ok();
+}
+async function subagentReport(io, payload) {
+  const response = payload.tool_response;
+  const agentId = isDict(response) ? jqStr(response.agentId) : "";
+  if (agentId === "")
+    return ok();
+  const path = reportPath(io, jqStr(payload.session_id) || "unknown", agentId);
+  const report = await loadReport(io, path);
+  await io.removeFiles([path]);
+  if (!report || !report.gate && !report.feedback)
+    return ok();
+  const agent = report.agentType ? `${report.agentType} (${agentId})` : agentId;
+  const body = [tr(io.lang)("subagentReport.header", { agent }), report.gate, report.feedback].filter((s) => s).join(`
+`);
+  return ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: body } })}
+`);
 }
 
 // src/register.ts
@@ -12874,6 +12960,10 @@ export const register = (on, options) => {
     return withNext(next, e, mine);
   });
   on("classic.PostToolUse", async ($, e, next) => {
+    if (/^(Agent|Task)$/.test(str(e.tool_name))) {
+      const mine = await runSteps($, options, "PostToolUse", [(io) => subagentReport(io, e)]);
+      return withNext(next, e, mine);
+    }
     if (str(e.tool_name) === "Bash") {
       const mine = await runSteps($, options, "PostToolUse", bashChangeSteps(e));
       return withNext(next, e, mine);
@@ -12896,7 +12986,13 @@ export const register = (on, options) => {
     return withNext(next, e, mine);
   });
   on("classic.SubagentStop", async ($, e, next) => {
-    const mine = await runSteps($, options, "SubagentStop", [(io) => stopTestGate(io, "checks", e), (io) => feedbackStopCheck(io, e)]);
+    let gate;
+    let feedback;
+    const mine = await runSteps($, options, "SubagentStop", [
+      async (io) => gate = await stopTestGate(io, "checks", e),
+      async (io) => feedback = await feedbackStopCheck(io, e),
+      (io) => saveSubagentReport(io, e, gate, feedback)
+    ]);
     return withNext(next, e, mine);
   });
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {

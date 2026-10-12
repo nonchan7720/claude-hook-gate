@@ -96,6 +96,20 @@ describe('reset-gate by SessionStart source', () => {
       allGone(files)
     }))
 
+  test('deletes subagent reports on startup, keeps them on resume, prunes stale ones', () =>
+    withTmp(async (proj) => {
+      const dir = path.join(proj, '.claude', '.gate-status')
+      fs.mkdirSync(dir, { recursive: true })
+      const mine = path.join(dir, 'subagent_report.sess1--a1.json')
+      const other = path.join(dir, 'subagent_report.sess2--a1.json')
+      for (const f of [mine, other]) fs.writeFileSync(f, '{"gate":"[gate] ok"}\n')
+      await run(proj, 'sess1', 'resume')
+      allKept([mine, other])
+      age(other)
+      await run(proj, 'sess1', 'startup')
+      allGone([mine, other])
+    }))
+
   test('keeps state on resume, compact, unknown source and missing source', () =>
     withTmp(async (proj) => {
       const files = makeStateFiles(proj, 'sess1')

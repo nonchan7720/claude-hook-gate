@@ -33,6 +33,9 @@ stopCheck:
   gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
   fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
 
+subagentReport:
+  header: "[feedback-gate] Results of the hooks run when subagent {{agent}} stopped (gate checks and feedback stop_check). Use these instead of reading the gate logs or re-running the checks:"
+
 autoCount:
   bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
 
@@ -126,6 +129,7 @@ gate:
   skipCheckUndefined: "[gate] skip: check:{{name}} (not defined in consistency_checks)"
   nothingToRun: "(nothing to run)"
   allPassed: "[gate] All checks passed: {{labels}}. Report this result to the user and finish."
+  passedReport: "[gate] All checks passed: {{labels}}"
   deferredTitle: "deferred verification commands"
   checksPassed: "[gate] {{title}} passed:\n{{body}}"
   checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."

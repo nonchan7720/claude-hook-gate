@@ -18,6 +18,7 @@ import { resetGate } from './reset-gate.ts'
 import { loadRules } from './rules-file.ts'
 import { listRunning, loadSummary, runningBand } from './running-registry.ts'
 import { stopTestGate } from './stop-test-gate.ts'
+import { saveSubagentReport, subagentReport } from './subagent-report.ts'
 
 // settings.json の command hook をプラグイン同梱の TypeScript 関数（src/）として載せ替えた mod。
 // 各関数は classic コマンド hook のスクリプトと同じ { exitCode, stdout, stderr } を返し、
@@ -136,6 +137,11 @@ export const register: Register = (on, options) => {
   })
 
   on('classic.PostToolUse', async ($, e, next) => {
+    if (/^(Agent|Task)$/.test(str(e.tool_name))) {
+      // 終わったサブエージェントの SubagentStop で走った hook の結果を、呼び出し元の context へ渡す（gate のログを読ませない）。
+      const mine = await runSteps($, options, 'PostToolUse', [(io) => subagentReport(io, e)])
+      return withNext(next, e, mine)
+    }
     if (str(e.tool_name) === 'Bash') {
       // Bash が実際に書き換えたファイルを拾い、Edit / Write と同じく feedback の post_edit（と、実行後に判定できる
       // pre_edit）で検査してから、メモに記録できたときだけ rules フェーズを走らせる。gate.yaml が無くても feedback の検査は動く。
@@ -163,7 +169,14 @@ export const register: Register = (on, options) => {
   })
 
   on('classic.SubagentStop', async ($, e, next) => {
-    const mine = await runSteps($, options, 'SubagentStop', [(io) => stopTestGate(io, 'checks', e), (io) => feedbackStopCheck(io, e)])
+    // 結果は呼び出し元の PostToolUse(Agent) へ渡すために控える（src/subagent-report.ts）。
+    let gate: ScriptResult | undefined
+    let feedback: ScriptResult | undefined
+    const mine = await runSteps($, options, 'SubagentStop', [
+      async (io) => (gate = await stopTestGate(io, 'checks', e)),
+      async (io) => (feedback = await feedbackStopCheck(io, e)),
+      (io) => saveSubagentReport(io, e, gate, feedback),
+    ])
     return withNext(next, e, mine)
   })
 

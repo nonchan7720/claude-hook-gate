@@ -437,3 +437,26 @@ test('SubagentStop: gate.yaml が無くても feedback ルールの stop_check �
   const r = await $.classic.SubagentStop({ session_id: 'sess-1', stop_hook_active: false, agent_id: 'a', agent_transcript_path: '', agent_type: 't' } as never)
   expect(r.block).toContain('chk')
 })
+
+test('PostToolUse(Agent): 終わったサブエージェントの SubagentStop の結果が呼び出し元の context に入る', async ($, on) => {
+  const files: Files = {
+    '/h/.claude/feedback/chk.md': rule(
+      'chk',
+      4,
+      "enforce:\n  - event: stop_check\n    changed: '**/*.py'\n    check: 'exit 1'\n    message: bad\n    severity: warn\n",
+    ),
+    '/proj/.claude/.gate-status/changed_files.sess-1--a.txt': 'x.py\n',
+  }
+  setup(on, files, {}, (argv) => ({ exitCode: argv[0] === 'sh' ? 1 : 0, stdout: '' }))
+  await $.classic.SubagentStop({ session_id: 'sess-1', stop_hook_active: false, agent_id: 'a', agent_transcript_path: '', agent_type: 't' } as never)
+  const r = await $.classic.PostToolUse({
+    session_id: 'sess-1',
+    tool_name: 'Agent',
+    tool_input: {},
+    tool_response: { agentId: 'a' },
+    tool_use_id: 't1',
+  } as never)
+  expect(String(r.additionalContext)).toContain('サブエージェント t (a)')
+  expect(String(r.additionalContext)).toContain('chk')
+  expect(Object.keys(files).some((f) => f.includes('subagent_report.'))).toBe(false)
+})

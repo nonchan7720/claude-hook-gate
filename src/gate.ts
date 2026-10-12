@@ -405,6 +405,8 @@ export class Gate {
   stderr = ''
   /** 成功報告の印を消費して、検証を走らせずに Stop を通したとき true。 */
   reportConsumed = false
+  /** checks フェーズの最終結果の要約（サブエージェントの結果を呼び出し元へ渡すのに使う。src/subagent-report.ts）。報告するものが無ければ undefined。 */
+  report: string | undefined
   /** 帯に出すコマンド（実行開始順）。完了後も runGate が終わるまで ✓/✗ 付きで残す。 */
   private readonly running: RunningEntry[] = []
   private stopTicking: (() => void) | undefined
@@ -1536,13 +1538,16 @@ export class Gate {
       if (this.executedLabels.length > 0 && !this.stopHookActive && mainCfg?.report_success !== false) {
         // 失敗ブロック後の続きではない（stop_hook_active でない）ときだけ、成功をエージェントへ 1 回届ける。
         await this.io.writeFile(this.reported, '1\n')
-        const reason = this.t('gate.allPassed', { labels: this.executedLabels.map((l) => `${l} ✓`).join(' / ') })
+        const labels = this.executedLabels.map((l) => `${l} ✓`).join(' / ')
+        const reason = this.t('gate.allPassed', { labels })
+        this.report = this.t('gate.passedReport', { labels })
         this.writeErr(`${reason}\n`)
         this.print({ decision: 'block', reason })
         return 2
       }
       const title = Object.keys(pending).length > 0 ? 'consistency checks' : failedFiles.order.length > 0 ? 'rules' : this.t('gate.deferredTitle')
-      this.print({ systemMessage: this.t('gate.checksPassed', { title, body }) })
+      this.report = this.t('gate.checksPassed', { title, body })
+      this.print({ systemMessage: this.report })
       return 0
     }
 
@@ -1563,12 +1568,14 @@ export class Gate {
       await this.cleanup([this.count, this.pending, this.failed])
       this.writeErr(`${this.t('gate.checksGaveUpStderr', { max: MAX_ATTEMPTS })}\n`)
       const msg = `${this.t('gate.checksGaveUp', { max: MAX_ATTEMPTS })}\n${summary.map((s) => `✗ ${s}`).join('\n')}${this.withDetails('')}`
+      this.report = msg
       this.print({ systemMessage: msg })
       return 0
     }
 
     const reason = `${this.t('gate.checksFailed', { attempt: attempts, max: MAX_ATTEMPTS })}\n${summary.map((s) => `✗ ${s}`).join('\n')}${this.withDetails('')}`
     this.writeErr(`${reason}\n`)
+    this.report = reason
     // stdout が空だと harness 側の判定で exit 2 が non-blocking 扱いになる不具合があるため、stderr の内容に関わらず必ず JSON を出す。
     this.print({ decision: 'block', reason })
     return 2
@@ -1639,10 +1646,17 @@ export async function runGate(io: Io, opts: { sessionId?: string; agentId?: stri
     exitCode = await gate.main()
   } catch (e) {
     gate.stderr += `[gate] internal error:\n${e instanceof Error ? (e.stack ?? e.message) : String(e)}\n`
-    gate.stdout += `${JSON.stringify({ systemMessage: tr(io.lang)('gate.internalError') })}\n`
+    gate.report = tr(io.lang)('gate.internalError')
+    gate.stdout += `${JSON.stringify({ systemMessage: gate.report })}\n`
     exitCode = 0
   } finally {
     await gate.finishProgress()
   }
-  return { exitCode, stdout: gate.stdout, stderr: gate.stderr, ...(gate.reportConsumed ? { reportConsumed: true } : {}) }
+  return {
+    exitCode,
+    stdout: gate.stdout,
+    stderr: gate.stderr,
+    ...(gate.reportConsumed ? { reportConsumed: true } : {}),
+    ...(gate.report !== undefined ? { report: gate.report } : {}),
+  }
 }
