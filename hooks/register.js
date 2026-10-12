@@ -12724,6 +12724,7 @@ var STATE_FILES = [
   ["gate_failed", ".txt"],
   ["bash_started", ".json"],
   ["feedback_gate_attempts", ".txt"],
+  ["subagent_report", ".json"],
   ["summary", ".txt"]
 ];
 var DAY_MS3 = 1440 * 60 * 1000;
@@ -12796,10 +12797,7 @@ async function loadRules(io, rulesFile) {
 }
 
 // src/subagent-report.ts
-var DAY_MS4 = 1440 * 60 * 1000;
-var reportsDir = (io) => join(feedbackDir(io), ".subagent_reports");
-var safe = (s) => s.replace(/[^A-Za-z0-9_.-]/g, "_");
-var reportPath = (io, sessionId, agentId) => join(reportsDir(io), `${safe(sessionId)}--${safe(agentId)}.json`);
+var reportPath = (io, sessionId, agentId) => join(io.projectDir || io.cwd, ".claude", ".gate-status", `subagent_report.${sessionId}--${agentId}.json`);
 var blockReason = (stdout) => {
   for (const line of stdout.split(`
 `)) {
@@ -12823,11 +12821,6 @@ async function loadReport(io, path) {
     return;
   }
 }
-async function sweepStale2(io, now) {
-  const dir = reportsDir(io);
-  const old = (await io.list(dir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS4).map((e) => join(dir, e.name));
-  await io.removeFiles(old);
-}
 async function saveSubagentReport(io, payload, gate, feedback) {
   try {
     const agentId = jqStr(payload.agent_id);
@@ -12845,7 +12838,6 @@ async function saveSubagentReport(io, payload, gate, feedback) {
       ...gateText ? { gate: gateText } : {},
       ...fbText ? { feedback: fbText } : {}
     };
-    await sweepStale2(io, await io.now());
     await io.writeFile(path, `${JSON.stringify(report)}
 `);
   } catch {}
