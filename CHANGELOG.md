@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.6.0...v0.7.0) (2026-10-12)
+
+
+### Features
+
+* hand the hook results of a finished subagent to the calling agent ([#35](https://github.com/nonchan7720/claude-hook-gate/issues/35)) ([e66745d](https://github.com/nonchan7720/claude-hook-gate/commit/e66745d93bec8752dda1fea73bd58aa22e1dedc2))
+
 ## [0.6.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.5.1...v0.6.0) (2026-10-11)
 
 
