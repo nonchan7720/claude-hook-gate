@@ -6,7 +6,16 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!**/node_modules", "!**/.claude-plugin/types", "!bun.lock", "!hooks/register.js", "!.release-please-manifest.json", "!CHANGELOG.md"]
+    "includes": [
+      "**",
+      "!**/node_modules",
+      "!**/.claude-plugin/types",
+      "!bun.lock",
+      "!hooks/register.js",
+      "!hooks/vendor",
+      "!.release-please-manifest.json",
+      "!CHANGELOG.md"
+    ]
   },
   "formatter": {
     "enabled": true,

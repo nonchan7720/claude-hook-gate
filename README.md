@@ -191,18 +191,18 @@ When the `checks` phase (Stop / SubagentStop) actually ran at least one command 
 
 ## Development
 
-Requires [Bun](https://bun.sh). The hook module runs inside Claude Code, which only resolves relative imports and `claude-code`; so the source in `src/` (plus the `yaml` and `i18next` packages, and the `locales/*.yaml` message files, imported as text) is bundled into `hooks/register.js`. `hooks/hooks.json` points at that bundle. All file and process access goes through the engine's `$` API (`$.fs`, `$.process`, `$.env`, `$.session`), wrapped by the `Io` interface in `src/io.ts`; the tests run the same code against Node's `fs` / `child_process`.
+Requires [Bun](https://bun.sh). The hook module runs inside Claude Code, which only resolves relative imports and `claude-code`; so the source in `src/` (plus the `yaml` and `i18next` packages, and the `locales/*.yaml` message files, imported as text) is bundled into `hooks/register.js`, with `yaml` and `i18next` split out, minified, into `hooks/vendor/*.js` that the bundle imports by relative path. This keeps every file well under the 256 KiB per-file limit of the Claude plugin directory, while the plugin's own code stays readable. `hooks/hooks.json` points at the bundle. All file and process access goes through the engine's `$` API (`$.fs`, `$.process`, `$.env`, `$.session`), wrapped by the `Io` interface in `src/io.ts`; the tests run the same code against Node's `fs` / `child_process`.
 
 ```
 bun install          # install dev dependencies
 bun run lint         # Biome (lint + format check); `bun run format` fixes
 bun run typecheck    # tsc --noEmit
 bun run test         # bun test (tests/*.spec.ts)
-bun run build        # bundle src/register.ts -> hooks/register.js
+bun run build        # bundle src/register.ts -> hooks/register.js (+ hooks/vendor/*.js)
 bun run test:plugin  # build, then run hooks/register.test.ts on the real engine (needs the `claude` CLI)
 ```
 
-The bundle `hooks/register.js` is generated and committed by CI on the pull request; contributors do not commit it (it is not in the repository until CI adds it). The "Build bundle" workflow builds it on every pull request (same-repo branches) and pushes a `chore: build bundle` commit to the branch, adding the file or updating it if it changed. Run `bun run build` to produce it locally (e.g. for `bun run test:plugin`) and leave it uncommitted. Do not edit it by hand. `scripts/build.ts` fails the build if the bundle imports anything but relative paths and `claude-code`.
+The bundle (`hooks/register.js` and `hooks/vendor/`) is generated and committed by CI on the pull request; contributors do not commit it (it is not in the repository until CI adds it). The "Build bundle" workflow builds it on every pull request (same-repo branches) and pushes a `chore: build bundle` commit to the branch, adding the file or updating it if it changed. Run `bun run build` to produce it locally (e.g. for `bun run test:plugin`) and leave it uncommitted. Do not edit it by hand. `scripts/build.ts` fails the build if the bundle imports anything but relative paths and `claude-code`, or if any output file is 200 KiB or larger.
 
 Dependencies have a 7-day freeze period: `bunfig.toml` sets `minimumReleaseAge` so `bun install` only resolves versions published at least 7 days ago, and Dependabot (`.github/dependabot.yml`) waits 7 days (`cooldown`) before proposing npm or GitHub Actions updates. Actions are pinned to commit SHAs.
 
