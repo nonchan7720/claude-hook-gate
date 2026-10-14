@@ -2,10 +2,10 @@
   "name": "claude-hook-gate",
   "version": "0.7.4",
   "devDependencies": {
-    "@anthropic-ai/claude-code": "2.1.289",
-    "@biomejs/biome": "2.5.14",
+    "@anthropic-ai/claude-code": "2.1.292",
+    "@biomejs/biome": "2.5.15",
     "@types/bun": "1.4.2",
-    "@types/node": "26.6.3",
+    "@types/node": "26.6.4",
     "@types/picomatch": "4.0.3",
     "i18next": "26.4.2",
     "picomatch": "4.0.7",
