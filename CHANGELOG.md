@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.5](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.4...v0.7.5) (2026-10-17)
+
+
+### Bug Fixes
+
+* do not record files another session writes in an unrelated worktree during a Bash command ([#48](https://github.com/nonchan7720/claude-hook-gate/issues/48)) ([11fbfa5](https://github.com/nonchan7720/claude-hook-gate/commit/11fbfa5316b6ae112474c21049e669581ac360fb))
+
 ## [0.7.4](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.3...v0.7.4) (2026-10-12)
 
 
