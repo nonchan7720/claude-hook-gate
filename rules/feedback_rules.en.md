@@ -60,8 +60,9 @@ Use these for language-specific or temporary rules. When a global rule and a pro
 ### Follow-up commands (followup)
 
 A command to run after another one is written by the user in `~/.claude/followup/<topic>.md` (global) or
-`.claude/followup/<topic>.md` (project). When the hook (`src/followup.ts`) sees the triggering command, it asks
-you to run the follow-up.
+`.claude/followup/<topic>.md` (project). When the hook (`src/followup.ts`) sees the triggering command, it runs
+the follow-up itself in the background and hands you the result later if the arguments can be filled by the
+`pattern`s in `args`; otherwise it asks you to run it.
 
 ```markdown
 ---
@@ -69,16 +70,21 @@ name: pr_checks                     # defaults to the file name
 description: Watch the CI of the PR that was just created
 when: '^gh pr create\b'             # required. The trigger (a regex matched against the Bash command)
 unless: '--dry-run'                 # optional. No trigger when it matches
-run: 'gh pr checks {{pr}} --watch'  # required. The follow-up; {{name}} is an argument Claude fills in
+run: 'gh pr checks {{pr}} --watch'  # required. The follow-up; {{name}} is an argument
 args:                               # optional. How to fill each argument
-  pr: 'the number N of the PR URL (.../pull/N) printed by gh pr create'
-max_attempts: 3                     # optional. Failures before giving up (default 3)
+  pr:                               #   a mapping is filled by the hook (pattern applied to from = output, the
+    pattern: 'pull/(\d+)'           #   triggering command's output (default) / command; first capture group).
+    hint: 'the PR number'           #   When everything is filled, the hook runs it. hint is shown to Claude otherwise
+  repo: 'owner/name'                #   a string is only a hint (Claude fills it in and runs the command)
+timeout: 1800                       # optional. Limit of a hook-run command in seconds
+max_attempts: 3                     # optional. Failures of a Claude-run command before giving up (default 3)
 ---
 
 (optional body: extra instructions for running it)
 ```
 
-- When asked, fill `{{...}}` with values inferred from the output of the previous command and the context, run that command as is in your next Bash call, and report the result to the user. Stopping is blocked until it has run
+- When the hook ran it, it tells you the command was started in the background: keep working without waiting. When it finishes, you get its result (exit status and output); report it to the user. If it has not finished when you stop, the hook waits and hands you the result
+- When asked to run it, fill `{{...}}` with values inferred from the output of the previous command and the context, run that command as is in your next Bash call (with `run_in_background: true` if it takes long), and report the result to the user. Stopping is blocked until it has run
 - When it fails, look at the error: if the command or its arguments were wrong, rebuild the correct command and run it again (up to `max_attempts`). If the command was right and the failure is the result itself (for example failed CI checks), do not run it again; report that result
 - When the user asks for "run X whenever Y runs", propose a file in this format (ask before writing it)
 

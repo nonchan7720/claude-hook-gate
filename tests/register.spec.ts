@@ -730,6 +730,32 @@ describe('follow-up commands', () => {
       expect(main.block).toBeUndefined()
     }))
 
+  test('a follow-up whose arguments the hook fills runs in the background; its result comes back at the next hook or at Stop', () =>
+    withMod(async (m, _proj, _feedback, home) => {
+      writeFollowup(
+        home,
+        'pr_checks',
+        "---\nname: pr_checks\nwhen: '^gh pr create'\nrun: 'echo checks for {{pr}}'\nargs:\n  pr:\n    pattern: 'pull/(\\d+)'\n---\n",
+      )
+      const r = (await m.call('classic.PostToolUse', bash('gh pr create'))) as Out
+      expect((r.additionalContext as string[]).join('\n')).toBe(
+        '[followup] `gh pr create` を実行したので、後続コマンド（pr_checks）をバックグラウンドで開始しました: `echo checks for 12`。結果は終わり次第渡します（遅くとも終了（Stop）時に待ち合わせて渡します）。待たずに作業を続けてください。',
+      )
+      // 終わるまで待ってから Stop: 結果を理由に一度ブロックし、次の Stop は通る
+      const stop = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
+      expect(String(stop.block)).toMatch(
+        /^\[followup\] 後続コマンド `echo checks for 12`（pr_checks）が終了しました（exit 0、\d+s）。この結果をユーザーに報告してください（出力の全文: .*\.log）:\nchecks for 12$/,
+      )
+      const again = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: true })) as Out
+      expect(again.block).toBeUndefined()
+      // 別のツールの PostToolUse でも渡る
+      await m.call('classic.PostToolUse', bash('gh pr create', { tool_use_id: 'tu2' }))
+      for (let i = 0; i < 50 && fs.readdirSync(path.join(home, 'followup', '.runs')).filter((n) => n.endsWith('.exit')).length === 0; i++)
+        await new Promise((r) => setTimeout(r, 50))
+      const read = (await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Read', tool_input: { file_path: '/x' }, tool_response: {} })) as Out
+      expect((read.additionalContext as string[]).join('\n')).toContain('（pr_checks）が終了しました（exit 0、')
+    }))
+
   test('SessionStart startup clears the pending follow-ups of the session', () =>
     withMod(async (m, _proj, _feedback, home) => {
       writeFollowup(home, 'pr_checks', PR_CHECKS)

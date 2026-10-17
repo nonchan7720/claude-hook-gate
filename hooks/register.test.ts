@@ -466,6 +466,40 @@ test('followup: きっかけの Bash で後続コマンドを求め、実行さ�
   expect(again.block).toBeUndefined()
 })
 
+test('followup: 引数が pattern で埋まれば hook がバックグラウンドで起動し、結果を Stop で渡す', async ($, on) => {
+  const files: Files = {
+    '/h/.claude/followup/pr_checks.md':
+      "---\nname: pr_checks\nwhen: '^gh pr create'\nrun: 'gh pr checks {{pr}} --watch'\nargs:\n  pr:\n    pattern: 'pull/(\\d+)'\n---\n",
+  }
+  // 起動スクリプト（sh -c <script> sh <cmd> <log> <exit> <pid>）は実行せず、終わったことにして exit / pid を書く。
+  const launches: string[] = []
+  setup(on, files, {}, (argv) => {
+    if (argv[0] === 'sh' && argv.length === 8 && String(argv[2]).includes('setsid')) {
+      const [, , , , cmd, log, exit, pid] = argv as [string, string, string, string, string, string, string, string]
+      launches.push(cmd)
+      files[log] = `${files[log] ?? ''}all checks passed\n`
+      files[exit] = '0\n'
+      files[pid] = '4242\n'
+    }
+    return { exitCode: 0, stdout: '' }
+  })
+  const r = await $.classic.PostToolUse({
+    session_id: 'sess-1',
+    tool_name: 'Bash',
+    tool_input: { command: 'gh pr create' },
+    tool_response: { stdout: 'https://github.com/o/r/pull/12\n', stderr: '' },
+    tool_use_id: 't1',
+  })
+  expect(r.additionalContext?.join('\n')).toContain('後続コマンド（pr_checks）をバックグラウンドで開始しました: `gh pr checks 12 --watch`')
+  expect(launches).toEqual(['gh pr checks 12 --watch'])
+  const stop = await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: false })
+  expect(stop.block).toContain('後続コマンド `gh pr checks 12 --watch`（pr_checks）が終了しました（exit 0、')
+  expect(stop.block).toContain('\nall checks passed')
+  expect(Object.keys(files)).not.toContain('/h/.claude/followup/.pending/sess-1.json')
+  const again = await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: true })
+  expect(again.block).toBeUndefined()
+})
+
 test('PostToolUse(Agent): 終わったサブエージェントの SubagentStop の結果が呼び出し元の context に入る', async ($, on) => {
   const files: Files = {
     '/h/.claude/feedback/chk.md': rule(
