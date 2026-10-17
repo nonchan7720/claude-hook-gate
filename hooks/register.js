@@ -40,21 +40,19 @@ stopCheck:
 
 followup:
   triggered: "[followup] \`{{command}}\` has run, so run the following follow-up command next ({{label}}):"
+  triggeredFilled: "[followup] \`{{command}}\` has run, so run the following follow-up command next ({{label}}). Its arguments are already filled in; run it as it is:"
   argsHeader: "How to fill {{...}} (infer the values from the output of the command above and the context):"
   argNoHint: "(no description; infer it from the context)"
-  instruction: "Run this command in your next Bash call (with run_in_background: true if it takes long) and report its result to the user. Stopping is blocked until it has run."
-  started: "[followup] \`{{trigger}}\` has run, so the follow-up command ({{label}}) was started in the background: \`{{command}}\`. Its result will be handed to you as soon as it finishes (at the latest when you stop, where it is waited for). Keep working; do not wait for it."
-  result: "[followup] The follow-up command \`{{command}}\` ({{name}}) finished (exit {{code}}, {{seconds}}s). Report this result to the user (full output: {{log}}):"
-  resultTimeout: "[followup] The follow-up command \`{{command}}\` ({{name}}) did not finish within {{timeout}}s and was stopped. Report the output so far to the user (full output: {{log}}):"
-  resultLost: "[followup] The process of the follow-up command \`{{command}}\` ({{name}}) disappeared without leaving an exit status (killed or restarted?). Report the output so far to the user (full output: {{log}}):"
-  waiting: "[followup] waiting: {{command}} ({{seconds}}s)"
-  outputOmitted: "… (first {{n}} lines omitted)"
+  instruction: "Run this command in your next Bash call, always with run_in_background: true (a foreground call is denied). Claude Code hands you the result when it finishes; report it to the user. If it failed because the command or its arguments were wrong, rebuild the correct command and run it again. Stopping is blocked until it has been started."
+  instructionTimeout: "Run this command in your next Bash call, always with run_in_background: true and timeout: {{ms}} (a foreground call is denied). Claude Code hands you the result when it finishes; report it to the user. If it failed because the command or its arguments were wrong, rebuild the correct command and run it again. Stopping is blocked until it has been started."
+  foreground: "[followup] Run the follow-up command ({{name}}) \`{{command}}\` with run_in_background: true. In the foreground the Bash time limit may cut it off. Claude Code hands you the result when it finishes. Run the same command again with run_in_background: true."
+  launched: "[followup] The follow-up command \`{{command}}\` ({{name}}) was started in the background. Keep working; do not wait for it. Claude Code hands you the result when it finishes; report it to the user. If it failed because the command or its arguments were wrong, rebuild the correct command and run it again."
   done: "[followup] The follow-up command \`{{command}}\` ({{name}}) succeeded. Include its result in your report to the user."
-  failed: "[followup] The follow-up command \`{{command}}\` ({{name}}) failed (attempt {{attempt}}/{{max}}). Look at the error above: if the command or its arguments were wrong, rebuild the correct command and run it again. If the command was right and the failure is the result itself (for example failed CI checks), do not run it again; report that result to the user."
+  failed: "[followup] Starting the follow-up command \`{{command}}\` ({{name}}) failed (attempt {{attempt}}/{{max}}). Look at the error above: if the command or its arguments were wrong, rebuild the correct command and run it again. If the command was right and the failure is the result itself (for example failed CI checks), do not run it again; report that result to the user."
   gaveUp: "[followup] The follow-up command ({{name}}) failed {{max}} times. Giving up; report the failure to the user."
-  stopHeader: "[followup] Follow-up commands have not been run yet. Run them before finishing (attempt {{attempt}}/{{max}}):"
+  stopHeader: "[followup] Follow-up commands have not been started yet. Start them with run_in_background: true before finishing (attempt {{attempt}}/{{max}}):"
   stopItem: "- {{label}}: \`{{run}}\` (triggered by \`{{command}}\`)"
-  stopGaveUp: "[followup] The follow-up commands were not run {{max}} times in a row. Withdrawing the request; please check manually."
+  stopGaveUp: "[followup] The follow-up commands were not started {{max}} times in a row. Withdrawing the request; please check manually."
   unreadable: "cannot read the follow-up definition: {{error}}"
   missingKey: "{{key}} is missing (required)"
   badRegex: "{{key}} is not a usable regular expression: {{error}}"
@@ -207,21 +205,19 @@ stopCheck:
 
 followup:
   triggered: "[followup] \`{{command}}\` を実行したので、続けて次の後続コマンドを実行してください（{{label}}）:"
+  triggeredFilled: "[followup] \`{{command}}\` を実行したので、続けて次の後続コマンドを実行してください（{{label}}）。引数は埋めてあるので、このまま実行してください:"
   argsHeader: "{{...}} の埋め方（直前のコマンドの出力などから推測して埋める）:"
   argNoHint: "（説明なし。文脈から推測する）"
-  instruction: "次の Bash でこのコマンドを実行し（時間がかかるなら run_in_background: true で）、その結果をユーザーに報告してください。実行するまで終了（Stop）はブロックされます。"
-  started: "[followup] \`{{trigger}}\` を実行したので、後続コマンド（{{label}}）をバックグラウンドで開始しました: \`{{command}}\`。結果は終わり次第渡します（遅くとも終了（Stop）時に待ち合わせて渡します）。待たずに作業を続けてください。"
-  result: "[followup] 後続コマンド \`{{command}}\`（{{name}}）が終了しました（exit {{code}}、{{seconds}}s）。この結果をユーザーに報告してください（出力の全文: {{log}}）:"
-  resultTimeout: "[followup] 後続コマンド \`{{command}}\`（{{name}}）が {{timeout}} 秒以内に終わらなかったので止めました。ここまでの出力をユーザーに報告してください（出力の全文: {{log}}）:"
-  resultLost: "[followup] 後続コマンド \`{{command}}\`（{{name}}）のプロセスが終了コードを残さずに消えました（kill や再起動の可能性）。ここまでの出力をユーザーに報告してください（出力の全文: {{log}}）:"
-  waiting: "[followup] 待機中: {{command}} ({{seconds}}s)"
-  outputOmitted: "…（先頭 {{n}} 行省略）"
+  instruction: "次の Bash で、このコマンドを必ず run_in_background: true で実行してください（前景では止められます）。完了すると Claude Code が結果を渡すので、それをユーザーに報告してください。引数の誤りで失敗していたら、正しいコマンドに組み立て直して再実行してください。起動するまで終了（Stop）はブロックされます。"
+  instructionTimeout: "次の Bash で、このコマンドを必ず run_in_background: true、timeout: {{ms}} で実行してください（前景では止められます）。完了すると Claude Code が結果を渡すので、それをユーザーに報告してください。引数の誤りで失敗していたら、正しいコマンドに組み立て直して再実行してください。起動するまで終了（Stop）はブロックされます。"
+  foreground: "[followup] 後続コマンド（{{name}}）\`{{command}}\` は run_in_background: true で実行してください。前景で実行すると Bash の時間制限で途中で切られることがあります。完了時の結果は Claude Code が渡します。同じコマンドを run_in_background: true にして実行し直してください。"
+  launched: "[followup] 後続コマンド \`{{command}}\`（{{name}}）をバックグラウンドで開始しました。待たずに作業を続けてください。完了すると Claude Code が結果を渡すので、それをユーザーに報告してください。引数の誤りで失敗していたら、正しいコマンドに組み立て直して再実行してください。"
   done: "[followup] 後続コマンド \`{{command}}\`（{{name}}）が成功しました。その結果をユーザーへの報告に含めてください。"
-  failed: "[followup] 後続コマンド \`{{command}}\`（{{name}}）が失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て、コマンドや引数が誤っていれば正しいコマンドに組み立て直して再実行してください。コマンドは正しく、この失敗がそのまま結果（CI の失敗など）なら、再実行せずにその結果をユーザーに報告してください。"
+  failed: "[followup] 後続コマンド \`{{command}}\`（{{name}}）の起動が失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て、コマンドや引数が誤っていれば正しいコマンドに組み立て直して再実行してください。コマンドは正しく、この失敗がそのまま結果（CI の失敗など）なら、再実行せずにその結果をユーザーに報告してください。"
   gaveUp: "[followup] 後続コマンド（{{name}}）が {{max}} 回失敗したので打ち切ります。失敗の内容をユーザーに報告してください。"
-  stopHeader: "[followup] まだ実行していない後続コマンドがあります。先に実行してから終了してください（試行 {{attempt}}/{{max}}）:"
+  stopHeader: "[followup] まだ起動していない後続コマンドがあります。先に run_in_background: true で起動してから終了してください（試行 {{attempt}}/{{max}}）:"
   stopItem: "- {{label}}: \`{{run}}\`（きっかけ: \`{{command}}\`）"
-  stopGaveUp: "[followup] 後続コマンドが {{max}} 回続けて実行されなかったので、要求を取り下げます。手動で確認してください。"
+  stopGaveUp: "[followup] 後続コマンドが {{max}} 回続けて起動されなかったので、要求を取り下げます。手動で確認してください。"
   unreadable: "後続コマンドの定義を読めません: {{error}}"
   missingKey: "{{key}} がありません（必須）"
   badRegex: "{{key}} の正規表現が使えません: {{error}}"
@@ -1550,11 +1546,7 @@ function shellSplit(s) {
 // src/followup.ts
 var MAX_STOP_BLOCKS = 3;
 var DEFAULT_MAX_ATTEMPTS = 3;
-var DEFAULT_TIMEOUT_S = 1800;
-var OUTPUT_TAIL_LINES = 60;
-var OUTPUT_TAIL_BYTES = 8192;
 var DAY_MS2 = 24 * 60 * 60 * 1000;
-var POLL_MS = 1000;
 function followupDir(io) {
   const override = io.env.CLAUDE_FOLLOWUP_DIR;
   if (override)
@@ -1568,13 +1560,8 @@ var stateIdOf = (payload) => {
   return agentId ? `${sessionId}--${agentId}` : sessionId;
 };
 var safeName = (s) => s.replace(/[^A-Za-z0-9_.-]/g, "_");
-var pendingPath = (io, stateId) => join(followupDir(io), ".pending", `${safeName(stateId)}.json`);
-var runsDir = (io) => join(followupDir(io), ".runs");
-var runFiles = (io, runId) => ({
-  log: join(runsDir(io), `${runId}.log`),
-  exit: join(runsDir(io), `${runId}.exit`),
-  pid: join(runsDir(io), `${runId}.pid`)
-});
+var pendingDir = (io) => join(followupDir(io), ".pending");
+var pendingPath = (io, stateId) => join(pendingDir(io), `${safeName(stateId)}.json`);
 var PLACEHOLDER_RE = /\{\{\s*([A-Za-z_][\w-]*)\s*\}\}/g;
 var placeholders = (run) => [...new Set([...run.matchAll(PLACEHOLDER_RE)].map((m) => m[1] ?? ""))];
 var escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -1646,7 +1633,7 @@ async function loadFollowup(io, path) {
     ...truthy(data.unless) ? { unless: String(data.unless) } : {},
     run: String(data.run).trim(),
     args: argsOf(io.lang, data.args),
-    timeout: timeout > 0 ? timeout : DEFAULT_TIMEOUT_S,
+    ...timeout > 0 ? { timeout } : {},
     maxAttempts: maxAttempts > 0 ? maxAttempts : DEFAULT_MAX_ATTEMPTS,
     body: content.slice(m[0].length).trim(),
     path,
@@ -1718,11 +1705,10 @@ function resolveArgs(f, command, output) {
   return { command: filled, values };
 }
 var hintsOf = (f) => Object.fromEntries(Object.entries(f.args).flatMap(([k, v]) => v.hint ? [[k, v.hint]] : []));
-async function loadPending(io, stateId, now) {
+function parsePending(text, now) {
+  if (text === undefined)
+    return { entries: [], stopBlocks: 0 };
   try {
-    const text = await io.readFile(pendingPath(io, stateId));
-    if (text === undefined)
-      return { entries: [], stopBlocks: 0 };
     const data = JSON.parse(text);
     if (!isDict(data) || !Array.isArray(data.entries))
       return { entries: [], stopBlocks: 0 };
@@ -1732,6 +1718,7 @@ async function loadPending(io, stateId, now) {
     return { entries: [], stopBlocks: 0 };
   }
 }
+var loadPending = async (io, stateId, now) => parsePending(await io.readFile(pendingPath(io, stateId)), now);
 async function savePending(io, stateId, state) {
   const path = pendingPath(io, stateId);
   if (state.entries.length === 0) {
@@ -1741,6 +1728,17 @@ async function savePending(io, stateId, state) {
   await io.writeFile(path, `${JSON.stringify(state)}
 `);
 }
+async function loadSessionPending(io, sessionId, now) {
+  const dir = pendingDir(io);
+  const prefix = safeName(sessionId);
+  const out = [];
+  for (const e of await io.list(dir)) {
+    if (e.kind !== "file" || !(e.name === `${prefix}.json` || e.name.startsWith(`${prefix}--`) && e.name.endsWith(".json")))
+      continue;
+    out.push(...parsePending(await io.readFile(join(dir, e.name)), now).entries);
+  }
+  return out;
+}
 function oneLine(command, max = 120) {
   const first = command.split(`
 `).find((l) => l.trim() !== "")?.trim() ?? "";
@@ -1749,174 +1747,44 @@ function oneLine(command, max = 120) {
 var labelOf = (p) => p.description ? `${p.name}: ${p.description}` : p.name;
 function instructionText(lang, p) {
   const t = tr(lang);
-  const lines = [t("followup.triggered", { command: p.trigger, label: labelOf(p) }), `  ${p.run}`];
-  const names = placeholders(p.run);
-  if (names.length > 0) {
-    lines.push(t("followup.argsHeader"));
-    for (const n of names)
-      lines.push(`  {{${n}}}: ${p.hints[n] ?? t("followup.argNoHint")}`);
+  const lines = [];
+  if (p.command !== undefined) {
+    lines.push(t("followup.triggeredFilled", { command: p.trigger, label: labelOf(p) }), `  ${p.command}`);
+  } else {
+    lines.push(t("followup.triggered", { command: p.trigger, label: labelOf(p) }), `  ${p.run}`);
+    const names = placeholders(p.run);
+    if (names.length > 0) {
+      lines.push(t("followup.argsHeader"));
+      for (const n of names)
+        lines.push(`  {{${n}}}: ${p.hints[n] ?? t("followup.argNoHint")}`);
+    }
   }
   if (p.body)
     lines.push(p.body);
-  lines.push(t("followup.instruction"));
+  lines.push(p.timeout !== undefined ? t("followup.instructionTimeout", { ms: p.timeout * 1000 }) : t("followup.instruction"));
   return lines.join(`
 `);
-}
-function outputTail(lang, text) {
-  const lines = text.replace(/\n+$/, "").split(`
-`);
-  let kept = lines.slice(-OUTPUT_TAIL_LINES);
-  while (kept.length > 1 && kept.join(`
-`).length > OUTPUT_TAIL_BYTES)
-    kept = kept.slice(1);
-  const omitted = lines.length - kept.length;
-  const body = kept.join(`
-`);
-  return omitted > 0 ? `${tr(lang)("followup.outputOmitted", { n: omitted })}
-${body}` : body;
 }
 var context = (event, body) => ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: body } })}
 `);
 var commandOf = (payload) => jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
-var matchPending = (entries, command) => entries.find((p) => p.mode === "claude" && runRegExp(p.run).test(command));
-var LAUNCH_SCRIPT = [
-  `runner='sh -c "$1" </dev/null >>"$2" 2>&1; echo $? >"$3"'`,
-  'if command -v setsid >/dev/null 2>&1; then setsid sh -c "$runner" sh "$1" "$2" "$3" </dev/null >/dev/null 2>&1 &',
-  'else nohup sh -c "$runner" sh "$1" "$2" "$3" </dev/null >/dev/null 2>&1 & fi',
-  'echo $! >"$4"'
-].join(`
-`);
-async function launch(io, f, command, trigger, payload, now) {
-  const runId = `${safeName(stateIdOf(payload))}.${Math.floor(now)}-${Math.random().toString(36).slice(2, 8)}`;
-  const files = runFiles(io, runId);
-  const cwd = jqStr(payload.cwd) || io.cwd;
-  const projectDir = io.projectDir || io.cwd;
-  await io.writeFile(files.log, `$ ${command}  (cwd: ${cwd})
-`);
-  const r = await io.run(["sh", "-c", LAUNCH_SCRIPT, "sh", command, files.log, files.exit, files.pid], {
-    cwd,
-    env: { CLAUDE_PROJECT_DIR: projectDir },
-    timeoutMs: 1e4
-  });
-  if (r.exitCode !== 0 || r.error !== undefined) {
-    await logError(io, "followup", `launch failed: ${r.error ?? r.stderr}`, f.path);
-    await io.removeFiles([files.log, files.exit, files.pid]);
-    return;
-  }
-  return {
-    name: f.name,
-    description: f.description,
-    mode: "hook",
-    run: f.run,
-    hints: hintsOf(f),
-    body: f.body,
-    trigger,
-    toolUseId: jqStr(payload.tool_use_id),
-    attempts: 0,
-    attempted: true,
-    maxAttempts: f.maxAttempts,
-    createdAt: now,
-    command,
-    runId,
-    started: now,
-    timeout: f.timeout,
-    cwd
-  };
-}
-var readExit = async (io, exitFile) => {
-  const text = await io.readFile(exitFile);
-  if (text === undefined || !/^\s*\d+\s*$/.test(text))
-    return;
-  return Number.parseInt(text.trim(), 10);
-};
-var pidAlive = async (io, pidFile) => {
-  const pid = (await io.readFile(pidFile) ?? "").trim();
-  if (!/^\d+$/.test(pid))
-    return false;
-  return (await io.run(["sh", "-c", 'kill -0 "$1" 2>/dev/null', "sh", pid], { timeoutMs: 5000 })).exitCode === 0;
-};
-var killRun = async (io, pidFile) => {
-  const pid = (await io.readFile(pidFile) ?? "").trim();
-  if (!/^\d+$/.test(pid))
-    return;
-  await io.run(["sh", "-c", 'kill -s TERM -- "-$1" 2>/dev/null || kill -s TERM "$1" 2>/dev/null', "sh", pid], { timeoutMs: 5000 });
-};
-async function outcomeOf(io, p, now) {
-  if (!p.runId)
-    return { kind: "lost" };
-  const files = runFiles(io, p.runId);
-  const code = await readExit(io, files.exit);
-  if (code !== undefined)
-    return { kind: "done", code };
-  if (now >= (p.started ?? p.createdAt) + (p.timeout ?? DEFAULT_TIMEOUT_S) * 1000)
-    return { kind: "timeout" };
-  if (!await pidAlive(io, files.pid)) {
-    await io.run(["sleep", "0.2"]);
-    const late = await readExit(io, files.exit);
-    return late !== undefined ? { kind: "done", code: late } : { kind: "lost" };
-  }
-  return;
-}
-async function resultText(io, p, outcome, now) {
-  const t = tr(io.lang);
-  const files = p.runId ? runFiles(io, p.runId) : undefined;
-  const log = files ? await io.readFile(files.log) ?? "" : "";
-  const command = oneLine(p.command ?? p.run);
-  const seconds = Math.round((now - (p.started ?? p.createdAt)) / 1000);
-  let head;
-  if (outcome.kind === "done")
-    head = t("followup.result", { command, name: p.name, code: outcome.code, seconds, log: files?.log ?? "" });
-  else if (outcome.kind === "timeout") {
-    if (files)
-      await killRun(io, files.pid);
-    head = t("followup.resultTimeout", { command, name: p.name, timeout: p.timeout ?? DEFAULT_TIMEOUT_S, log: files?.log ?? "" });
-  } else
-    head = t("followup.resultLost", { command, name: p.name, log: files?.log ?? "" });
-  const body = outputTail(io.lang, log.split(`
-`).slice(1).join(`
-`));
-  if (files)
-    await io.removeFiles([files.exit, files.pid]);
-  return body === "" ? head : `${head}
-${body}`;
-}
-async function collect(io, stateId, state, wait) {
-  const notes = [];
-  const t = tr(io.lang);
-  for (const p of state.entries.filter((e) => e.mode === "hook")) {
-    let now = await io.now();
-    let outcome = await outcomeOf(io, p, now);
-    while (outcome === undefined && wait) {
-      io.progress?.(t("followup.waiting", { command: oneLine(p.command ?? p.run, 60), seconds: Math.floor((now - (p.started ?? p.createdAt)) / 1000) }));
-      await io.run(["sleep", String(POLL_MS / 1000)]);
-      now = await io.now();
-      outcome = await outcomeOf(io, p, now);
-    }
-    if (outcome === undefined)
-      continue;
-    notes.push(await resultText(io, p, outcome, now));
-    state.entries = state.entries.filter((e) => e !== p);
-  }
-  if (notes.length > 0)
-    await savePending(io, stateId, state);
-  return notes;
-}
-async function collectStep(io, payload, event) {
-  const stateId = stateIdOf(payload);
-  const state = await loadPending(io, stateId, await io.now());
-  if (!state.entries.some((e) => e.mode === "hook"))
+var matchPending = (entries, command) => entries.find((p) => runRegExp(p.run).test(command));
+var inBackground = (payload) => isDict(payload.tool_input) && payload.tool_input.run_in_background === true || isDict(payload.tool_response) && truthy(payload.tool_response.backgroundTaskId);
+async function guard(io, payload) {
+  const command = commandOf(payload);
+  if (command === "" || isDict(payload.tool_input) && payload.tool_input.run_in_background === true)
     return ok();
-  const notes = await collect(io, stateId, state, false);
-  if (notes.length === 0)
+  const entries = await loadSessionPending(io, jqStr(payload.session_id) || "unknown", await io.now());
+  const p = matchPending(entries, command);
+  if (!p)
     return ok();
-  const body = notes.join(`
-
+  const reason = tr(io.lang)("followup.foreground", { name: p.name, command: oneLine(command) });
+  return ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: reason } })}
 `);
-  return event === "UserPromptSubmit" ? ok(body) : context(event, body);
 }
-async function followupCollect(io, payload, event = "PostToolUse") {
+async function followupGuard(io, payload) {
   try {
-    return await collectStep(io, payload, event);
+    return await guard(io, payload);
   } catch (e) {
     await logError(io, "followup", errorText(e));
     return ok("", `[followup] internal error (ignored): ${errorText(e)}
@@ -1936,12 +1804,11 @@ async function afterBash(io, payload) {
   const t = tr(io.lang);
   const notes = [];
   let changed = false;
-  notes.push(...await collect(io, stateId, state, false));
   const done = matchPending(state.entries, command);
   if (done) {
     state.entries = state.entries.filter((p) => p !== done);
     changed = true;
-    notes.push(t("followup.done", { command: oneLine(command), name: done.name }));
+    notes.push(t(inBackground(payload) ? "followup.launched" : "followup.done", { command: oneLine(command), name: done.name }));
   }
   const trigger = oneLine(command);
   const output = outputOf(payload);
@@ -1953,20 +1820,11 @@ async function afterBash(io, payload) {
     if (f.unless !== undefined && pyRegExp(f.unless).test(command))
       continue;
     const resolved = resolveArgs(f, command, output);
-    if (resolved) {
-      const p = await launch(io, f, resolved.command, trigger, payload, now);
-      if (p) {
-        state.entries.push(p);
-        changed = true;
-        notes.push(t("followup.started", { trigger, label: labelOf(f), command: resolved.command }));
-        continue;
-      }
-    }
     const p = {
       name: f.name,
       description: f.description,
-      mode: "claude",
       run: f.run,
+      ...resolved ? { command: resolved.command } : {},
       hints: hintsOf(f),
       body: f.body,
       trigger,
@@ -1974,6 +1832,7 @@ async function afterBash(io, payload) {
       attempts: 0,
       attempted: false,
       maxAttempts: f.maxAttempts,
+      ...f.timeout !== undefined ? { timeout: f.timeout } : {},
       createdAt: now
     };
     state.entries.push(p);
@@ -2029,19 +1888,10 @@ async function followupAfterBashFailure(io, payload) {
 `);
   }
 }
-var block = (reason) => ({ exitCode: 2, stdout: `${JSON.stringify({ decision: "block", reason })}
-`, stderr: `${reason}
-` });
 async function stopCheck(io, payload) {
   const stateId = stateIdOf(payload);
   const state = await loadPending(io, stateId, await io.now());
-  const t = tr(io.lang);
-  const results = await collect(io, stateId, state, true);
-  if (results.length > 0)
-    return block(results.join(`
-
-`));
-  const waiting = state.entries.filter((p) => p.mode === "claude" && !p.attempted);
+  const waiting = state.entries.filter((p) => !p.attempted);
   if (waiting.length === 0) {
     if (state.stopBlocks !== 0) {
       state.stopBlocks = 0;
@@ -2049,6 +1899,7 @@ async function stopCheck(io, payload) {
     }
     return ok();
   }
+  const t = tr(io.lang);
   state.stopBlocks += 1;
   if (state.stopBlocks >= MAX_STOP_BLOCKS) {
     state.entries = state.entries.filter((p) => p.attempted);
@@ -2060,9 +1911,12 @@ async function stopCheck(io, payload) {
   await savePending(io, stateId, state);
   const lines = [t("followup.stopHeader", { attempt: state.stopBlocks, max: MAX_STOP_BLOCKS })];
   for (const p of waiting)
-    lines.push(t("followup.stopItem", { label: labelOf(p), run: p.run, command: p.trigger }));
-  return block(lines.join(`
-`));
+    lines.push(t("followup.stopItem", { label: labelOf(p), run: p.command ?? p.run, command: p.trigger }));
+  const reason = lines.join(`
+`);
+  return { exitCode: 2, stdout: `${JSON.stringify({ decision: "block", reason })}
+`, stderr: `${reason}
+` };
 }
 async function followupStopCheck(io, payload) {
   try {
@@ -2075,22 +1929,17 @@ async function followupStopCheck(io, payload) {
 }
 async function resetFollowups(io, payload) {
   try {
+    const dir = pendingDir(io);
     const sessionId = safeName(jqStr(payload.session_id) || "unknown");
     const source = jqStr(payload.source);
-    const fresh = source === "startup" || source === "clear";
     const now = await io.now();
     const doomed = [];
-    for (const [dir, ext] of [
-      [join(followupDir(io), ".pending"), ".json"],
-      [runsDir(io), ""]
-    ]) {
-      for (const e of await io.list(dir)) {
-        if (e.kind !== "file" || !e.name.endsWith(ext))
-          continue;
-        const mine = e.name.startsWith(`${sessionId}.`) || e.name.startsWith(`${sessionId}--`);
-        if (mine && fresh || e.mtimeMs < now - DAY_MS2)
-          doomed.push(join(dir, e.name));
-      }
+    for (const e of await io.list(dir)) {
+      if (e.kind !== "file" || !e.name.endsWith(".json"))
+        continue;
+      const mine = e.name === `${sessionId}.json` || e.name.startsWith(`${sessionId}--`);
+      if (mine && (source === "startup" || source === "clear") || e.mtimeMs < now - DAY_MS2)
+        doomed.push(join(dir, e.name));
     }
     await io.removeFiles(doomed);
   } catch {}
@@ -4963,7 +4812,7 @@ export const register = (on, options) => {
     const text = await createIo($, options).then((io) => loadRules(io, options.rulesFile));
     if (text !== "")
       mine.additionalContext = [text];
-    const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io), (io) => followupCollect(io, e, "UserPromptSubmit")]);
+    const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io)]);
     return withNext(next, e, merge(mine, inject));
   });
   on("classic.PreToolUse", async ($guard, guardEvent, guardNext) => {
@@ -4973,7 +4822,7 @@ export const register = (on, options) => {
       return guardNext(guardEvent);
     const payload = preToolUsePayload(guardEvent, tool, await $guard.session.id(), await $guard.session.cwd());
     const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
-    const steps = tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
+    const steps = tool === "Bash" ? [(io) => bashStarted(io, payload), step, (io) => followupGuard(io, payload)] : [step];
     const mine = await runSteps($guard, options, "PreToolUse", steps);
     if (mine.deny !== undefined)
       return { deny: mine.deny };
@@ -4982,20 +4831,21 @@ export const register = (on, options) => {
     return guardNext(guardEvent);
   });
   on("classic.PostToolUse", async ($, e, next) => {
-    const tool = str(e.tool_name);
-    let steps;
-    if (/^(Agent|Task)$/.test(tool)) {
-      steps = [(io) => subagentReport(io, e)];
-    } else if (tool === "Bash") {
-      steps = [...bashChangeSteps(e), (io) => followupAfterBash(io, e)];
-    } else if (/^(Write|Edit|MultiEdit)$/.test(tool)) {
-      steps = [(io) => recordChanges(io, e), (io) => feedbackPostEdit(io, e), (io) => stopTestGate(io, "rules", e)];
-    } else {
-      steps = [];
+    if (/^(Agent|Task)$/.test(str(e.tool_name))) {
+      const mine = await runSteps($, options, "PostToolUse", [(io) => subagentReport(io, e)]);
+      return withNext(next, e, mine);
     }
-    if (tool !== "Bash")
-      steps.push((io) => followupCollect(io, e));
-    const mine = await runSteps($, options, "PostToolUse", steps);
+    if (str(e.tool_name) === "Bash") {
+      const mine = await runSteps($, options, "PostToolUse", [...bashChangeSteps(e), (io) => followupAfterBash(io, e)]);
+      return withNext(next, e, mine);
+    }
+    if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name)))
+      return next(e);
+    const mine = await runSteps($, options, "PostToolUse", [
+      (io) => recordChanges(io, e),
+      (io) => feedbackPostEdit(io, e),
+      (io) => stopTestGate(io, "rules", e)
+    ]);
     return withNext(next, e, mine);
   });
   on("classic.PostToolUseFailure", async ($, e, next) => {
