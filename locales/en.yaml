@@ -33,6 +33,30 @@ stopCheck:
   gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
   fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
 
+followup:
+  triggered: "[followup] `{{command}}` has run, so run the following follow-up command next ({{label}}):"
+  triggeredFilled: "[followup] `{{command}}` has run, so run the following follow-up command next ({{label}}). Its arguments are already filled in; run it as it is:"
+  argsHeader: "How to fill {{...}} (infer the values from the output of the command above and the context):"
+  argNoHint: "(no description; infer it from the context)"
+  argFilled: "{{value}} (filled by the hook with the pattern)"
+  filledValues: "Filled values (taken from the output / command of the triggering command with the patterns): {{values}}"
+  filledCheck: "If a filled value disagrees with the output above (the pattern captured the wrong thing), run the command with the correct value, fix the pattern of that argument in the definition file {{path}} so it matches this output, and tell the user what you changed."
+  patternMissed: "{{keys}} did not match the output / command of the triggering command. Run the command with the inferred value, then fix that pattern in the definition file {{path}} so it matches this output, and tell the user what you changed."
+  launchedFilled: "Its arguments were filled by the hook with the patterns of the definition file. If it fails because an argument was wrong, run the correct command again, fix the pattern of that argument in the definition file {{path}}, and tell the user what you changed."
+  instruction: "Run this command in your next Bash call, always with run_in_background: true (a foreground call is denied). Claude Code hands you the result when it finishes; report it to the user. If it failed because the command or its arguments were wrong, rebuild the correct command and run it again. Stopping is blocked until it has been started."
+  instructionTimeout: "Run this command in your next Bash call, always with run_in_background: true and timeout: {{ms}} (a foreground call is denied). Claude Code hands you the result when it finishes; report it to the user. If it failed because the command or its arguments were wrong, rebuild the correct command and run it again. Stopping is blocked until it has been started."
+  foreground: "[followup] Run the follow-up command ({{name}}) `{{command}}` with run_in_background: true. In the foreground the Bash time limit may cut it off. Claude Code hands you the result when it finishes. Run the same command again with run_in_background: true."
+  launched: "[followup] The follow-up command `{{command}}` ({{name}}) was started in the background. Keep working; do not wait for it. Claude Code hands you the result when it finishes; report it to the user. If it failed because the command or its arguments were wrong, rebuild the correct command and run it again."
+  done: "[followup] The follow-up command `{{command}}` ({{name}}) succeeded. Include its result in your report to the user."
+  failed: "[followup] Starting the follow-up command `{{command}}` ({{name}}) failed (attempt {{attempt}}/{{max}}). Look at the error above: if the command or its arguments were wrong, rebuild the correct command and run it again. If the command was right and the failure is the result itself (for example failed CI checks), do not run it again; report that result to the user."
+  gaveUp: "[followup] The follow-up command ({{name}}) failed {{max}} times. Giving up; report the failure to the user."
+  stopHeader: "[followup] Follow-up commands have not been started yet. Start them with run_in_background: true before finishing (attempt {{attempt}}/{{max}}):"
+  stopItem: "- {{label}}: `{{run}}` (triggered by `{{command}}`)"
+  stopGaveUp: "[followup] The follow-up commands were not started {{max}} times in a row. Withdrawing the request; please check manually."
+  unreadable: "cannot read the follow-up definition: {{error}}"
+  missingKey: "{{key}} is missing (required)"
+  badRegex: "{{key}} is not a usable regular expression: {{error}}"
+
 subagentReport:
   header: "[feedback-gate] Results of the hooks run when subagent {{agent}} stopped (gate checks and feedback stop_check). Use these instead of reading the gate logs or re-running the checks:"
 

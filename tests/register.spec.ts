@@ -45,7 +45,7 @@ async function withMod<T>(
       commandLog,
       elapsed: () => elapsed,
       stubCommands: ['osascript', 'terminal-notifier'],
-      env: { HOME: home, CLAUDE_FEEDBACK_DIR: feedback, DOGWOOD_BIN: MISSING_DOGWOOD_BIN, ...env },
+      env: { HOME: home, CLAUDE_FEEDBACK_DIR: feedback, CLAUDE_FOLLOWUP_DIR: path.join(home, 'followup'), DOGWOOD_BIN: MISSING_DOGWOOD_BIN, ...env },
     })
     return await body(m, proj, feedback, home)
   } finally {
@@ -642,5 +642,133 @@ describe('Stop / SubagentStop / Notification', () => {
       })) as Out
       expect(reached).toBe(true)
       expect(r.block).toBeUndefined()
+    }))
+})
+
+describe('follow-up commands', () => {
+  const PR_CHECKS =
+    "---\nname: pr_checks\ndescription: PR の CI を見届ける\nwhen: '^gh pr create\\b'\nrun: 'gh pr checks {{pr}} --watch'\nargs:\n  pr: 'PR 番号'\n---\n"
+  const writeFollowup = (home: string, name: string, text: string) => {
+    fs.mkdirSync(path.join(home, 'followup'), { recursive: true })
+    fs.writeFileSync(path.join(home, 'followup', `${name}.md`), text)
+  }
+  const bash = (command: string, extra: Record<string, unknown> = {}) => ({
+    session_id: 'sess-1',
+    tool_name: 'Bash',
+    tool_input: { command },
+    tool_response: { stdout: 'https://github.com/o/r/pull/12', stderr: '' },
+    tool_use_id: 'tu1',
+    ...extra,
+  })
+
+  test('PostToolUse(Bash) asks for the follow-up, Stop blocks until it ran, then PostToolUse reports completion', () =>
+    withMod(async (m, _proj, _feedback, home) => {
+      writeFollowup(home, 'pr_checks', PR_CHECKS)
+      await m.call('classic.PreToolUse', { tool: 'Bash', command: 'gh pr create --fill', tool_use_id: 'tu1' })
+      const r = (await m.call('classic.PostToolUse', bash('gh pr create --fill'))) as Out
+      const ctx = (r.additionalContext as string[]).join('\n')
+      expect(ctx).toContain('[followup] `gh pr create --fill` を実行したので、続けて次の後続コマンドを実行してください（pr_checks: PR の CI を見届ける）:')
+      expect(ctx).toContain('  gh pr checks {{pr}} --watch')
+      expect(ctx).toContain('  {{pr}}: PR 番号')
+      const stop = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
+      expect(String(stop.block)).toContain('まだ起動していない後続コマンドがあります')
+      expect(String(stop.block)).toContain('- pr_checks: PR の CI を見届ける: `gh pr checks {{pr}} --watch`（きっかけ: `gh pr create --fill`）')
+      // 後続コマンドが成功したら完了を伝え、Stop は通る（通知は出る）
+      await m.call('classic.PreToolUse', { tool: 'Bash', command: 'gh pr checks 12 --watch', tool_use_id: 'tu2' })
+      const done = (await m.call('classic.PostToolUse', bash('gh pr checks 12 --watch', { tool_use_id: 'tu2' }))) as Out
+      expect((done.additionalContext as string[]).join('\n')).toContain('[followup] 後続コマンド `gh pr checks 12 --watch`（pr_checks）が成功しました')
+      const again = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: true })) as Out
+      expect(again.block).toBeUndefined()
+    }))
+
+  test('PostToolUseFailure(Bash) asks to rebuild a failed follow-up; other tools pass through', () =>
+    withMod(async (m, _proj, _feedback, home) => {
+      writeFollowup(home, 'pr_checks', PR_CHECKS)
+      await m.call('classic.PostToolUse', bash('gh pr create'))
+      const r = (await m.call('classic.PostToolUseFailure', bash('gh pr checks abc --watch', { error: 'Exit code 1\nno pull requests found' }))) as Out
+      expect((r.additionalContext as string[]).join('\n')).toContain(
+        '[followup] 後続コマンド `gh pr checks abc --watch`（pr_checks）の起動が失敗しました（試行 1/3）',
+      )
+      // 一度実行されたので Stop は止めない
+      const stop = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
+      expect(stop.block).toBeUndefined()
+      let reached = false
+      const other = (await m.call(
+        'classic.PostToolUseFailure',
+        { session_id: 'sess-1', tool_name: 'Read', tool_input: { file_path: '/x' }, error: 'ENOENT' },
+        async () => {
+          reached = true
+          return {}
+        },
+      )) as Out
+      expect(reached).toBe(true)
+      expect(other.additionalContext).toBeUndefined()
+    }))
+
+  test('the Stop block for a pending follow-up comes before the gate checks', () =>
+    withMod(async (m, proj, _feedback, home) => {
+      writeFollowup(home, 'pr_checks', PR_CHECKS)
+      writeGateYaml(proj, {
+        rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+        consistency_checks: [{ name: 'chk', run: ['echo broken; exit 1'] }],
+      })
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      await m.call('classic.PostToolUse', bash('gh pr create'))
+      const r = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
+      expect(String(r.block)).toContain('[followup]')
+      expect(String(r.block)).not.toContain('[gate]')
+      expect(runLog.some((argv) => argv[0] === 'sh' && String(argv[2]).includes('broken'))).toBe(false)
+    }))
+
+  test("SubagentStop waits for the subagent's own follow-up before running the gate", () =>
+    withMod(async (m, _proj, _feedback, home) => {
+      writeFollowup(home, 'pr_checks', PR_CHECKS)
+      await m.call('classic.PostToolUse', bash('gh pr create', { agent_id: 'a1' }))
+      const r = (await m.call('classic.SubagentStop', { session_id: 'sess-1', agent_id: 'a1', stop_hook_active: false })) as Out
+      expect(String(r.block)).toContain('[followup]')
+      const main = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
+      expect(main.block).toBeUndefined()
+    }))
+
+  test('a follow-up whose arguments the hook fills is handed over filled; a foreground launch is denied and a background one clears it', () =>
+    withMod(async (m, _proj, _feedback, home) => {
+      writeFollowup(
+        home,
+        'pr_checks',
+        "---\nname: pr_checks\nwhen: '^gh pr create'\nrun: 'gh pr checks {{pr}} --watch'\nargs:\n  pr:\n    pattern: 'pull/(\\d+)'\n---\n",
+      )
+      const r = (await m.call('classic.PostToolUse', bash('gh pr create'))) as Out
+      const ctx = (r.additionalContext as string[]).join('\n')
+      expect(ctx).toContain('引数は埋めてあるので、このまま実行してください:\n  gh pr checks 12 --watch')
+      expect(ctx).toContain('必ず run_in_background: true で実行してください')
+      // 前景で起動しようとすると deny
+      const denied = (await m.call('classic.PreToolUse', { tool: 'Bash', command: 'gh pr checks 12 --watch', tool_use_id: 't2' })) as Out
+      expect(String(denied.deny)).toContain('後続コマンド（pr_checks）`gh pr checks 12 --watch` は run_in_background: true で実行してください')
+      // 背景なら通り、起動後は保留が消えて Stop も通る
+      let reached = false
+      await m.call('classic.PreToolUse', { tool: 'Bash', command: 'gh pr checks 12 --watch', run_in_background: true, tool_use_id: 't3' }, async () => {
+        reached = true
+        return {}
+      })
+      expect(reached).toBe(true)
+      const launched = (await m.call('classic.PostToolUse', {
+        session_id: 'sess-1',
+        tool_name: 'Bash',
+        tool_input: { command: 'gh pr checks 12 --watch', run_in_background: true },
+        tool_response: { backgroundTaskId: 'b1' },
+        tool_use_id: 't3',
+      })) as Out
+      expect((launched.additionalContext as string[]).join('\n')).toContain('（pr_checks）をバックグラウンドで開始しました')
+      const stop = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
+      expect(stop.block).toBeUndefined()
+    }))
+
+  test('SessionStart startup clears the pending follow-ups of the session', () =>
+    withMod(async (m, _proj, _feedback, home) => {
+      writeFollowup(home, 'pr_checks', PR_CHECKS)
+      await m.call('classic.PostToolUse', bash('gh pr create'))
+      expect(exists(path.join(home, 'followup', '.pending', 'sess-1.json'))).toBe(true)
+      await m.call('classic.SessionStart', { source: 'startup', session_id: 'sess-1' })
+      expect(exists(path.join(home, 'followup', '.pending', 'sess-1.json'))).toBe(false)
     }))
 })

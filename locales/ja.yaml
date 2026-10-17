@@ -33,6 +33,30 @@ stopCheck:
   gaveUp: "[feedback-stop-check] {{max}} 回連続でブロックしました。ループを打ち切ります。手動確認を。"
   fixAbove: "[feedback-stop-check] 上記を修正してください（試行 {{attempt}}/{{max}}）。"
 
+followup:
+  triggered: "[followup] `{{command}}` を実行したので、続けて次の後続コマンドを実行してください（{{label}}）:"
+  triggeredFilled: "[followup] `{{command}}` を実行したので、続けて次の後続コマンドを実行してください（{{label}}）。引数は埋めてあるので、このまま実行してください:"
+  argsHeader: "{{...}} の埋め方（直前のコマンドの出力などから推測して埋める）:"
+  argNoHint: "（説明なし。文脈から推測する）"
+  argFilled: "{{value}}（hook が正規表現で埋めた値）"
+  filledValues: "埋めた値（きっかけのコマンドの出力・コマンドから正規表現で取り出したもの）: {{values}}"
+  filledCheck: "埋めた値が直前の出力と食い違っていれば（正規表現の取り違え）、正しい値に直して実行し、定義ファイル {{path}} の該当する args の pattern もその出力に一致する形に直して、変更内容をユーザーに伝えてください。"
+  patternMissed: "{{keys}} がきっかけのコマンドの出力・コマンドに一致しませんでした。推測した値で実行したうえで、定義ファイル {{path}} のその pattern をこの出力に一致する形に直し、変更内容をユーザーに伝えてください。"
+  launchedFilled: "引数は hook が定義ファイルの正規表現で埋めたものです。失敗が引数の誤りによるものなら、正しいコマンドで再実行し、定義ファイル {{path}} の該当する args の pattern も直して、変更内容をユーザーに伝えてください。"
+  instruction: "次の Bash で、このコマンドを必ず run_in_background: true で実行してください（前景では止められます）。完了すると Claude Code が結果を渡すので、それをユーザーに報告してください。引数の誤りで失敗していたら、正しいコマンドに組み立て直して再実行してください。起動するまで終了（Stop）はブロックされます。"
+  instructionTimeout: "次の Bash で、このコマンドを必ず run_in_background: true、timeout: {{ms}} で実行してください（前景では止められます）。完了すると Claude Code が結果を渡すので、それをユーザーに報告してください。引数の誤りで失敗していたら、正しいコマンドに組み立て直して再実行してください。起動するまで終了（Stop）はブロックされます。"
+  foreground: "[followup] 後続コマンド（{{name}}）`{{command}}` は run_in_background: true で実行してください。前景で実行すると Bash の時間制限で途中で切られることがあります。完了時の結果は Claude Code が渡します。同じコマンドを run_in_background: true にして実行し直してください。"
+  launched: "[followup] 後続コマンド `{{command}}`（{{name}}）をバックグラウンドで開始しました。待たずに作業を続けてください。完了すると Claude Code が結果を渡すので、それをユーザーに報告してください。引数の誤りで失敗していたら、正しいコマンドに組み立て直して再実行してください。"
+  done: "[followup] 後続コマンド `{{command}}`（{{name}}）が成功しました。その結果をユーザーへの報告に含めてください。"
+  failed: "[followup] 後続コマンド `{{command}}`（{{name}}）の起動が失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て、コマンドや引数が誤っていれば正しいコマンドに組み立て直して再実行してください。コマンドは正しく、この失敗がそのまま結果（CI の失敗など）なら、再実行せずにその結果をユーザーに報告してください。"
+  gaveUp: "[followup] 後続コマンド（{{name}}）が {{max}} 回失敗したので打ち切ります。失敗の内容をユーザーに報告してください。"
+  stopHeader: "[followup] まだ起動していない後続コマンドがあります。先に run_in_background: true で起動してから終了してください（試行 {{attempt}}/{{max}}）:"
+  stopItem: "- {{label}}: `{{run}}`（きっかけ: `{{command}}`）"
+  stopGaveUp: "[followup] 後続コマンドが {{max}} 回続けて起動されなかったので、要求を取り下げます。手動で確認してください。"
+  unreadable: "後続コマンドの定義を読めません: {{error}}"
+  missingKey: "{{key}} がありません（必須）"
+  badRegex: "{{key}} の正規表現が使えません: {{error}}"
+
 subagentReport:
   header: "[feedback-gate] サブエージェント {{agent}} の停止時に実行された hook（gate の検証と feedback の stop_check）の結果です。gate のログを読んだり検証を再実行したりせず、これを使ってください:"
 

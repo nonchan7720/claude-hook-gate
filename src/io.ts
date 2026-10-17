@@ -7,6 +7,8 @@ export type EnvVars = {
   HOME?: string
   PATH?: string
   CLAUDE_FEEDBACK_DIR?: string
+  /** 後続コマンドの定義（~/.claude/followup/*.md）と保留状態の置き場の差し替え（src/followup.ts）。 */
+  CLAUDE_FOLLOWUP_DIR?: string
   DOGWOOD_BIN?: string
   TERM_PROGRAM?: string
   __CFBundleIdentifier?: string

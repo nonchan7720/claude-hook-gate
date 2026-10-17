@@ -151,7 +151,7 @@ const DAY_MS = 86_400_000
  * パースできない値は undefined（無期限扱い）。YAML 1.1 では日付が Date に解決されるので、それも受ける
  * （UTC 0 時ちょうどの Date は日付のみの指定とみなして日の終わりにする）。
  */
-function parseExpires(v: unknown): number | undefined {
+export function parseExpires(v: unknown): number | undefined {
   if (v instanceof Date) {
     const t = v.getTime()
     if (Number.isNaN(t)) return undefined
@@ -165,7 +165,7 @@ function parseExpires(v: unknown): number | undefined {
 }
 
 /** 文字列または配列を文字列だけのリストにそろえる。 */
-const stringList = (v: unknown): string[] => asList(v).filter((x): x is string => typeof x === 'string')
+export const stringList = (v: unknown): string[] => asList(v).filter((x): x is string => typeof x === 'string')
 
 const typeName = (v: unknown): string => (v === null || v === undefined ? 'null' : Array.isArray(v) ? 'list' : isDict(v) ? 'mapping' : typeof v)
 
@@ -242,9 +242,10 @@ function expandTilde(io: Io, pattern: string): string {
 
 /**
  * ルールが今のプロジェクトで有効か。expires / projects / when_exists の3つすべてを満たしたときだけ true。
- * projectDir 省略時は io.projectDir（無ければ cwd）。
+ * projectDir 省略時は io.projectDir（無ければ cwd）。後続コマンドの定義（src/followup.ts）も同じ条件で絞るので、
+ * 3 つのキーだけを受ける。
  */
-export async function isRuleActive(io: Io, rule: Rule, projectDir?: string): Promise<boolean> {
+export async function isRuleActive(io: Io, rule: Pick<Rule, 'expires' | 'projects' | 'whenExists'>, projectDir?: string): Promise<boolean> {
   if (rule.expires !== undefined && (await io.now()) > rule.expires) return false
   const dir = projectDir || io.projectDir || io.cwd
   if (rule.projects.length > 0) {

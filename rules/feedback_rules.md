@@ -57,6 +57,38 @@ when_exists: ['go.mod']      # 任意。この glob が存在するプロジェ�
 
 `.claude/feedback/<topic>.md`, `~/.claude/feedback/<topic>.md` — トピックを英語のスネークケースで命名する（例: `tsconfig_rootdir.md`, `test_mocking.md`）
 
+### 後続コマンド（followup）
+
+あるコマンドの後に続けて実行するコマンドは、ユーザーが `~/.claude/followup/<topic>.md`（グローバル）か
+`.claude/followup/<topic>.md`（プロジェクト）に書いておく。hook（`src/followup.ts`）がきっかけのコマンドを
+検知すると、後続コマンド（`args` の `pattern` で埋められる引数は埋めたもの）を `run_in_background: true` で
+実行するよう求めてくる。
+
+```markdown
+---
+name: pr_checks                     # 省略時はファイル名
+description: PR を作ったら CI を見届ける
+when: '^gh pr create\b'             # 必須。きっかけ（Bash のコマンドにマッチする正規表現）
+unless: '--dry-run'                 # 任意。マッチしたら発火しない
+run: 'gh pr checks {{pr}} --watch'  # 必須。後続コマンド。{{name}} が引数
+args:                               # 任意。引数ごとの埋め方
+  pr:                               #   辞書なら hook が埋める（pattern を from = output（きっかけの出力、既定）/
+    pattern: 'pull/(\d+)'           #   command に当て、最初のキャプチャを値にする）
+    hint: 'PR の番号'                 #   hint は埋まらなかったとき Claude に見せる説明
+  repo: 'owner/name の形'            #   文字列なら説明だけ（Claude が埋める）
+timeout: 3600                       # 任意。Bash の timeout として指定する秒数
+max_attempts: 3                     # 任意。起動の失敗時に組み立て直す回数の上限（既定 3）
+---
+
+（任意の本文: 実行時の補足指示）
+```
+
+- 求められたら、残っている `{{...}}` を直前のコマンドの出力などから推測した値で埋め、次の Bash でそのコマンドを必ず `run_in_background: true` で実行する（前景の実行は deny される。`timeout` が示されていればそれも指定する）。起動するまで終了はブロックされる
+- 起動したら待たずに作業を続ける。完了すると Claude Code が結果を渡すので、それをユーザーに報告する
+- hook が正規表現で埋めた値が直前の出力と食い違っている、または `pattern` が一致しなかったと示されたら、正しい値で実行したうえで、示された定義ファイルのその `args` の `pattern` を出力に一致する形に直し、変更内容をユーザーに伝える
+- 失敗したら、エラーを見てコマンドや引数が誤っていれば正しいコマンドに組み立て直して再実行する（起動の失敗は `max_attempts` まで）。コマンドが正しく、失敗がそのまま結果（CI の失敗など）なら、再実行せずその結果を報告する
+- ユーザーから「〜を実行したら〜も実行して」と頼まれたら、この形式のファイルを作ることを提案する（書く前に確認する）
+
 ### enforce（count に応じた強制力）
 
 hook（`src/feedback-guard.ts` / `src/feedback-post-edit.ts` / `src/feedback-stop-check.ts`）が
