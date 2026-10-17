@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { bashChanges, bashStarted, recordBashChanges, SKIP_COMMAND_RE } from '../src/bash-changes.ts'
+import { bashChanges, bashStarted, mentionsWorktree, recordBashChanges, SKIP_COMMAND_RE } from '../src/bash-changes.ts'
 import type { Dict } from '../src/pyutil.ts'
 import { changedLines, changedPath, exists, statePath, writeGateYaml } from './helpers/gate.ts'
 import { makeIo, rmTree, tmpDir, withTmp } from './helpers/node-io.ts'
@@ -46,6 +46,16 @@ afterAll(() => rmTree(FEEDBACK_DIR))
 function ioAt(proj: string, clock: { t: number }) {
   return makeIo({ projectDir: proj, now: () => clock.t, env: { CLAUDE_FEEDBACK_DIR: FEEDBACK_DIR } })
 }
+
+describe('mentionsWorktree', () => {
+  test('matches the worktree path, not a name that only shares its prefix', () => {
+    expect(mentionsWorktree('cd .claude/worktrees/w && bun test', 'w')).toBe(true)
+    expect(mentionsWorktree('cat > /p/.claude/worktrees/w/a.ts', 'w')).toBe(true)
+    expect(mentionsWorktree('ls .claude/worktrees/w', 'w')).toBe(true)
+    expect(mentionsWorktree('ls .claude/worktrees/w-2/a', 'w')).toBe(false)
+    expect(mentionsWorktree('bun run format', 'w')).toBe(false)
+  })
+})
 
 describe('SKIP_COMMAND_RE', () => {
   test('matches git history / worktree commands', () => {
@@ -312,13 +322,31 @@ describe('recordBashChanges', () => {
       const wt = path.join(proj, '.claude', 'worktrees', 'w')
       const clock = { t: T0 }
       const io = ioAt(proj, clock)
-      await bashStarted(io, payload({ cwd: proj }))
+      const p = payload({ cwd: proj, tool_input: { command: `cat > ${wt}/new.txt <<'EOF'\nnew\nEOF\nsed -i s/a/changed/ .claude/worktrees/w/tracked.txt` } })
+      await bashStarted(io, p)
       fs.writeFileSync(path.join(wt, 'new.txt'), 'new\n')
       fs.writeFileSync(path.join(wt, 'tracked.txt'), 'changed\n')
       for (const f of ['new.txt', 'tracked.txt']) setMtime(path.join(wt, f), T0 + 500)
-      const got = await recordBashChanges(io, payload({ cwd: proj }))
+      const got = await recordBashChanges(io, p)
       expect(got.sort()).toEqual([path.join(wt, 'new.txt'), path.join(wt, 'tracked.txt')])
       expect(changedLines(proj, 'sess-1').sort()).toEqual([path.join(wt, 'new.txt'), path.join(wt, 'tracked.txt')])
+    }))
+
+  test('does not record files written meanwhile in a worktree the command does not mention (another session editing there)', () =>
+    withTmp(async (proj) => {
+      initRepo(proj)
+      gitAt(T0 - 3_600_000, proj, 'worktree', 'add', '-q', '.claude/worktrees/other', '-b', 'other')
+      gitAt(T0 - 3_600_000, proj, 'worktree', 'add', '-q', '.claude/worktrees/other-2', '-b', 'other-2')
+      const other = path.join(proj, '.claude', 'worktrees', 'other')
+      const clock = { t: T0 }
+      const io = ioAt(proj, clock)
+      // other-2 だけを指すコマンド。other は名前の接頭辞が同じだけで、指していない。
+      const p = payload({ cwd: proj, tool_input: { command: 'echo x > new.txt && ls .claude/worktrees/other-2' } })
+      await bashStarted(io, p)
+      fs.writeFileSync(path.join(proj, 'new.txt'), 'x\n')
+      fs.writeFileSync(path.join(other, 'red.test.ts'), 'expect(1).toBe(2)\n')
+      for (const f of [path.join(proj, 'new.txt'), path.join(other, 'red.test.ts')]) setMtime(f, T0 + 500)
+      expect(await recordBashChanges(io, p)).toEqual([path.join(proj, 'new.txt')])
     }))
 
   test('returns nothing outside a git repository', () =>
