@@ -196,6 +196,25 @@ describe('the share key', () => {
       expect(fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean)).toEqual(['start', 'end', 'start', 'end'])
     }))
 
+  test('the same name in different sessions is not serialized', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const c = `echo start >> ${marker}; sleep 0.4; echo end >> ${marker}`
+      const g = (sessionId: string) =>
+        new Gate(makeIo({ projectDir: proj, env: { DOGWOOD_BIN: MISSING_DOGWOOD_BIN } }), { sessionId, phase: 'rules' }).execOne(
+          'l',
+          c,
+          proj,
+          10,
+          '',
+          'n',
+          filesEnv(['x.py']),
+          { root: proj },
+        )
+      await Promise.all([g('sess-a'), g('sess-b')])
+      expect(fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean).slice(0, 2)).toEqual(['start', 'start'])
+    }))
+
   test('the command pid is written into the lock while it runs', () =>
     withTmp(async (proj) => {
       const shared = await sharedDirOf(proj)

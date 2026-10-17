@@ -59,7 +59,7 @@
 //              実行中でも待たずに自分で実行する（既定は共有: 進行中の実行があれば起動せず完了を待って同じ結果を
 //              受け取る。ただし進行中の実行の対象ファイルが自分の対象ファイルをすべて含むときだけ。含まないときや
 //              環境変数・root・cwd が違うときも、name（無ければ cmd）が同じ実行が走っている間は起動せず、終わるのを待って
-//              から実行する＝同じコマンドは直列。同じリポジトリの別の git worktree で動くエージェントの間でも直列になる
+//              から実行する＝同じセッションの中では同じコマンドは直列（別のセッションとは直列にしない）。同じリポジトリの別の git worktree で動くエージェントの間でも直列になる
 //              （ロックは ~/.claude/.gate-status/shared/<project_id>/ に置く）。src/shared-run.ts）。
 //              files: false を書くと、そのコマンドは対象ファイルを使わないものとして、共有の判定上の対象ファイルを
 //              空として扱う（対象ファイルが違っても共有される）。CLAUDE_GATE_FILES 自体は従来どおり渡る。
@@ -287,11 +287,13 @@ export function shareKey(root: string, cwd: string, cmd: string, env: Env): stri
 }
 
 /**
- * 直列化の単位。name があれば name、無ければ cmd。同じものは、root・cwd・環境変数（フェーズなど）・対象ファイルが
- * 違っても、プロジェクト（.gate-status）の中で同時に 1 本しか走らせない。重いコマンドをエージェントの数だけ同時に
- * 走らせると CPU の取り合いで全員が何倍も遅くなるため。
+ * 直列化の単位。セッションごとに、name があれば name、無ければ cmd。同じものは、root・cwd・環境変数（フェーズなど）・
+ * 対象ファイルが違っても、同じセッションのエージェント（メインとサブエージェント）の間で同時に 1 本しか走らせない。
+ * 重いコマンドをエージェントの数だけ同時に走らせると CPU の取り合いで全員が何倍も遅くなるため。別のセッション
+ * （別のターミナルの Claude Code）とは直列化しない。他人のコマンドの終了を待って自分の Stop が止まらないように。
  */
-export const serialKey = (name: string | null | undefined, cmd: string): string => (name ? `name:${name}` : `cmd:${cmd}`)
+export const serialKey = (sessionId: string, name: string | null | undefined, cmd: string): string =>
+  JSON.stringify([sessionId, name ? `name:${name}` : `cmd:${cmd}`])
 
 /** 共有の判定に使う対象ファイル一覧。files が false（対象ファイルを使わないコマンド）なら空。 */
 export const shareFiles = (env: Env, files: boolean): string[] => (files && env[FILES_ENV_KEY] ? shellSplit(env[FILES_ENV_KEY]) : [])
@@ -804,7 +806,7 @@ export class Gate {
       (pidFiles) => this.runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles),
       {
         onWait,
-        serial: serialKey(name, cmd),
+        serial: serialKey(this.sessionId, name, cmd),
       },
     )
     if (!r.shared) return r.outcome
