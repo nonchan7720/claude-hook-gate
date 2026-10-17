@@ -456,9 +456,9 @@ test('followup: きっかけの Bash で後続コマンドを求め、実行さ�
   expect(r.additionalContext?.join('\n')).toContain('  {{pr}}: PR 番号')
   expect(Object.keys(files)).toContain('/h/.claude/followup/.pending/sess-1.json')
   const stop = await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: false })
-  expect(stop.block).toContain('まだ実行していない後続コマンドがあります')
+  expect(stop.block).toContain('まだ起動していない後続コマンドがあります')
   const failed = await $.classic.PostToolUseFailure({ ...bash('gh pr checks abc --watch', { tool_use_id: 't2' }), error: 'Exit code 1' } as never)
-  expect(failed.additionalContext?.join('\n')).toContain('（pr_checks）が失敗しました（試行 1/3）')
+  expect(failed.additionalContext?.join('\n')).toContain('（pr_checks）の起動が失敗しました（試行 1/3）')
   const done = await $.classic.PostToolUse(bash('gh pr checks 12 --watch', { tool_use_id: 't3' }))
   expect(done.additionalContext?.join('\n')).toContain('（pr_checks）が成功しました')
   expect(Object.keys(files)).not.toContain('/h/.claude/followup/.pending/sess-1.json')
@@ -466,22 +466,10 @@ test('followup: きっかけの Bash で後続コマンドを求め、実行さ�
   expect(again.block).toBeUndefined()
 })
 
-test('followup: 引数が pattern で埋まれば hook がバックグラウンドで起動し、結果を Stop で渡す', async ($, on) => {
-  const files: Files = {
+test('followup: 引数が pattern で埋まれば埋めたコマンドを渡し、前景の起動は deny、背景の起動で保留が消える', async ($, on) => {
+  setup(on, {
     '/h/.claude/followup/pr_checks.md':
       "---\nname: pr_checks\nwhen: '^gh pr create'\nrun: 'gh pr checks {{pr}} --watch'\nargs:\n  pr:\n    pattern: 'pull/(\\d+)'\n---\n",
-  }
-  // 起動スクリプト（sh -c <script> sh <cmd> <log> <exit> <pid>）は実行せず、終わったことにして exit / pid を書く。
-  const launches: string[] = []
-  setup(on, files, {}, (argv) => {
-    if (argv[0] === 'sh' && argv.length === 8 && String(argv[2]).includes('setsid')) {
-      const [, , , , cmd, log, exit, pid] = argv as [string, string, string, string, string, string, string, string]
-      launches.push(cmd)
-      files[log] = `${files[log] ?? ''}all checks passed\n`
-      files[exit] = '0\n'
-      files[pid] = '4242\n'
-    }
-    return { exitCode: 0, stdout: '' }
   })
   const r = await $.classic.PostToolUse({
     session_id: 'sess-1',
@@ -490,14 +478,22 @@ test('followup: 引数が pattern で埋まれば hook がバックグラウン�
     tool_response: { stdout: 'https://github.com/o/r/pull/12\n', stderr: '' },
     tool_use_id: 't1',
   })
-  expect(r.additionalContext?.join('\n')).toContain('後続コマンド（pr_checks）をバックグラウンドで開始しました: `gh pr checks 12 --watch`')
-  expect(launches).toEqual(['gh pr checks 12 --watch'])
+  expect(r.additionalContext?.join('\n')).toContain('引数は埋めてあるので、このまま実行してください:\n  gh pr checks 12 --watch')
+  const denied = await $.tool.call({ tool: 'Bash', command: 'gh pr checks 12 --watch' })
+  expect(denied.isError).toBe(true)
+  expect(denied.text).toContain('run_in_background: true で実行してください')
+  const allowed = await $.tool.call({ tool: 'Bash', command: 'gh pr checks 12 --watch', run_in_background: true })
+  expect(allowed.isError).toBeFalsy()
+  const launched = await $.classic.PostToolUse({
+    session_id: 'sess-1',
+    tool_name: 'Bash',
+    tool_input: { command: 'gh pr checks 12 --watch', run_in_background: true },
+    tool_response: { backgroundTaskId: 'b1' },
+    tool_use_id: 't2',
+  })
+  expect(launched.additionalContext?.join('\n')).toContain('（pr_checks）をバックグラウンドで開始しました')
   const stop = await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: false })
-  expect(stop.block).toContain('後続コマンド `gh pr checks 12 --watch`（pr_checks）が終了しました（exit 0、')
-  expect(stop.block).toContain('\nall checks passed')
-  expect(Object.keys(files)).not.toContain('/h/.claude/followup/.pending/sess-1.json')
-  const again = await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: true })
-  expect(again.block).toBeUndefined()
+  expect(stop.block).toBeUndefined()
 })
 
 test('PostToolUse(Agent): 終わったサブエージェントの SubagentStop の結果が呼び出し元の context に入る', async ($, on) => {

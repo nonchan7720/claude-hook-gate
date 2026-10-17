@@ -1,20 +1,24 @@
-// 後続コマンド（followup）: あるコマンドを実行したら、人間が .md に書いておいた次のコマンドを実行し、その結果を Claude に返す。
+// 後続コマンド（followup）: あるコマンドを実行したら、人間が .md に書いておいた次のコマンドをバックグラウンドで実行させ、その結果を
+// Claude に返す。
 //
 // 例: `gh pr create` を実行したら `gh pr checks {{pr}} --watch` を続けて実行し、その結果を報告させる。
 // Claude Code のバックグラウンド実行はコマンドを Claude が決めるので見当違いなことがある。ここでは「きっかけ」と
 // 「実行するコマンド」は人間が定義ファイルに書き、コマンドの引数（{{pr}} のような穴）だけを埋める。
 //
-// 実行の仕方は 2 つあり、引数が hook で埋まるかどうかで決まる:
-// - hook 実行（強制）: 定義の args に正規表現（pattern）があり、きっかけのコマンドの出力（PostToolUse の tool_response）か
-//   コマンド文字列からすべての穴が埋まったとき（穴が無いときも）。hook が埋めたコマンドをバックグラウンドで起動し、
-//   Claude の作業は止めない。結果は hook が回収して Claude に渡す: 終了後の最初の hook（どのツールの PostToolUse でも、
-//   次のプロンプトでも）で additionalContext として、まだ走っているなら Stop で終了（または timeout）まで待ち合わせて
-//   ブロックの理由として渡す。モデルは一切介在しないので、必ず実行され、結果は遅くとも Stop で返る。Bash ツールの
-//   時間制限（最長 10 分）も関係ない。
-// - Claude 実行: 穴が hook で埋まらないとき。hook はモデルを呼べないので、Claude に「{{...}} を直前の出力から推測して
-//   埋めて次の Bash で実行せよ」と求め、実行されたか（雛形の穴を任意の引数として読んだパターンに一致する Bash が
-//   成功したか）を見届ける。失敗したら理由を見て組み立て直させ、一度も実行しないまま終わろうとしたら Stop を止める。
-//   結果は Bash ツールの結果として Claude に届く（バックグラウンド実行なら Claude Code が完了時に渡す）。
+// 役割分担:
+// - 引数: 定義の args に正規表現（pattern）があれば、hook がきっかけのコマンドの出力（PostToolUse の tool_response）か
+//   コマンド文字列から取り出して埋める。埋まらない穴だけ Claude が直前の出力から推測して埋める（hook はモデルを呼べない）。
+// - 実行: Claude の Bash で、必ずバックグラウンド（run_in_background: true）で起動させる。前景で起動しようとしたら
+//   PreToolUse で止めて背景で打ち直させる（followupGuard）。前景だと Bash ツールの時間制限（最長 10 分）で切られる
+//   ことがあり、CI の完了待ちのような長いコマンドに向かない。
+// - 結果: バックグラウンドのタスクが終わると Claude Code 自身が結果を Claude に渡し、待機中でも起こす（task-notification）。
+//   hook はここに関与しない。Claude が終了しようとした時点でコマンドが終わっていなくても Stop は待たない（待つと
+//   その間ユーザーが何もできない）。
+// - 見届け: 保留（pending）に積んだ後続コマンドが起動されるまで、Stop をブロックする（MAX_STOP_BLOCKS 回で諦める）。
+//   起動されたか（雛形の穴を任意の引数として読んだパターンに一致する Bash がバックグラウンドで始まったか、前景で成功したか）は
+//   PostToolUse(Bash) で見る。起動自体が失敗したら（PostToolUseFailure）理由を見て組み立て直させる（max_attempts で打ち切り）。
+//   バックグラウンドで走ったコマンドが引数の誤りで失敗したときは、Claude Code が渡す結果を見て組み立て直すよう、起動時に
+//   伝えておく（hook はその失敗を見られない）。
 //
 // 定義ファイル（~/.claude/followup/*.md とプロジェクトの .claude/followup/*.md。同名はプロジェクト側が優先）:
 //
@@ -26,19 +30,19 @@
 // run: 'gh pr checks {{pr}} --watch'   # 必須。{{name}} が引数の穴
 // args:                        # 任意。引数ごとの埋め方
 //   pr:                        #   辞書なら hook が埋める: from（output = きっかけの出力、command = きっかけのコマンド。
-//     from: output             #   既定 output）の pattern（正規表現。最初のキャプチャ、無ければ一致全体）。
+//     from: output             #   既定 output）に pattern（正規表現。最初のキャプチャ、無ければ一致全体）を当てる。
 //     pattern: 'pull/(\d+)'    #   埋めた値はシェルの 1 語として引用符で守られる（雛形の穴を引用符で囲まないこと）。
 //     hint: 'PR の番号'          #   hint は取れなかったとき Claude に見せる説明
 //   repo: 'owner/name の形'     #   文字列なら Claude に見せる説明だけ（Claude が埋める）
-// timeout: 1800                # 任意。hook 実行の上限（秒。既定 1800）。Stop で待ち合わせるのもここまで
-// max_attempts: 3              # 任意。Claude 実行が失敗したときに組み立て直して再実行させる上限（既定 3）
+// timeout: 3600                # 任意。Bash の timeout（秒）として指定させる。省略時は Claude Code の既定（バックグラウンドは 30 分）
+// max_attempts: 3              # 任意。起動が失敗したときに組み立て直して再実行させる上限（既定 3）
 // expires / projects / when_exists     # 任意。feedback ルールと同じ適用条件
 // ---
-// 本文（任意）: 補足指示。Claude 実行のときそのまま Claude に渡す。
+// 本文（任意）: 補足指示。そのまま Claude に渡す。
 //
-// 保留は <followupDir>/.pending/<session>[--<agent>].json に置き（feedback の .ask_state と同じ流儀で、プロジェクトの
-// 作業ツリーには書かない）、hook 実行のログ・終了コード・PID は <followupDir>/.runs/<id>.{log,exit,pid} に置く。
-// エージェントごとに分けるので、サブエージェントの中で発火した後続コマンドはそのサブエージェントが引き取る。
+// 保留は <followupDir>/.pending/<session>[--<agent>].json に置く（feedback の .ask_state と同じ流儀で、プロジェクトの
+// 作業ツリーには書かない）。エージェントごとに分けるので、サブエージェントの中で発火した後続コマンドはそのサブ
+// エージェントが起動する。PreToolUse にはエージェント ID が入らないので、followupGuard はセッションの全エージェントの保留を見る。
 //
 // hook 自身のバグで作業を止めないよう、例外は握りつぶして exit 0 にする（.errors.jsonl に残す）。壊れた定義ファイルは
 // そのファイルだけを飛ばし、理由を .errors.jsonl に記録する（feedback ルールと同じ）。
@@ -49,17 +53,11 @@ import { join } from './path.ts'
 import { type Dict, isDict, jqStr, pyRegExp, toCount, truthy } from './pyutil.ts'
 import { shellQuote } from './shell.ts'
 
-/** 一度も実行されない保留（Claude 実行）を理由に Stop を続けてブロックする上限。これに達したら要求を取り下げる。 */
+/** 一度も起動されない保留を理由に Stop を続けてブロックする上限。これに達したら要求を取り下げる。 */
 export const MAX_STOP_BLOCKS = 3
-/** max_attempts の既定（Claude 実行の失敗で組み立て直させる回数）。 */
+/** max_attempts の既定（起動の失敗で組み立て直させる回数）。 */
 export const DEFAULT_MAX_ATTEMPTS = 3
-/** timeout の既定（hook 実行の上限、秒）。Claude Code のバックグラウンド Bash の既定と同じ 30 分。 */
-export const DEFAULT_TIMEOUT_S = 1800
-/** Claude に渡す出力の上限（末尾の行数とバイト数）。全文はログに残す。 */
-const OUTPUT_TAIL_LINES = 60
-const OUTPUT_TAIL_BYTES = 8192
 const DAY_MS = 24 * 60 * 60 * 1000
-const POLL_MS = 1000
 
 export type ArgSpec = {
   /** hook が埋める: この正規表現を from に当て、最初のキャプチャ（無ければ一致全体）を値にする。 */
@@ -78,7 +76,8 @@ export type Followup = {
   /** 後続コマンドの雛形。{{name}} が引数の穴。 */
   run: string
   args: Record<string, ArgSpec>
-  timeout: number
+  /** Bash の timeout として指定させる秒数。未指定なら Claude Code の既定。 */
+  timeout?: number
   maxAttempts: number
   /** frontmatter の後の本文（補足指示）。 */
   body: string
@@ -92,27 +91,22 @@ export type Followup = {
 export type Pending = {
   name: string
   description: string
-  /** hook: hook がバックグラウンドで起動し結果を回収する。claude: Claude に実行させ、実行を見届ける。 */
-  mode: 'hook' | 'claude'
   run: string
-  /** Claude に見せる引数の説明（Claude 実行）。 */
+  /** hook が引数を埋めたコマンド。埋められなかったときは undefined（Claude が埋める）。 */
+  command?: string
+  /** Claude に見せる引数の説明。 */
   hints: Record<string, string>
   body: string
   /** きっかけになったコマンド（表示用に 1 行へ畳んだもの）。 */
   trigger: string
   toolUseId: string
-  /** 失敗した回数（Claude 実行）。 */
+  /** 起動が失敗した回数。 */
   attempts: number
-  /** 一度でも実行された（失敗を含む）。Stop はこれが false の Claude 実行の保留だけを止める。 */
+  /** 一度でも起動された（失敗を含む）。Stop はこれが false の保留だけを止める。 */
   attempted: boolean
   maxAttempts: number
-  createdAt: number
-  /** hook 実行: 埋めたコマンド、実行ファイルの id、開始時刻、上限（秒）、cwd。 */
-  command?: string
-  runId?: string
-  started?: number
   timeout?: number
-  cwd?: string
+  createdAt: number
 }
 
 type PendingState = { entries: Pending[]; stopBlocks: number }
@@ -137,14 +131,8 @@ const stateIdOf = (payload: Dict): string => {
 
 const safeName = (s: string): string => s.replace(/[^A-Za-z0-9_.-]/g, '_')
 
-export const pendingPath = (io: Io, stateId: string): string => join(followupDir(io), '.pending', `${safeName(stateId)}.json`)
-const runsDir = (io: Io): string => join(followupDir(io), '.runs')
-/** hook 実行のファイル: ログ（出力全文）、終了コード、PID。 */
-export const runFiles = (io: Io, runId: string) => ({
-  log: join(runsDir(io), `${runId}.log`),
-  exit: join(runsDir(io), `${runId}.exit`),
-  pid: join(runsDir(io), `${runId}.pid`),
-})
+const pendingDir = (io: Io): string => join(followupDir(io), '.pending')
+export const pendingPath = (io: Io, stateId: string): string => join(pendingDir(io), `${safeName(stateId)}.json`)
 
 // ---- 定義の読み込み ----
 
@@ -157,8 +145,8 @@ export const placeholders = (run: string): string[] => [...new Set([...run.match
 const escapeRegExp = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 /**
- * 雛形から、引数を埋めたコマンドに一致する正規表現を作る（Claude 実行の見届け用）。穴は引用符付きの文字列か空白を
- * 含まない 1 語に、雛形の空白は任意の空白列に一致させる。前後は束縛しない（`cd x && ...` や ` 2>&1` を足しても一致する）。
+ * 雛形から、引数を埋めたコマンドに一致する正規表現を作る（起動の見届け用）。穴は引用符付きの文字列か空白を含まない
+ * 1 語に、雛形の空白は任意の空白列に一致させる。前後は束縛しない（`cd x && ...` や ` 2>&1` を足しても一致する）。
  */
 export function runRegExp(run: string): RegExp {
   let src = ''
@@ -225,7 +213,7 @@ export async function loadFollowup(io: Io, path: string): Promise<Followup | nul
     ...(truthy(data.unless) ? { unless: String(data.unless) } : {}),
     run: String(data.run).trim(),
     args: argsOf(io.lang, data.args),
-    timeout: timeout > 0 ? timeout : DEFAULT_TIMEOUT_S,
+    ...(timeout > 0 ? { timeout } : {}),
     maxAttempts: maxAttempts > 0 ? maxAttempts : DEFAULT_MAX_ATTEMPTS,
     body: content.slice(m[0].length).trim(),
     path,
@@ -290,7 +278,11 @@ export const outputOf = (payload: Dict): string => {
  * 雛形の穴を hook で埋める。すべて埋まれば埋めたコマンド、1 つでも埋まらなければ undefined（Claude に埋めさせる）。
  * 値はシェルの 1 語として引用符で守る（出力から取る値は第三者が書けるので、雛形に素のまま差し込まない）。
  */
-export function resolveArgs(f: Followup, command: string, output: string): { command: string; values: Record<string, string> } | undefined {
+export function resolveArgs(
+  f: Pick<Followup, 'run' | 'args'>,
+  command: string,
+  output: string,
+): { command: string; values: Record<string, string> } | undefined {
   const values: Record<string, string> = {}
   for (const name of placeholders(f.run)) {
     const spec = f.args[name]
@@ -310,10 +302,9 @@ const hintsOf = (f: Followup): Record<string, string> => Object.fromEntries(Obje
 
 // ---- 保留状態 ----
 
-async function loadPending(io: Io, stateId: string, now: number): Promise<PendingState> {
+function parsePending(text: string | undefined, now: number): PendingState {
+  if (text === undefined) return { entries: [], stopBlocks: 0 }
   try {
-    const text = await io.readFile(pendingPath(io, stateId))
-    if (text === undefined) return { entries: [], stopBlocks: 0 }
     const data: unknown = JSON.parse(text)
     if (!isDict(data) || !Array.isArray(data.entries)) return { entries: [], stopBlocks: 0 }
     // 古い保留（クラッシュなどの残骸）は捨てる。
@@ -326,6 +317,8 @@ async function loadPending(io: Io, stateId: string, now: number): Promise<Pendin
   }
 }
 
+const loadPending = async (io: Io, stateId: string, now: number): Promise<PendingState> => parsePending(await io.readFile(pendingPath(io, stateId)), now)
+
 async function savePending(io: Io, stateId: string, state: PendingState): Promise<void> {
   const path = pendingPath(io, stateId)
   if (state.entries.length === 0) {
@@ -337,6 +330,18 @@ async function savePending(io: Io, stateId: string, state: PendingState): Promis
 
 /** 保留中の後続コマンド（テスト・参照用）。 */
 export const loadPendingEntries = async (io: Io, stateId: string): Promise<Pending[]> => (await loadPending(io, stateId, await io.now())).entries
+
+/** セッションの全エージェント（<session>.json と <session>--*.json）の保留。PreToolUse にはエージェント ID が入らないので、これで見る。 */
+async function loadSessionPending(io: Io, sessionId: string, now: number): Promise<Pending[]> {
+  const dir = pendingDir(io)
+  const prefix = safeName(sessionId)
+  const out: Pending[] = []
+  for (const e of await io.list(dir)) {
+    if (e.kind !== 'file' || !(e.name === `${prefix}.json` || (e.name.startsWith(`${prefix}--`) && e.name.endsWith('.json')))) continue
+    out.push(...parsePending(await io.readFile(join(dir, e.name)), now).entries)
+  }
+  return out
+}
 
 // ---- 表示 ----
 
@@ -352,28 +357,23 @@ export function oneLine(command: string, max = 120): string {
 
 const labelOf = (p: { name: string; description: string }): string => (p.description ? `${p.name}: ${p.description}` : p.name)
 
-/** Claude 実行の指示。 */
+/** 発火時に Claude へ渡す指示。引数が埋まっていればそのコマンドを、埋まっていなければ雛形と埋め方を見せる。 */
 export function instructionText(lang: Lang, p: Pending): string {
   const t = tr(lang)
-  const lines = [t('followup.triggered', { command: p.trigger, label: labelOf(p) }), `  ${p.run}`]
-  const names = placeholders(p.run)
-  if (names.length > 0) {
-    lines.push(t('followup.argsHeader'))
-    for (const n of names) lines.push(`  {{${n}}}: ${p.hints[n] ?? t('followup.argNoHint')}`)
+  const lines: string[] = []
+  if (p.command !== undefined) {
+    lines.push(t('followup.triggeredFilled', { command: p.trigger, label: labelOf(p) }), `  ${p.command}`)
+  } else {
+    lines.push(t('followup.triggered', { command: p.trigger, label: labelOf(p) }), `  ${p.run}`)
+    const names = placeholders(p.run)
+    if (names.length > 0) {
+      lines.push(t('followup.argsHeader'))
+      for (const n of names) lines.push(`  {{${n}}}: ${p.hints[n] ?? t('followup.argNoHint')}`)
+    }
   }
   if (p.body) lines.push(p.body)
-  lines.push(t('followup.instruction'))
+  lines.push(p.timeout !== undefined ? t('followup.instructionTimeout', { ms: p.timeout * 1000 }) : t('followup.instruction'))
   return lines.join('\n')
-}
-
-/** 出力の末尾（行数とバイト数で切る）。切ったら先頭に省略の行を付ける。 */
-export function outputTail(lang: Lang, text: string): string {
-  const lines = text.replace(/\n+$/, '').split('\n')
-  let kept = lines.slice(-OUTPUT_TAIL_LINES)
-  while (kept.length > 1 && kept.join('\n').length > OUTPUT_TAIL_BYTES) kept = kept.slice(1)
-  const omitted = lines.length - kept.length
-  const body = kept.join('\n')
-  return omitted > 0 ? `${tr(lang)('followup.outputOmitted', { n: omitted })}\n${body}` : body
 }
 
 const context = (event: string, body: string): ScriptResult =>
@@ -381,156 +381,30 @@ const context = (event: string, body: string): ScriptResult =>
 
 const commandOf = (payload: Dict): string => jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined)
 
-/** Claude 実行の保留のうち、このコマンドが後続コマンドとして一致する最初のもの（古い順）。 */
-const matchPending = (entries: Pending[], command: string): Pending | undefined => entries.find((p) => p.mode === 'claude' && runRegExp(p.run).test(command))
+/** 保留のうち、このコマンドが後続コマンドとして一致する最初のもの（古い順）。 */
+const matchPending = (entries: Pending[], command: string): Pending | undefined => entries.find((p) => runRegExp(p.run).test(command))
 
-// ---- hook 実行（バックグラウンド） ----
+/** バックグラウンドで起動された Bash か（tool_input の run_in_background、または tool_response の backgroundTaskId）。 */
+const inBackground = (payload: Dict): boolean =>
+  (isDict(payload.tool_input) && payload.tool_input.run_in_background === true) ||
+  (isDict(payload.tool_response) && truthy(payload.tool_response.backgroundTaskId))
 
-// 起動スクリプト。$1 = コマンド、$2 = ログ、$3 = 終了コードのファイル、$4 = PID のファイル。コマンドは自分のシェルで
-// 走らせ、終わったら終了コードを書く。hook のプロセス（$.process.run）が返っても生き残るよう、setsid があれば新しい
-// セッションで（PID はそのグループのリーダーになるので、timeout では -PID でまとめて止められる）、無ければ nohup で起動する。
-// 標準入出力はすべてファイルか /dev/null に向け、hook 側のパイプを握ったままにしない。
-const LAUNCH_SCRIPT = [
-  'runner=\'sh -c "$1" </dev/null >>"$2" 2>&1; echo $? >"$3"\'',
-  'if command -v setsid >/dev/null 2>&1; then setsid sh -c "$runner" sh "$1" "$2" "$3" </dev/null >/dev/null 2>&1 &',
-  'else nohup sh -c "$runner" sh "$1" "$2" "$3" </dev/null >/dev/null 2>&1 & fi',
-  'echo $! >"$4"',
-].join('\n')
+// ---- PreToolUse(Bash): 後続コマンドは背景で ----
 
-async function launch(io: Io, f: Followup, command: string, trigger: string, payload: Dict, now: number): Promise<Pending | undefined> {
-  const runId = `${safeName(stateIdOf(payload))}.${Math.floor(now)}-${Math.random().toString(36).slice(2, 8)}`
-  const files = runFiles(io, runId)
-  const cwd = jqStr(payload.cwd) || io.cwd
-  const projectDir = io.projectDir || io.cwd
-  await io.writeFile(files.log, `$ ${command}  (cwd: ${cwd})\n`)
-  const r = await io.run(['sh', '-c', LAUNCH_SCRIPT, 'sh', command, files.log, files.exit, files.pid], {
-    cwd,
-    env: { CLAUDE_PROJECT_DIR: projectDir },
-    timeoutMs: 10_000,
-  })
-  if (r.exitCode !== 0 || r.error !== undefined) {
-    await logError(io, 'followup', `launch failed: ${r.error ?? r.stderr}`, f.path)
-    await io.removeFiles([files.log, files.exit, files.pid])
-    return undefined
-  }
-  return {
-    name: f.name,
-    description: f.description,
-    mode: 'hook',
-    run: f.run,
-    hints: hintsOf(f),
-    body: f.body,
-    trigger,
-    toolUseId: jqStr(payload.tool_use_id),
-    attempts: 0,
-    attempted: true,
-    maxAttempts: f.maxAttempts,
-    createdAt: now,
-    command,
-    runId,
-    started: now,
-    timeout: f.timeout,
-    cwd,
-  }
+async function guard(io: Io, payload: Dict): Promise<ScriptResult> {
+  const command = commandOf(payload)
+  if (command === '' || (isDict(payload.tool_input) && payload.tool_input.run_in_background === true)) return ok()
+  const entries = await loadSessionPending(io, jqStr(payload.session_id) || 'unknown', await io.now())
+  const p = matchPending(entries, command)
+  if (!p) return ok()
+  const reason = tr(io.lang)('followup.foreground', { name: p.name, command: oneLine(command) })
+  return ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: reason } })}\n`)
 }
 
-const readExit = async (io: Io, exitFile: string): Promise<number | undefined> => {
-  const text = await io.readFile(exitFile)
-  if (text === undefined || !/^\s*\d+\s*$/.test(text)) return undefined
-  return Number.parseInt(text.trim(), 10)
-}
-
-const pidAlive = async (io: Io, pidFile: string): Promise<boolean> => {
-  const pid = ((await io.readFile(pidFile)) ?? '').trim()
-  if (!/^\d+$/.test(pid)) return false
-  return (await io.run(['sh', '-c', 'kill -0 "$1" 2>/dev/null', 'sh', pid], { timeoutMs: 5_000 })).exitCode === 0
-}
-
-const killRun = async (io: Io, pidFile: string): Promise<void> => {
-  const pid = ((await io.readFile(pidFile)) ?? '').trim()
-  if (!/^\d+$/.test(pid)) return
-  // プロセスグループ（setsid で起動したので PID = グループ）ごと止める。`kill -s TERM -- -PID` は dash / bash / zsh で通る書き方
-  // （`kill -TERM -- -PID` は dash が受け付けない）。グループで止められなければ PID だけでも止める。
-  await io.run(['sh', '-c', 'kill -s TERM -- "-$1" 2>/dev/null || kill -s TERM "$1" 2>/dev/null', 'sh', pid], { timeoutMs: 5_000 })
-}
-
-type RunOutcome = { kind: 'done'; code: number } | { kind: 'timeout' } | { kind: 'lost' }
-
-/** hook 実行の保留が終わっていればその結果、まだ走っていれば undefined。 */
-async function outcomeOf(io: Io, p: Pending, now: number): Promise<RunOutcome | undefined> {
-  if (!p.runId) return { kind: 'lost' }
-  const files = runFiles(io, p.runId)
-  const code = await readExit(io, files.exit)
-  if (code !== undefined) return { kind: 'done', code }
-  if (now >= (p.started ?? p.createdAt) + (p.timeout ?? DEFAULT_TIMEOUT_S) * 1000) return { kind: 'timeout' }
-  if (!(await pidAlive(io, files.pid))) {
-    // 終了コードを書く前に消えた（kill や再起動）。少し待ってもう一度だけ見る（exit を書く直前かもしれない）。
-    await io.run(['sleep', '0.2'])
-    const late = await readExit(io, files.exit)
-    return late !== undefined ? { kind: 'done', code: late } : { kind: 'lost' }
-  }
-  return undefined
-}
-
-/** 終わった hook 実行の結果を Claude に渡す文面にし、実行ファイルを片付ける。 */
-async function resultText(io: Io, p: Pending, outcome: RunOutcome, now: number): Promise<string> {
-  const t = tr(io.lang)
-  const files = p.runId ? runFiles(io, p.runId) : undefined
-  const log = files ? ((await io.readFile(files.log)) ?? '') : ''
-  const command = oneLine(p.command ?? p.run)
-  const seconds = Math.round((now - (p.started ?? p.createdAt)) / 1000)
-  let head: string
-  if (outcome.kind === 'done') head = t('followup.result', { command, name: p.name, code: outcome.code, seconds, log: files?.log ?? '' })
-  else if (outcome.kind === 'timeout') {
-    if (files) await killRun(io, files.pid)
-    head = t('followup.resultTimeout', { command, name: p.name, timeout: p.timeout ?? DEFAULT_TIMEOUT_S, log: files?.log ?? '' })
-  } else head = t('followup.resultLost', { command, name: p.name, log: files?.log ?? '' })
-  // 出力はログに残し、ここでは末尾だけ渡す。ログの先頭行（$ コマンド）は除く。
-  const body = outputTail(io.lang, log.split('\n').slice(1).join('\n'))
-  if (files) await io.removeFiles([files.exit, files.pid])
-  return body === '' ? head : `${head}\n${body}`
-}
-
-/**
- * この状態 ID の hook 実行のうち終わったものを回収し、保留から外して文面を返す。wait が真なら、走っているものは
- * timeout まで待ち合わせる（Stop 用）。
- */
-async function collect(io: Io, stateId: string, state: PendingState, wait: boolean): Promise<string[]> {
-  const notes: string[] = []
-  const t = tr(io.lang)
-  for (const p of state.entries.filter((e) => e.mode === 'hook')) {
-    let now = await io.now()
-    let outcome = await outcomeOf(io, p, now)
-    while (outcome === undefined && wait) {
-      io.progress?.(t('followup.waiting', { command: oneLine(p.command ?? p.run, 60), seconds: Math.floor((now - (p.started ?? p.createdAt)) / 1000) }))
-      await io.run(['sleep', String(POLL_MS / 1000)])
-      now = await io.now()
-      outcome = await outcomeOf(io, p, now)
-    }
-    if (outcome === undefined) continue
-    notes.push(await resultText(io, p, outcome, now))
-    state.entries = state.entries.filter((e) => e !== p)
-  }
-  if (notes.length > 0) await savePending(io, stateId, state)
-  return notes
-}
-
-// ---- PostToolUse（どのツールでも）/ UserPromptSubmit: 終わった hook 実行の結果を渡す ----
-
-async function collectStep(io: Io, payload: Dict, event: string): Promise<ScriptResult> {
-  const stateId = stateIdOf(payload)
-  const state = await loadPending(io, stateId, await io.now())
-  if (!state.entries.some((e) => e.mode === 'hook')) return ok()
-  const notes = await collect(io, stateId, state, false)
-  if (notes.length === 0) return ok()
-  const body = notes.join('\n\n')
-  return event === 'UserPromptSubmit' ? ok(body) : context(event, body)
-}
-
-/** 終わった hook 実行の結果があれば additionalContext で渡す（PostToolUse のどのツールでも、UserPromptSubmit でも）。 */
-export async function followupCollect(io: Io, payload: Dict, event = 'PostToolUse'): Promise<ScriptResult> {
+/** PreToolUse(Bash): 保留中の後続コマンドを前景で起動しようとしたら deny し、run_in_background: true で打ち直させる。 */
+export async function followupGuard(io: Io, payload: Dict): Promise<ScriptResult> {
   try {
-    return await collectStep(io, payload, event)
+    return await guard(io, payload)
   } catch (e) {
     await logError(io, 'followup', errorText(e))
     return ok('', `[followup] internal error (ignored): ${errorText(e)}\n`)
@@ -551,19 +425,16 @@ async function afterBash(io: Io, payload: Dict): Promise<ScriptResult> {
   const notes: string[] = []
   let changed = false
 
-  // 1. 終わった hook 実行の結果。
-  notes.push(...(await collect(io, stateId, state, false)))
-
-  // 2. Claude 実行の保留に一致するコマンドが成功した。
+  // 1. 保留中の後続コマンドが起動された（背景で始まった、または前景で成功した）。
   const done = matchPending(state.entries, command)
   if (done) {
     state.entries = state.entries.filter((p) => p !== done)
     changed = true
-    notes.push(t('followup.done', { command: oneLine(command), name: done.name }))
+    notes.push(t(inBackground(payload) ? 'followup.launched' : 'followup.done', { command: oneLine(command), name: done.name }))
   }
 
-  // 3. きっかけに一致したら、hook で埋まれば起動し、埋まらなければ Claude に求める。後続コマンド自身がそのきっかけに一致しても
-  //    （`gh pr` の後に `gh pr checks` など）同じ定義を再発火させない。
+  // 2. きっかけに一致したら保留に積んで起動を求める。後続コマンド自身がそのきっかけに一致しても（`gh pr` の後に `gh pr checks` など）
+  //    同じ定義を再発火させない。
   const trigger = oneLine(command)
   const output = outputOf(payload)
   for (const f of followups) {
@@ -571,21 +442,11 @@ async function afterBash(io: Io, payload: Dict): Promise<ScriptResult> {
     if (!pyRegExp(f.when).test(command)) continue
     if (f.unless !== undefined && pyRegExp(f.unless).test(command)) continue
     const resolved = resolveArgs(f, command, output)
-    if (resolved) {
-      const p = await launch(io, f, resolved.command, trigger, payload, now)
-      if (p) {
-        state.entries.push(p)
-        changed = true
-        notes.push(t('followup.started', { trigger, label: labelOf(f), command: resolved.command }))
-        continue
-      }
-      // 起動できなければ Claude に求める。
-    }
     const p: Pending = {
       name: f.name,
       description: f.description,
-      mode: 'claude',
       run: f.run,
+      ...(resolved ? { command: resolved.command } : {}),
       hints: hintsOf(f),
       body: f.body,
       trigger,
@@ -593,6 +454,7 @@ async function afterBash(io: Io, payload: Dict): Promise<ScriptResult> {
       attempts: 0,
       attempted: false,
       maxAttempts: f.maxAttempts,
+      ...(f.timeout !== undefined ? { timeout: f.timeout } : {}),
       createdAt: now,
     }
     state.entries.push(p)
@@ -604,7 +466,7 @@ async function afterBash(io: Io, payload: Dict): Promise<ScriptResult> {
   return notes.length > 0 ? context('PostToolUse', notes.join('\n\n')) : ok()
 }
 
-/** PostToolUse(Bash): きっかけに一致したら後続コマンドを起動するか実行を求め、保留中の後続コマンドが成功したら完了を伝える。 */
+/** PostToolUse(Bash): きっかけに一致したら後続コマンドの起動を求め、保留中の後続コマンドが起動されたら保留を消して伝える。 */
 export async function followupAfterBash(io: Io, payload: Dict): Promise<ScriptResult> {
   try {
     return await afterBash(io, payload)
@@ -641,7 +503,7 @@ async function afterBashFailure(io: Io, payload: Dict): Promise<ScriptResult> {
   return context('PostToolUseFailure', t('followup.failed', { command: oneLine(command), name: p.name, attempt: p.attempts, max: p.maxAttempts }))
 }
 
-/** PostToolUseFailure(Bash): 保留中の後続コマンド（Claude 実行）が失敗したら、理由を見て組み立て直すよう伝える（上限で打ち切り）。 */
+/** PostToolUseFailure(Bash): 保留中の後続コマンドの起動が失敗したら、理由を見て組み立て直すよう伝える（上限で打ち切り）。 */
 export async function followupAfterBashFailure(io: Io, payload: Dict): Promise<ScriptResult> {
   try {
     return await afterBashFailure(io, payload)
@@ -653,19 +515,10 @@ export async function followupAfterBashFailure(io: Io, payload: Dict): Promise<S
 
 // ---- Stop / SubagentStop ----
 
-const block = (reason: string): ScriptResult => ({ exitCode: 2, stdout: `${JSON.stringify({ decision: 'block', reason })}\n`, stderr: `${reason}\n` })
-
 async function stopCheck(io: Io, payload: Dict): Promise<ScriptResult> {
   const stateId = stateIdOf(payload)
   const state = await loadPending(io, stateId, await io.now())
-  const t = tr(io.lang)
-
-  // hook 実行: 走っているものは終了（または timeout）まで待ち合わせ、結果を理由にして一度止める（Claude が報告してから終わる）。
-  const results = await collect(io, stateId, state, true)
-  if (results.length > 0) return block(results.join('\n\n'))
-
-  // Claude 実行: 一度も実行されていない保留があれば実行を求める。
-  const waiting = state.entries.filter((p) => p.mode === 'claude' && !p.attempted)
+  const waiting = state.entries.filter((p) => !p.attempted)
   if (waiting.length === 0) {
     if (state.stopBlocks !== 0) {
       state.stopBlocks = 0
@@ -673,9 +526,10 @@ async function stopCheck(io: Io, payload: Dict): Promise<ScriptResult> {
     }
     return ok()
   }
+  const t = tr(io.lang)
   state.stopBlocks += 1
   if (state.stopBlocks >= MAX_STOP_BLOCKS) {
-    // 諦める: 一度も実行されない保留を捨て、実行済みの保留（失敗の再試行待ち）は残す。
+    // 諦める: 一度も起動されない保留を捨て、起動済みの保留（失敗の再試行待ち）は残す。
     state.entries = state.entries.filter((p) => p.attempted)
     state.stopBlocks = 0
     await savePending(io, stateId, state)
@@ -683,14 +537,12 @@ async function stopCheck(io: Io, payload: Dict): Promise<ScriptResult> {
   }
   await savePending(io, stateId, state)
   const lines = [t('followup.stopHeader', { attempt: state.stopBlocks, max: MAX_STOP_BLOCKS })]
-  for (const p of waiting) lines.push(t('followup.stopItem', { label: labelOf(p), run: p.run, command: p.trigger }))
-  return block(lines.join('\n'))
+  for (const p of waiting) lines.push(t('followup.stopItem', { label: labelOf(p), run: p.command ?? p.run, command: p.trigger }))
+  const reason = lines.join('\n')
+  return { exitCode: 2, stdout: `${JSON.stringify({ decision: 'block', reason })}\n`, stderr: `${reason}\n` }
 }
 
-/**
- * Stop / SubagentStop: 走っている hook 実行は終わるまで待って結果を渡し（一度ブロック）、一度も実行されていない
- * Claude 実行の保留があれば停止をブロックする（MAX_STOP_BLOCKS 回で諦める）。
- */
+/** Stop / SubagentStop: 一度も起動されていない後続コマンドがあれば停止をブロックする（MAX_STOP_BLOCKS 回で諦める）。起動済みのものは待たない。 */
 export async function followupStopCheck(io: Io, payload: Dict): Promise<ScriptResult> {
   try {
     return await stopCheck(io, payload)
@@ -702,23 +554,18 @@ export async function followupStopCheck(io: Io, payload: Dict): Promise<ScriptRe
 
 // ---- SessionStart ----
 
-/** SessionStart: startup / clear なら自セッションの保留と実行ファイルを消す。24 時間より古いものはいつでも消す。 */
+/** SessionStart: startup / clear なら自セッションの保留を消す。24 時間より古い保留はいつでも消す。 */
 export async function resetFollowups(io: Io, payload: Dict): Promise<ScriptResult> {
   try {
+    const dir = pendingDir(io)
     const sessionId = safeName(jqStr(payload.session_id) || 'unknown')
     const source = jqStr(payload.source)
-    const fresh = source === 'startup' || source === 'clear'
     const now = await io.now()
     const doomed: string[] = []
-    for (const [dir, ext] of [
-      [join(followupDir(io), '.pending'), '.json'],
-      [runsDir(io), ''],
-    ] as const) {
-      for (const e of await io.list(dir)) {
-        if (e.kind !== 'file' || !e.name.endsWith(ext)) continue
-        const mine = e.name.startsWith(`${sessionId}.`) || e.name.startsWith(`${sessionId}--`)
-        if ((mine && fresh) || e.mtimeMs < now - DAY_MS) doomed.push(join(dir, e.name))
-      }
+    for (const e of await io.list(dir)) {
+      if (e.kind !== 'file' || !e.name.endsWith('.json')) continue
+      const mine = e.name === `${sessionId}.json` || e.name.startsWith(`${sessionId}--`)
+      if ((mine && (source === 'startup' || source === 'clear')) || e.mtimeMs < now - DAY_MS) doomed.push(join(dir, e.name))
     }
     await io.removeFiles(doomed)
   } catch {

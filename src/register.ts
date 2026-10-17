@@ -8,7 +8,7 @@ import { feedbackGuard } from './feedback-guard.ts'
 import { feedbackInject } from './feedback-inject.ts'
 import { feedbackPostEdit } from './feedback-post-edit.ts'
 import { feedbackStopCheck } from './feedback-stop-check.ts'
-import { followupAfterBash, followupAfterBashFailure, followupCollect, followupStopCheck, resetFollowups } from './followup.ts'
+import { followupAfterBash, followupAfterBashFailure, followupGuard, followupStopCheck, resetFollowups } from './followup.ts'
 import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { notification } from './notification.ts'
@@ -127,8 +127,7 @@ export const register: Register = (on, options) => {
     const mine: Outcome = {}
     const text = await createIo($, options).then((io) => loadRules(io, options.rulesFile))
     if (text !== '') mine.additionalContext = [text]
-    // 終わった後続コマンド（followup の hook 実行）の結果が残っていれば、ここでも渡す。
-    const inject = await runSteps($, options, 'UserPromptSubmit', [(io) => feedbackInject(io), (io) => followupCollect(io, e, 'UserPromptSubmit')])
+    const inject = await runSteps($, options, 'UserPromptSubmit', [(io) => feedbackInject(io)])
     return withNext(next, e, merge(mine, inject))
   })
 
@@ -139,8 +138,9 @@ export const register: Register = (on, options) => {
     const payload = preToolUsePayload(guardEvent, tool, await $guard.session.id(), await $guard.session.cwd())
     // settings では `|| true` 付きなので、deny 以外（exit 2 以外）は無視していた。
     const step: Step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload)
-    // Bash は、開始時刻を控えてから guard を評価する（終了後の変更ファイル追跡用）。
-    const steps: Step[] = tool === 'Bash' ? [(io) => bashStarted(io, payload), step] : [step]
+    // Bash は、開始時刻を控えてから guard を評価する（終了後の変更ファイル追跡用）。保留中の後続コマンド（followup）を前景で
+    // 起動しようとしたら deny して run_in_background: true で打ち直させる。
+    const steps: Step[] = tool === 'Bash' ? [(io) => bashStarted(io, payload), step, (io) => followupGuard(io, payload)] : [step]
     const mine = await runSteps($guard, options, 'PreToolUse', steps)
     // 返す判定は deny / ask だけ（allow は返さず、ユーザーの判断に委ねる）。他の出力（warn）は stderr なので返す値に載らない。
     // ディレクトリの検査が判定の種類を読み取れるよう、返り値は固定のキーで書き、判定しないときはイベントをそのまま次へ渡す。
@@ -151,26 +151,25 @@ export const register: Register = (on, options) => {
   })
 
   on('classic.PostToolUse', async ($, e, next) => {
-    const tool = str(e.tool_name)
-    let steps: Step[]
-    if (/^(Agent|Task)$/.test(tool)) {
+    if (/^(Agent|Task)$/.test(str(e.tool_name))) {
       // 終わったサブエージェントの SubagentStop で走った hook の結果を、呼び出し元の context へ渡す（gate のログを読ませない）。
-      steps = [(io) => subagentReport(io, e)]
-    } else if (tool === 'Bash') {
+      const mine = await runSteps($, options, 'PostToolUse', [(io) => subagentReport(io, e)])
+      return withNext(next, e, mine)
+    }
+    if (str(e.tool_name) === 'Bash') {
       // Bash が実際に書き換えたファイルを拾い、Edit / Write と同じく feedback の post_edit（と、実行後に判定できる
       // pre_edit）で検査してから、メモに記録できたときだけ rules フェーズを走らせる。gate.yaml が無くても feedback の検査は動く。
-      // 最後に後続コマンド（followup）: きっかけに一致したら後続コマンドを起動するか実行を求め、保留中のものが終わっていれば結果を渡す。
-      steps = [...bashChangeSteps(e), (io) => followupAfterBash(io, e)]
-    } else if (/^(Write|Edit|MultiEdit)$/.test(tool)) {
-      // gate の実行より先に、軽い feedback の post_edit 検査を済ませる。
-      steps = [(io) => recordChanges(io, e), (io) => feedbackPostEdit(io, e), (io) => stopTestGate(io, 'rules', e)]
-    } else {
-      steps = []
+      // 最後に後続コマンド（followup）: きっかけに一致したら次のコマンドの起動を求め、保留中の後続コマンドが起動されたら保留を消す。
+      const mine = await runSteps($, options, 'PostToolUse', [...bashChangeSteps(e), (io) => followupAfterBash(io, e)])
+      return withNext(next, e, mine)
     }
-    // どのツールの後でも、バックグラウンドで走らせた後続コマンド（followup の hook 実行）が終わっていればその結果を渡す
-    // （Bash は followupAfterBash の中で渡す）。保留が無ければファイルを 1 つ読むだけで終わる。
-    if (tool !== 'Bash') steps.push((io) => followupCollect(io, e))
-    const mine = await runSteps($, options, 'PostToolUse', steps)
+    if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name))) return next(e)
+    // gate の実行より先に、軽い feedback の post_edit 検査を済ませる。
+    const mine = await runSteps($, options, 'PostToolUse', [
+      (io) => recordChanges(io, e),
+      (io) => feedbackPostEdit(io, e),
+      (io) => stopTestGate(io, 'rules', e),
+    ])
     return withNext(next, e, mine)
   })
 

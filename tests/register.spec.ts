@@ -671,7 +671,7 @@ describe('follow-up commands', () => {
       expect(ctx).toContain('  gh pr checks {{pr}} --watch')
       expect(ctx).toContain('  {{pr}}: PR 番号')
       const stop = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
-      expect(String(stop.block)).toContain('まだ実行していない後続コマンドがあります')
+      expect(String(stop.block)).toContain('まだ起動していない後続コマンドがあります')
       expect(String(stop.block)).toContain('- pr_checks: PR の CI を見届ける: `gh pr checks {{pr}} --watch`（きっかけ: `gh pr create --fill`）')
       // 後続コマンドが成功したら完了を伝え、Stop は通る（通知は出る）
       await m.call('classic.PreToolUse', { tool: 'Bash', command: 'gh pr checks 12 --watch', tool_use_id: 'tu2' })
@@ -687,7 +687,7 @@ describe('follow-up commands', () => {
       await m.call('classic.PostToolUse', bash('gh pr create'))
       const r = (await m.call('classic.PostToolUseFailure', bash('gh pr checks abc --watch', { error: 'Exit code 1\nno pull requests found' }))) as Out
       expect((r.additionalContext as string[]).join('\n')).toContain(
-        '[followup] 後続コマンド `gh pr checks abc --watch`（pr_checks）が失敗しました（試行 1/3）',
+        '[followup] 後続コマンド `gh pr checks abc --watch`（pr_checks）の起動が失敗しました（試行 1/3）',
       )
       // 一度実行されたので Stop は止めない
       const stop = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
@@ -730,30 +730,37 @@ describe('follow-up commands', () => {
       expect(main.block).toBeUndefined()
     }))
 
-  test('a follow-up whose arguments the hook fills runs in the background; its result comes back at the next hook or at Stop', () =>
+  test('a follow-up whose arguments the hook fills is handed over filled; a foreground launch is denied and a background one clears it', () =>
     withMod(async (m, _proj, _feedback, home) => {
       writeFollowup(
         home,
         'pr_checks',
-        "---\nname: pr_checks\nwhen: '^gh pr create'\nrun: 'echo checks for {{pr}}'\nargs:\n  pr:\n    pattern: 'pull/(\\d+)'\n---\n",
+        "---\nname: pr_checks\nwhen: '^gh pr create'\nrun: 'gh pr checks {{pr}} --watch'\nargs:\n  pr:\n    pattern: 'pull/(\\d+)'\n---\n",
       )
       const r = (await m.call('classic.PostToolUse', bash('gh pr create'))) as Out
-      expect((r.additionalContext as string[]).join('\n')).toBe(
-        '[followup] `gh pr create` を実行したので、後続コマンド（pr_checks）をバックグラウンドで開始しました: `echo checks for 12`。結果は終わり次第渡します（遅くとも終了（Stop）時に待ち合わせて渡します）。待たずに作業を続けてください。',
-      )
-      // 終わるまで待ってから Stop: 結果を理由に一度ブロックし、次の Stop は通る
+      const ctx = (r.additionalContext as string[]).join('\n')
+      expect(ctx).toContain('引数は埋めてあるので、このまま実行してください:\n  gh pr checks 12 --watch')
+      expect(ctx).toContain('必ず run_in_background: true で実行してください')
+      // 前景で起動しようとすると deny
+      const denied = (await m.call('classic.PreToolUse', { tool: 'Bash', command: 'gh pr checks 12 --watch', tool_use_id: 't2' })) as Out
+      expect(String(denied.deny)).toContain('後続コマンド（pr_checks）`gh pr checks 12 --watch` は run_in_background: true で実行してください')
+      // 背景なら通り、起動後は保留が消えて Stop も通る
+      let reached = false
+      await m.call('classic.PreToolUse', { tool: 'Bash', command: 'gh pr checks 12 --watch', run_in_background: true, tool_use_id: 't3' }, async () => {
+        reached = true
+        return {}
+      })
+      expect(reached).toBe(true)
+      const launched = (await m.call('classic.PostToolUse', {
+        session_id: 'sess-1',
+        tool_name: 'Bash',
+        tool_input: { command: 'gh pr checks 12 --watch', run_in_background: true },
+        tool_response: { backgroundTaskId: 'b1' },
+        tool_use_id: 't3',
+      })) as Out
+      expect((launched.additionalContext as string[]).join('\n')).toContain('（pr_checks）をバックグラウンドで開始しました')
       const stop = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: false })) as Out
-      expect(String(stop.block)).toMatch(
-        /^\[followup\] 後続コマンド `echo checks for 12`（pr_checks）が終了しました（exit 0、\d+s）。この結果をユーザーに報告してください（出力の全文: .*\.log）:\nchecks for 12$/,
-      )
-      const again = (await m.call('classic.Stop', { session_id: 'sess-1', stop_hook_active: true })) as Out
-      expect(again.block).toBeUndefined()
-      // 別のツールの PostToolUse でも渡る
-      await m.call('classic.PostToolUse', bash('gh pr create', { tool_use_id: 'tu2' }))
-      for (let i = 0; i < 50 && fs.readdirSync(path.join(home, 'followup', '.runs')).filter((n) => n.endsWith('.exit')).length === 0; i++)
-        await new Promise((r) => setTimeout(r, 50))
-      const read = (await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Read', tool_input: { file_path: '/x' }, tool_response: {} })) as Out
-      expect((read.additionalContext as string[]).join('\n')).toContain('（pr_checks）が終了しました（exit 0、')
+      expect(stop.block).toBeUndefined()
     }))
 
   test('SessionStart startup clears the pending follow-ups of the session', () =>
