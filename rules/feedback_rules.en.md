@@ -85,6 +85,7 @@ max_attempts: 3                     # optional. Failures to start before giving 
 
 - When asked, fill any remaining `{{...}}` with values inferred from the output of the previous command and the context, and run that command in your next Bash call, always with `run_in_background: true` (a foreground call is denied; pass the `timeout` too when one is given). Stopping is blocked until it has been started
 - Once started, keep working without waiting. When it finishes, Claude Code hands you the result; report it to the user
+- When a value the hook filled with a pattern disagrees with the output, or the message says a `pattern` did not match, run the command with the right value, then fix that argument's `pattern` in the definition file named in the message so it matches the output, and tell the user what you changed
 - When it fails, look at the error: if the command or its arguments were wrong, rebuild the correct command and run it again (a failure to start counts up to `max_attempts`). If the command was right and the failure is the result itself (for example failed CI checks), do not run it again; report that result
 - When the user asks for "run X whenever Y runs", propose a file in this format (ask before writing it)
 

@@ -394,12 +394,14 @@ describe('followup', () => {
       expect(resolveArgs(f, 'gh pr create -t a b', 'see https://github.com/o/r/pull/7')).toEqual({
         command: "gh pr checks 7 --title 'a b'",
         values: { pr: '7', t: 'a b' },
+        missed: [],
       })
-      expect(resolveArgs(f, 'gh pr create', 'no url')).toBeUndefined()
-      // 説明だけの引数は hook では埋まらない
-      expect(resolveArgs({ ...base, run: 'x {{a}}', args: { a: { from: 'output' as const, hint: 'h' } } }, '', '')).toBeUndefined()
+      // 一致しなかった pattern は missed に入り、他の値は残る
+      expect(resolveArgs(f, 'gh pr create -t a', 'no url')).toEqual({ values: { t: 'a' }, missed: ['pr'] })
+      // 説明だけの引数は hook では埋まらない（missed ではない）
+      expect(resolveArgs({ ...base, run: 'x {{a}}', args: { a: { from: 'output' as const, hint: 'h' } } }, '', '')).toEqual({ values: {}, missed: [] })
       // 穴が無ければそのまま
-      expect(resolveArgs({ ...base, run: 'gh pr checks --watch', args: {} }, '', '')).toEqual({ command: 'gh pr checks --watch', values: {} })
+      expect(resolveArgs({ ...base, run: 'gh pr checks --watch', args: {} }, '', '')).toEqual({ command: 'gh pr checks --watch', values: {}, missed: [] })
     })
 
     test('the filled command is handed to Claude, with the timeout to pass', async () => {
@@ -409,11 +411,23 @@ describe('followup', () => {
         [
           '[followup] `gh pr create --repo o/r` を実行したので、続けて次の後続コマンドを実行してください（pr_checks: PR を作ったら CI を見届ける）。引数は埋めてあるので、このまま実行してください:',
           '  gh pr checks 12 --repo o/r --watch',
+          '埋めた値（きっかけのコマンドの出力・コマンドから正規表現で取り出したもの）: pr = 12, repo = o/r',
+          `埋めた値が直前の出力と食い違っていれば（正規表現の取り違え）、正しい値に直して実行し、定義ファイル ${path.join(fu, 'pr_checks.md')} の該当する args の pattern もその出力に一致する形に直して、変更内容をユーザーに伝えてください。`,
           '落ちたチェックがあればログも見ること。',
           '次の Bash で、このコマンドを必ず run_in_background: true、timeout: 3600000 で実行してください（前景では止められます）。完了すると Claude Code が結果を渡すので、それをユーザーに報告してください。引数の誤りで失敗していたら、正しいコマンドに組み立て直して再実行してください。起動するまで終了（Stop）はブロックされます。',
         ].join('\n'),
       )
-      expect(await pending()).toMatchObject([{ name: 'pr_checks', command: 'gh pr checks 12 --repo o/r --watch', timeout: 3600, attempted: false }])
+      expect(await pending()).toMatchObject([
+        {
+          name: 'pr_checks',
+          command: 'gh pr checks 12 --repo o/r --watch',
+          values: { pr: '12', repo: 'o/r' },
+          missed: [],
+          path: path.join(fu, 'pr_checks.md'),
+          timeout: 3600,
+          attempted: false,
+        },
+      ])
       // Stop の一覧には埋めたコマンドが出る
       const stop = await followupStopCheck(io(), { session_id: 'sess-1' })
       expect(JSON.parse(stop.stdout).reason).toContain(
@@ -427,10 +441,18 @@ describe('followup', () => {
       expect(context(r)).toContain(
         '続けて次の後続コマンドを実行してください（pr_checks: PR を作ったら CI を見届ける）:\n  gh pr checks {{pr}} --repo {{repo}} --watch',
       )
+      // どちらの pattern も一致しない: 推測させ、定義の pattern を直させる
       expect(context(r)).toContain('  {{pr}}: PR 番号')
       expect(context(r)).toContain('  {{repo}}: （説明なし。文脈から推測する）')
-      expect(await pending()).toMatchObject([{ attempted: false }])
+      expect(context(r)).toContain(
+        `args.pr.pattern, args.repo.pattern がきっかけのコマンドの出力・コマンドに一致しませんでした。推測した値で実行したうえで、定義ファイル ${path.join(fu, 'pr_checks.md')} のその pattern をこの出力に一致する形に直し、変更内容をユーザーに伝えてください。`,
+      )
+      expect(await pending()).toMatchObject([{ attempted: false, values: {}, missed: ['pr', 'repo'] }])
       expect((await pending())[0]?.command).toBeUndefined()
+      // repo だけ埋まるきっかけ: 埋まった値はそのまま見せ、pr は推測させる
+      const half = await followupAfterBash(io(), created('gh pr create --repo o/r', { tool_use_id: 'tu9', tool_response: { stdout: 'no url here' } }))
+      expect(context(half)).toContain('  {{repo}}: o/r（hook が正規表現で埋めた値）')
+      expect(context(half)).toContain('  {{pr}}: PR 番号')
     })
 
     test('a foreground launch of a pending follow-up is denied; a background launch clears it and tells Claude the result will come', async () => {
@@ -462,7 +484,7 @@ describe('followup', () => {
         }),
       )
       expect(context(r)).toBe(
-        '[followup] 後続コマンド `gh pr checks 12 --repo o/r --watch`（pr_checks）をバックグラウンドで開始しました。待たずに作業を続けてください。完了すると Claude Code が結果を渡すので、それをユーザーに報告してください。引数の誤りで失敗していたら、正しいコマンドに組み立て直して再実行してください。',
+        `[followup] 後続コマンド \`gh pr checks 12 --repo o/r --watch\`（pr_checks）をバックグラウンドで開始しました。待たずに作業を続けてください。完了すると Claude Code が結果を渡すので、それをユーザーに報告してください。引数の誤りで失敗していたら、正しいコマンドに組み立て直して再実行してください。 引数は hook が定義ファイルの正規表現で埋めたものです。失敗が引数の誤りによるものなら、正しいコマンドで再実行し、定義ファイル ${path.join(fu, 'pr_checks.md')} の該当する args の pattern も直して、変更内容をユーザーに伝えてください。`,
       )
       expect(await pending()).toEqual([])
       expect((await followupStopCheck(io(), { session_id: 'sess-1' })).exitCode).toBe(0)

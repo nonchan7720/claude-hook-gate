@@ -94,6 +94,12 @@ export type Pending = {
   run: string
   /** hook が引数を埋めたコマンド。埋められなかったときは undefined（Claude が埋める）。 */
   command?: string
+  /** hook が正規表現で埋めた値（引数名 → 値）。 */
+  values: Record<string, string>
+  /** pattern はあるのに、きっかけの出力・コマンドに一致しなかった引数名（定義の pattern を直させる）。 */
+  missed: string[]
+  /** 定義ファイル（pattern を直させるときに示す）。 */
+  path: string
   /** Claude に見せる引数の説明。 */
   hints: Record<string, string>
   body: string
@@ -278,23 +284,36 @@ export const outputOf = (payload: Dict): string => {
  * 雛形の穴を hook で埋める。すべて埋まれば埋めたコマンド、1 つでも埋まらなければ undefined（Claude に埋めさせる）。
  * 値はシェルの 1 語として引用符で守る（出力から取る値は第三者が書けるので、雛形に素のまま差し込まない）。
  */
-export function resolveArgs(
-  f: Pick<Followup, 'run' | 'args'>,
-  command: string,
-  output: string,
-): { command: string; values: Record<string, string> } | undefined {
+export type ResolvedArgs = {
+  /** すべての穴が埋まったときの埋めたコマンド。1 つでも埋まらなければ undefined。 */
+  command?: string
+  /** 埋まった値（引数名 → 値）。 */
+  values: Record<string, string>
+  /** pattern はあるのに一致しなかった（または空だった）引数名。 */
+  missed: string[]
+}
+
+export function resolveArgs(f: Pick<Followup, 'run' | 'args'>, command: string, output: string): ResolvedArgs {
   const values: Record<string, string> = {}
+  const missed: string[] = []
+  let complete = true
   for (const name of placeholders(f.run)) {
     const spec = f.args[name]
-    if (!spec?.pattern) return undefined
+    if (!spec?.pattern) {
+      complete = false
+      continue
+    }
     const m = pyRegExp(spec.pattern).exec(spec.from === 'command' ? command : output)
-    if (!m) return undefined
-    const value = (m[1] ?? m[0]).trim()
-    if (value === '') return undefined
+    const value = m ? (m[1] ?? m[0]).trim() : ''
+    if (value === '') {
+      missed.push(name)
+      complete = false
+      continue
+    }
     values[name] = value
   }
-  const filled = f.run.replace(PLACEHOLDER_RE, (_, name: string) => shellQuote(values[name] ?? ''))
-  return { command: filled, values }
+  if (!complete) return { values, missed }
+  return { command: f.run.replace(PLACEHOLDER_RE, (_, name: string) => shellQuote(values[name] ?? '')), values, missed }
 }
 
 /** Claude に見せる引数の説明。 */
@@ -308,9 +327,9 @@ function parsePending(text: string | undefined, now: number): PendingState {
     const data: unknown = JSON.parse(text)
     if (!isDict(data) || !Array.isArray(data.entries)) return { entries: [], stopBlocks: 0 }
     // 古い保留（クラッシュなどの残骸）は捨てる。
-    const entries = data.entries.filter(
-      (e): e is Pending => isDict(e) && typeof e.run === 'string' && typeof e.createdAt === 'number' && e.createdAt >= now - DAY_MS,
-    )
+    const entries = data.entries
+      .filter((e): e is Dict => isDict(e) && typeof e.run === 'string' && typeof e.createdAt === 'number' && e.createdAt >= now - DAY_MS)
+      .map((e) => ({ values: {}, missed: [], path: '', ...e }) as unknown as Pending)
     return { entries, stopBlocks: toCount(data.stopBlocks) }
   } catch {
     return { entries: [], stopBlocks: 0 }
@@ -361,15 +380,23 @@ const labelOf = (p: { name: string; description: string }): string => (p.descrip
 export function instructionText(lang: Lang, p: Pending): string {
   const t = tr(lang)
   const lines: string[] = []
+  const valuesText = Object.entries(p.values)
+    .map(([k, v]) => `${k} = ${v}`)
+    .join(', ')
   if (p.command !== undefined) {
     lines.push(t('followup.triggeredFilled', { command: p.trigger, label: labelOf(p) }), `  ${p.command}`)
+    // 正規表現が取り違えていたら（埋めた値が出力と食い違う）、値を直して実行し、定義の pattern も直させる。
+    lines.push(t('followup.filledValues', { values: valuesText }), t('followup.filledCheck', { path: p.path }))
   } else {
     lines.push(t('followup.triggered', { command: p.trigger, label: labelOf(p) }), `  ${p.run}`)
     const names = placeholders(p.run)
     if (names.length > 0) {
       lines.push(t('followup.argsHeader'))
-      for (const n of names) lines.push(`  {{${n}}}: ${p.hints[n] ?? t('followup.argNoHint')}`)
+      for (const n of names)
+        lines.push(`  {{${n}}}: ${p.values[n] !== undefined ? t('followup.argFilled', { value: p.values[n] }) : (p.hints[n] ?? t('followup.argNoHint'))}`)
     }
+    // pattern があるのに一致しなかった引数は、推測で埋めたうえで定義の pattern を直させる。
+    if (p.missed.length > 0) lines.push(t('followup.patternMissed', { keys: p.missed.map((n) => `args.${n}.pattern`).join(', '), path: p.path }))
   }
   if (p.body) lines.push(p.body)
   lines.push(p.timeout !== undefined ? t('followup.instructionTimeout', { ms: p.timeout * 1000 }) : t('followup.instruction'))
@@ -431,6 +458,7 @@ async function afterBash(io: Io, payload: Dict): Promise<ScriptResult> {
     state.entries = state.entries.filter((p) => p !== done)
     changed = true
     notes.push(t(inBackground(payload) ? 'followup.launched' : 'followup.done', { command: oneLine(command), name: done.name }))
+    if (inBackground(payload) && done.command !== undefined) notes[notes.length - 1] += ` ${t('followup.launchedFilled', { path: done.path })}`
   }
 
   // 2. きっかけに一致したら保留に積んで起動を求める。後続コマンド自身がそのきっかけに一致しても（`gh pr` の後に `gh pr checks` など）
@@ -446,7 +474,10 @@ async function afterBash(io: Io, payload: Dict): Promise<ScriptResult> {
       name: f.name,
       description: f.description,
       run: f.run,
-      ...(resolved ? { command: resolved.command } : {}),
+      ...(resolved.command !== undefined ? { command: resolved.command } : {}),
+      values: resolved.values,
+      missed: resolved.missed,
+      path: f.path,
       hints: hintsOf(f),
       body: f.body,
       trigger,
