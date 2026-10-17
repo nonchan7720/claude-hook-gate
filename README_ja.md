@@ -14,16 +14,17 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 
 | イベント | モジュール | 役割 |
 | --- | --- | --- |
-| SessionStart | `src/reset-gate.ts` | `startup` / `clear` のときだけ自セッションのゲート状態を消す。resume / compact では消さない。 |
+| SessionStart | `src/reset-gate.ts`、`src/followup.ts`（`resetFollowups`） | `startup` / `clear` のときだけ自セッションのゲート状態と保留中の後続コマンドを消す。resume / compact では消さない。 |
 | UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | ルールファイル（`rulesFile` のファイルがあればそれ、無ければ同梱の `rules/feedback_rules.md`。言語が英語なら `rules/feedback_rules.en.md`）と確定済みフィードバックルール（`count >= 3`）をコンテキストに追加する。 |
 | PreToolUse（Bash / Edit / Write / MultiEdit） | `src/feedback-guard.ts` | `pre_bash` / `pre_edit` の enforce を評価し、`count` に応じて deny / ask / warn する。 |
 | PostToolUse（Write / Edit / MultiEdit） | `src/record-changes.ts` → `src/feedback-post-edit.ts` → `src/stop-test-gate.ts`（`rules`） | 変更ファイルを記録し、`post_edit` の enforce を編集後のファイル全体に対して評価（`count` に応じて block / warn）したあと、`.claude/gate.yaml` の該当ルールを実行する（`src/gate.ts` 経由）。 |
 | PreToolUse（Bash） | `src/bash-changes.ts`（`bashStarted`）。`feedback-guard` の前 | コマンドの開始時刻を控える（`bash_started.<session>--<tool_use_id>.json`）。`.claude/gate.yaml` があるプロジェクトでは `.claude/.gate-status/` に、無いプロジェクトでは `~/.claude/feedback/.bash_started/`（`.ask_state` と同じ feedback 側の状態置き場）に置く。後者は `post_edit` / `pre_edit` の enforce を持つ有効な feedback ルールがあるときだけで、`gate.yaml` の無いプロジェクトの作業ツリーには状態ファイルを作らない。 |
-| PostToolUse（Bash） | `src/bash-changes.ts` → `src/feedback-bash-edit.ts` → `src/stop-test-gate.ts`（`rules`） | コマンドが実際に書き換えたファイル（cwd の作業ツリーと `.claude/worktrees/` 配下の各 worktree で、git の変更・未追跡ファイルと、コマンド中に作られたコミットが触ったファイルのうち、mtime がコマンド開始以降のもの）を拾う。heredoc・`python`・`sed -i` などで書いても、Edit / Write に掛かる検査が抜けないようにするため。各ファイルを、Edit / Write の後と同じく `post_edit` の enforce でファイル全体に対して評価し、実行後に判定できる `pre_edit` の enforce（下記）も評価して、全ファイルの結果を 1 つの block / warn にまとめる。そのあと `.claude/gate.yaml` があるときだけ変更ファイルとして記録し、記録があれば該当ルールを実行する。feedback の検査は `gate.yaml` が無くても動く。git の履歴・作業ツリー操作（rebase / checkout / merge など）は検査も記録もしない。 |
+| PostToolUse（Bash） | `src/bash-changes.ts` → `src/feedback-bash-edit.ts` → `src/stop-test-gate.ts`（`rules`）→ `src/followup.ts`（`followupAfterBash`） | コマンドが実際に書き換えたファイル（cwd の作業ツリーと `.claude/worktrees/` 配下の各 worktree で、git の変更・未追跡ファイルと、コマンド中に作られたコミットが触ったファイルのうち、mtime がコマンド開始以降のもの）を拾う。heredoc・`python`・`sed -i` などで書いても、Edit / Write に掛かる検査が抜けないようにするため。各ファイルを、Edit / Write の後と同じく `post_edit` の enforce でファイル全体に対して評価し、実行後に判定できる `pre_edit` の enforce（下記）も評価して、全ファイルの結果を 1 つの block / warn にまとめる。そのあと `.claude/gate.yaml` があるときだけ変更ファイルとして記録し、記録があれば該当ルールを実行する。feedback の検査は `gate.yaml` が無くても動く。git の履歴・作業ツリー操作（rebase / checkout / merge など）は検査も記録もしない。最後に[後続コマンド](#follow-up-commands): コマンドが定義したきっかけに一致したら後続コマンドの実行を Claude に求め、コマンドが保留中の後続コマンドだったなら完了にする。 |
+| PostToolUseFailure（Bash） | `src/followup.ts`（`followupAfterBashFailure`） | 失敗した（非 0 終了の）コマンドが保留中の後続コマンドだったとき、エラーを見てコマンドを組み立て直して再実行するか、失敗を結果として報告するよう Claude に伝える。`max_attempts` 回で打ち切る。 |
 | PreToolUse（Agent / SendMessage）、任意 | `src/agent-launch-guard.ts` | `agentLaunchGuard` が `true` のときだけ有効。サブエージェントへ指示を送る前に、送信本文を見せて確認する。 |
 | Notification | `src/notification.ts`（`notify`） | 確認待ちのときにデスクトップ通知（`terminal-notifier` が必要、macOS）。 |
-| Stop | `src/all-stop.ts` | ゲートの `checks` フェーズ（直っていない rules の失敗を再実行し、予約された consistency checks を実行）、`src/feedback-stop-check.ts`、`stop` 通知を順に実行する。 |
-| SubagentStop | ゲートの `checks` フェーズ、`src/feedback-stop-check.ts`、続けて `src/subagent-report.ts`（`saveSubagentReport`） | サブエージェント向けの同じゲートと `stop_check` ルール。結果は呼び出し元のエージェントへ渡すために控えます（[サブエージェントの結果](#results-of-subagents)）。 |
+| Stop | `src/all-stop.ts` | 後続コマンドの確認（`src/followup.ts`。一度も実行されていない後続コマンドがある間はブロック）、ゲートの `checks` フェーズ（直っていない rules の失敗を再実行し、予約された consistency checks を実行）、`src/feedback-stop-check.ts`、`stop` 通知を順に実行する。 |
+| SubagentStop | 後続コマンドの確認、ゲートの `checks` フェーズ、`src/feedback-stop-check.ts`、続けて `src/subagent-report.ts`（`saveSubagentReport`） | サブエージェント向けの同じ後続コマンドの確認・ゲート・`stop_check` ルール（サブエージェントの中で発火した後続コマンドはそのサブエージェントが実行する）。結果は呼び出し元のエージェントへ渡すために控えます（[サブエージェントの結果](#results-of-subagents)）。 |
 | PostToolUse（Agent） | `src/subagent-report.ts`（`subagentReport`） | 終わったサブエージェントの gate / `stop_check` の結果を、呼び出し元のエージェントの context に追加します。 |
 
 ### Bash で書いたファイル
@@ -40,6 +41,37 @@ Bash コマンドは、実行前には何が書かれるか分からないので
 ```
 
 渡すのは最後の SubagentStop（サブエージェントが実際に止まった回）の結果です: `[gate] 検証がすべて通りました: ...`、`checks` フェーズの要約、または `MAX_ATTEMPTS` 回で打ち切ったときの失敗の内容と、`stop_check` の warn（またはその打ち切り）。成功報告の直後の Stop は gate のコマンドを実行しないので、直前の回の「検証がすべて通りました」を残します。何も実行されず何も見つからなかったときは何も追加しません。バックグラウンドで起動したサブエージェントは PostToolUse の後に終わるため、結果は渡されません。そうして残ったファイルは、他の状態ファイルと同じくセッション開始時の `reset-gate` が消します（`startup` / `clear`、または 24 時間超）。
+
+### 後続コマンド
+
+<a id="follow-up-commands"></a>`src/followup.ts`。Bash のコマンドが、定義ファイルに書いたきっかけに一致したら、そこに書いた後続コマンドを Claude に実行させ、実行されるまで見届けます。Claude が埋めるのは引数だけです。典型は `gh pr create` のあとに、作った PR の番号で `gh pr checks <番号> --watch` を走らせる場合です。Claude Code 自身のバックグラウンド実行はコマンドを Claude が決めるので見当違いなことがありますが、ここではきっかけとコマンドは人間が書き、`{{...}}` の引数だけを Claude がきっかけのコマンドの出力から推測します。hook はモデルを呼べないので引数を自分では埋められません。そのためコマンドの実行も Claude が通常の Bash（あなたの権限設定を通ります）で行い、出力をツールの結果として受け取ります。
+
+定義ファイルは `~/.claude/followup/*.md`（グローバル）と `<project>/.claude/followup/*.md`（プロジェクト。同じ `name` ならプロジェクト側が優先）で、1 ファイル 1 件です:
+
+```markdown
+---
+name: pr_checks                     # 任意。省略時はファイル名
+description: PR を作ったら CI を見届ける
+when: '^gh pr create\b'             # 必須。Bash のコマンドにマッチする正規表現（pre_bash と同じ Python re の書き方）
+unless: '--dry-run'                 # 任意。マッチしたら発火しない
+run: 'gh pr checks {{pr}} --watch'  # 必須。後続コマンド。{{name}} は Claude が埋める引数
+args:                               # 任意。引数ごとの埋め方
+  pr: gh pr create の出力にある PR の URL（.../pull/N）の N
+max_attempts: 3                     # 任意。失敗を何回で打ち切るか（既定 3）
+---
+
+任意の本文: 補足の指示。そのまま Claude に渡されます（結果の扱い方など）。
+```
+
+`expires`・`projects`・`when_exists` は feedback ルールと同じに働きます。壊れたファイル（frontmatter が読めない、`when` / `run` が無い、使えない正規表現）はそのファイルだけを飛ばし、`~/.claude/feedback/.errors.jsonl` に記録します。
+
+- **PostToolUse（Bash）**: 成功したコマンドが `when` に一致し `unless` に一致しなければ、後続コマンドを保留に積み、`run` の雛形・`args` の説明・本文を、「`{{...}}` を埋めて次の Bash で実行し、結果を報告せよ」という指示とともに追加コンテキストで Claude に渡します。きっかけのコマンドの出力は Claude のコンテキストにすでにあるので、引数はそこから取ります。
+- 引数を埋めたコマンドは形で見分けます。各 `{{...}}` はシェルの 1 語か引用符付きの文字列に、空白は任意の空白列に一致し、前後の付け足し（`cd x && ...`、`2>&1`）も許します。そのコマンドが成功したら保留を消し、結果を報告に含めるよう伝えます。コマンドの出力は通常どおり Bash の結果として Claude に届きます。
+- **PostToolUseFailure（Bash）**: 埋めたコマンドが失敗（非 0 終了）したら、試行回数とともに、コマンドや引数が誤っていればエラーから正しいコマンドに組み立て直して再実行するよう、コマンドが正しくて失敗がそのまま結果（CI の失敗など）ならそれを報告するよう伝えます。`max_attempts` 回失敗したら打ち切りのメッセージを出して保留を消します。あなたが中断したコマンドは黙って消します。
+- **Stop / SubagentStop**: 一度も実行されていない保留がある間は、保留中のコマンドの一覧を理由に停止をブロックします（gate の検証より先に）。実行して失敗した後続コマンドは止めません（結果はすでに Claude とあなたに届いています）。3 回続けてブロックしたら要求を取り下げます。
+- サブエージェントの中で発火した後続コマンドは、そのサブエージェントが実行します。後続コマンド自身は同じ定義を再発火させませんが、別の定義のきっかけにはなるので、後続コマンドを連鎖させられます。
+
+保留は `~/.claude/followup/.pending/<session>[--<agent>].json` に置き、SessionStart（`startup` / `clear`）と 24 時間経過で消します。ディレクトリ（定義と状態）は `CLAUDE_FOLLOWUP_DIR` で変更できます。
 
 ### エージェント起動ガード（任意）
 
@@ -85,7 +117,10 @@ flowchart LR
   BC --> BE["feedback-bash-edit<br/>(post_edit + pre_edit)"]
   BE --> S
   S --> SG[gate]
+  EB --> FU[followup]
+  EF[PostToolUseFailure: Bash] --> FU
   X[Stop] --> A[all-stop]
+  A --> FU2[followup: stop check]
   A --> C[stop-test-gate: checks]
   A --> F[feedback-stop-check]
   C --> SG
@@ -139,6 +174,7 @@ flowchart LR
 
 - プロジェクトの `.claude/gate.yaml`（オプトイン。無ければゲートは何もしません）。書式は `scripts/gate.schema.json`、既定ポリシーは `scripts/dogwood/` にあります。
 - `~/.claude/feedback/*.md`: frontmatter（`name`、`description`、`type`、`count`、任意で `enforce`、`expires`、`projects`、`when_exists`）付きのフィードバックルール。`count >= 3` のルールが注入・強制されます。`expires`（`YYYY-MM-DD` ならその日の終わり（UTC）まで有効、または ISO 8601 日時）を過ぎたルールは無効になり、`projects`（プロジェクトディレクトリの絶対パスにマッチする glob の文字列または配列。先頭の `~` は `HOME` に展開）はマッチするプロジェクトに、`when_exists`（プロジェクトルート相対の glob の文字列または配列）は1つでも存在するプロジェクトに適用を絞ります。指定したキーすべてを満たしたときだけ有効で、解釈できない `expires` は無視されます。これらの絞り込みはグローバルとプロジェクトをマージして読む経路にだけかかり、プロジェクト側の同名ルールが無効ならグローバル側も使われません。ディレクトリは `CLAUDE_FEEDBACK_DIR` で変更できます。プロジェクトの `.claude/feedback/*.md` も読み込まれ、グローバルと同じ `name` のルールがあればプロジェクト側が優先されます。
+- `~/.claude/followup/*.md` と `<project>/.claude/followup/*.md`: [後続コマンド](#follow-up-commands)の定義（`when`、`run`、任意で `name`、`description`、`unless`、`args`、`max_attempts`、上記と同じ `expires` / `projects` / `when_exists`）。ディレクトリは `CLAUDE_FOLLOWUP_DIR` で変更できます。
 - <a id="broken-rules"></a>壊れたルール: 1つのルールファイルの不備で、他のルールまで無効になることはありません。frontmatter が YAML として読めないファイルは、そのファイルだけを飛ばします。`enforce` がリストでない（`- ` の書き忘れなど）ルールは `enforce` を空として扱い、`enforce` の要素のうち辞書でないもの（`- ` の後が空など）や、`when` / `unless` が使えない正規表現のものは、その要素だけを捨てます（ルールの他の部分は効きます）。評価中に例外になった要素も、その要素だけを飛ばします。正規表現は Python の `re` の書き方で書き、JavaScript で実行します。先頭の `(?i)` / `(?s)` / `(?m)`、`(?P<name>...)`、`(?P=name)`、`\A` / `\Z` / `\z`（テキスト全体の先頭・末尾。`pre_edit` / `post_edit` の複数行モードでも同じ意味）は読み替えます。先頭の `(?x)` と、JavaScript が受け付けない書き方（途中の `x(?i)y` のようなインラインフラグ、`a*+`、`(?#...)`、`(?P>name)` など）は、その要素を不正として扱います。壊れたファイル・要素は、ファイルと理由を `~/.claude/feedback/.errors.jsonl`（`.violations.jsonl` と同じ場所）に 1 回だけ記録し、直すまで毎回のプロンプトで注入するコンテキストの先頭に一覧を出します（「次のルールファイルが読めず無効になっています: ...」）。`/correct` でも `broken` の提案として報告します。feedback の hook が作業を止めないために握りつぶす内部エラーも、同じファイルに記録します。
 - ルールファイル: プロンプトごとにコンテキストへ追加されます。既定では同梱の `rules/feedback_rules.md`（日本語）か `rules/feedback_rules.en.md`（英語）を、上記の言語に応じて使います。丸ごと差し替えるには、`rulesFile` のパス（既定は `~/.claude/feedback-gate/feedback_rules.md`。プラグイン設定で変更可、先頭の `~` は展開されます）に自分のファイルを置いてください。そのファイルがあれば言語によらず同梱版の代わりに使われます（両方は入りません）。置き場所に `~/.claude/rules/` は避けてください。Claude Code 自身がこのディレクトリを読み込むため、二重に入ってしまいます。
 
@@ -194,9 +230,9 @@ checks フェーズ（Stop / SubagentStop）で 1 件以上のコマンドが実
 レビューする人とインストールする人向けに、このプラグインが何を読み、何を実行し、何を書き、何を判定するかをまとめます。
 
 - **ネットワーク**: プラグイン自身のコードはネットワークに何も送りません（HTTP クライアントを持ちません）。データがマシンの外に出るのは、プラグインが代わりに起動するプログラム（下記）を通したときだけです。つまり、あなたが `.claude/gate.yaml` やフィードバックルールの `check` に書いたコマンド（あなたの権限で動きます）と、macOS のデスクトップ通知です。
-- **認証情報**: トークン・鍵・パスワードは読まず、必要ともしません。読む環境変数は `CLAUDE_FEEDBACK_DIR`、`DOGWOOD_BIN`、`FEEDBACK_GATE_LANG`、`HOME`、`LANG`、`LC_ALL`、`LC_MESSAGES`、`PATH`、`TERM_PROGRAM`、`__CFBundleIdentifier` だけです（ファイルやプログラムの場所、メッセージの言語を決めるため）。`gate.yaml` やルールの `check` に書いたコマンドは、あなたが自分で実行するコマンドと同じく、あなたの環境で動きます。
-- **会話から読むもの**: Bash / Edit / Write / MultiEdit の呼び出しの入力（コマンド、ファイルパス、新しい内容）。フィードバックルールとの照合と、変更されたファイルの把握に使います。`Agent` / `SendMessage` の prompt と message は、`agentLaunchGuard` が有効なときだけ、確認画面に表示するために読みます。Notification イベントの文面は、デスクトップ通知に載せるために読みます。トランスクリプトは読みません。
-- **ディスクから読むもの**: フィードバックルール（`~/.claude/feedback/*.md`、`<project>/.claude/feedback/*.md`）、ルールファイル、`.claude/gate.yaml`、自分の状態ファイル（下記）、Claude が編集したファイル、git から見た作業ツリーの状態。
+- **認証情報**: トークン・鍵・パスワードは読まず、必要ともしません。読む環境変数は `CLAUDE_FEEDBACK_DIR`、`CLAUDE_FOLLOWUP_DIR`、`DOGWOOD_BIN`、`FEEDBACK_GATE_LANG`、`HOME`、`LANG`、`LC_ALL`、`LC_MESSAGES`、`PATH`、`TERM_PROGRAM`、`__CFBundleIdentifier` だけです（ファイルやプログラムの場所、メッセージの言語を決めるため）。`gate.yaml` やルールの `check` に書いたコマンドは、あなたが自分で実行するコマンドと同じく、あなたの環境で動きます。
+- **会話から読むもの**: Bash / Edit / Write / MultiEdit の呼び出しの入力（コマンド、ファイルパス、新しい内容）。フィードバックルールとの照合、変更されたファイルの把握、後続コマンドのきっかけと保留中のコマンドの照合に使います（失敗した Bash のエラー文は読まず、コマンドだけを見ます）。`Agent` / `SendMessage` の prompt と message は、`agentLaunchGuard` が有効なときだけ、確認画面に表示するために読みます。Notification イベントの文面は、デスクトップ通知に載せるために読みます。トランスクリプトは読みません。
+- **ディスクから読むもの**: フィードバックルール（`~/.claude/feedback/*.md`、`<project>/.claude/feedback/*.md`）、後続コマンドの定義（`~/.claude/followup/*.md`、`<project>/.claude/followup/*.md`）、ルールファイル、`.claude/gate.yaml`、自分の状態ファイル（下記）、Claude が編集したファイル、git から見た作業ツリーの状態。
 - **起動するプログラム**:
   - `sh -c` で、`.claude/gate.yaml` のコマンドとフィードバックルールの `check`（どちらもあなたが書くもので、プラグインは同梱しません）。
   - `git`（`rev-parse`、`ls-files`、`diff`、`log`。読み取りのみ）で、リポジトリのルートと、Bash のコマンドが変更したファイルを調べます。
@@ -206,10 +242,11 @@ checks フェーズ（Stop / SubagentStop）で 1 件以上のコマンドが実
 - **書き込むファイル**:
   - `<project>/.claude/.gate-status/`: gate の状態、コマンドのログ、ロック（プロジェクトに `.claude/gate.yaml` があるときだけ）。
   - `~/.claude/feedback/`: `.violations.jsonl`、`.errors.jsonl`、`.count_state/`、`.ask_state/`、`.bash_started/`。
+  - `~/.claude/followup/.pending/`: 実行待ちの後続コマンド（セッション・エージェントごと）。
   - フィードバックルールのファイル（Claude が従う指示）の frontmatter にある `count:` の行。`autoCount` が有効なときにルール違反があると書き換えます（プラグインの設定で無効にできます）。`/correct apply` でも書き換えます。ファイルのそれ以外の部分は変えません。
   - 設定ファイル、`CLAUDE.md`、ビルドや起動のファイル、フックの設定は書きません。
 - **権限の判定**（PreToolUse）: 返すのは `deny` か `ask` だけで、`allow` は返しません。呼び出しを厳しくすることはあっても、あなた自身の権限確認を飛ばすことはありません。判定するのは、Bash / Edit / Write / MultiEdit でフィードバックルールに一致したとき（ルールの `count` / `severity` により `deny` か `ask`）と、`agentLaunchGuard` が有効なときの `Agent` / `SendMessage`（全文を見せて `ask`）だけです。それ以外はイベントをそのまま次へ渡します。権限モード、設定、エージェント、Remote Control は変えません。
-- **追加するコンテキスト**: UserPromptSubmit で、ルールファイルと確定したフィードバックルール（`count >= 3`）をコンテキストに加えます。PostToolUse・Stop・SubagentStop では、gate の結果とルール違反を Claude に返します（フィードバックかブロックの理由として）。PostToolUse(Agent) では、終わったサブエージェントの結果を呼び出し元のコンテキストに加えます。
+- **追加するコンテキスト**: UserPromptSubmit で、ルールファイルと確定したフィードバックルール（`count >= 3`）をコンテキストに加えます。PostToolUse・Stop・SubagentStop では、gate の結果とルール違反を Claude に返します（フィードバックかブロックの理由として）。PostToolUse(Agent) では、終わったサブエージェントの結果を呼び出し元のコンテキストに加えます。PostToolUse(Bash) と PostToolUseFailure(Bash) では、実行すべき後続コマンド（定義ファイルの `run` の雛形・`args` の説明・本文）、その完了、失敗後の組み立て直しの要求を加えます。hook 自身が後続コマンドを実行することはありません。
 - **コマンド**: セッション開始時に `/correct` を登録し、`command.run` のフックはこのコマンドにだけ応答します。
 - **同梱ファイル**: `hooks/register.js` は `src/` から `scripts/build.ts` で作るもので、minify していません。`hooks/vendor/yaml.js` と `hooks/vendor/i18next.js` は npm パッケージの [`yaml`](https://www.npmjs.com/package/yaml) と [`i18next`](https://www.npmjs.com/package/i18next)（`package.json` / `bun.lock` で固定した版）で、ファイルを小さくするためだけに minify しています。検査で報告される getter、`Object.defineProperty`、Promise の判定（`typeof x.then === "function"`）は、この 2 つのライブラリ側のコードです（yaml のドキュメントのクラス、i18next の非同期読み込み）。プラグイン自身のコードは `Proxy`、`eval`、`new Function` を使っていません。
 

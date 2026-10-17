@@ -8,8 +8,9 @@ import { feedbackGuard } from './feedback-guard.ts'
 import { feedbackInject } from './feedback-inject.ts'
 import { feedbackPostEdit } from './feedback-post-edit.ts'
 import { feedbackStopCheck } from './feedback-stop-check.ts'
+import { followupAfterBash, followupAfterBashFailure, followupStopCheck, resetFollowups } from './followup.ts'
 import { tr } from './i18n.ts'
-import type { Io, ScriptResult } from './io.ts'
+import { type Io, ok, type ScriptResult } from './io.ts'
 import { notification } from './notification.ts'
 import { merge, type Outcome, toOutcome } from './outcome.ts'
 import type { Dict } from './pyutil.ts'
@@ -118,7 +119,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'correct' }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? '')))
 
   on('classic.SessionStart', async ($, e, next) => {
-    const mine = await runSteps($, options, 'SessionStart', [(io) => resetGate(io, e)])
+    const mine = await runSteps($, options, 'SessionStart', [(io) => resetGate(io, e), (io) => resetFollowups(io, e)])
     return withNext(next, e, mine)
   })
 
@@ -157,7 +158,8 @@ export const register: Register = (on, options) => {
     if (str(e.tool_name) === 'Bash') {
       // Bash が実際に書き換えたファイルを拾い、Edit / Write と同じく feedback の post_edit（と、実行後に判定できる
       // pre_edit）で検査してから、メモに記録できたときだけ rules フェーズを走らせる。gate.yaml が無くても feedback の検査は動く。
-      const mine = await runSteps($, options, 'PostToolUse', bashChangeSteps(e))
+      // 最後に後続コマンド（followup）: きっかけに一致したら次のコマンドの実行を求め、保留中の後続コマンドが成功したら完了を伝える。
+      const mine = await runSteps($, options, 'PostToolUse', [...bashChangeSteps(e), (io) => followupAfterBash(io, e)])
       return withNext(next, e, mine)
     }
     if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name))) return next(e)
@@ -167,6 +169,13 @@ export const register: Register = (on, options) => {
       (io) => feedbackPostEdit(io, e),
       (io) => stopTestGate(io, 'rules', e),
     ])
+    return withNext(next, e, mine)
+  })
+
+  // 失敗した Bash（非 0 終了）は PostToolUse ではなくここに来る。保留中の後続コマンドが失敗したら、理由を見て組み立て直すよう伝える。
+  on('classic.PostToolUseFailure', async ($, e, next) => {
+    if (str(e.tool_name) !== 'Bash') return next(e)
+    const mine = await runSteps($, options, 'PostToolUseFailure', [(io) => followupAfterBashFailure(io, e)])
     return withNext(next, e, mine)
   })
 
@@ -182,12 +191,27 @@ export const register: Register = (on, options) => {
 
   on('classic.SubagentStop', async ($, e, next) => {
     // 結果は呼び出し元の PostToolUse(Agent) へ渡すために控える（src/subagent-report.ts）。
+    // まだ実行されていない後続コマンド（followup）があればそれを先に求め、その回は gate も stop_check も走らせない（Stop の allStop と同じ順）。
+    let waiting = false
     let gate: ScriptResult | undefined
     let feedback: ScriptResult | undefined
     const mine = await runSteps($, options, 'SubagentStop', [
-      async (io) => (gate = await stopTestGate(io, 'checks', e)),
-      async (io) => (feedback = await feedbackStopCheck(io, e)),
-      (io) => saveSubagentReport(io, e, gate, feedback),
+      async (io) => {
+        const r = await followupStopCheck(io, e)
+        waiting = r.exitCode !== 0
+        return r
+      },
+      async (io) => {
+        if (waiting) return ok()
+        gate = await stopTestGate(io, 'checks', e)
+        return gate
+      },
+      async (io) => {
+        if (waiting) return ok()
+        feedback = await feedbackStopCheck(io, e)
+        return feedback
+      },
+      (io) => (waiting ? Promise.resolve(ok()) : saveSubagentReport(io, e, gate, feedback)),
     ])
     return withNext(next, e, mine)
   })

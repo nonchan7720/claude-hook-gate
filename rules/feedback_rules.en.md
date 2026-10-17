@@ -57,6 +57,31 @@ Use these for language-specific or temporary rules. When a global rule and a pro
 
 `.claude/feedback/<topic>.md`, `~/.claude/feedback/<topic>.md` — name the topic in English snake_case (e.g. `tsconfig_rootdir.md`, `test_mocking.md`)
 
+### Follow-up commands (followup)
+
+A command to run after another one is written by the user in `~/.claude/followup/<topic>.md` (global) or
+`.claude/followup/<topic>.md` (project). When the hook (`src/followup.ts`) sees the triggering command, it asks
+you to run the follow-up.
+
+```markdown
+---
+name: pr_checks                     # defaults to the file name
+description: Watch the CI of the PR that was just created
+when: '^gh pr create\b'             # required. The trigger (a regex matched against the Bash command)
+unless: '--dry-run'                 # optional. No trigger when it matches
+run: 'gh pr checks {{pr}} --watch'  # required. The follow-up; {{name}} is an argument Claude fills in
+args:                               # optional. How to fill each argument
+  pr: 'the number N of the PR URL (.../pull/N) printed by gh pr create'
+max_attempts: 3                     # optional. Failures before giving up (default 3)
+---
+
+(optional body: extra instructions for running it)
+```
+
+- When asked, fill `{{...}}` with values inferred from the output of the previous command and the context, run that command as is in your next Bash call, and report the result to the user. Stopping is blocked until it has run
+- When it fails, look at the error: if the command or its arguments were wrong, rebuild the correct command and run it again (up to `max_attempts`). If the command was right and the failure is the result itself (for example failed CI checks), do not run it again; report that result
+- When the user asks for "run X whenever Y runs", propose a file in this format (ask before writing it)
+
 ### enforce (enforcement by count)
 
 When a hook (`src/feedback-guard.ts` / `src/feedback-post-edit.ts` / `src/feedback-stop-check.ts`) can actually

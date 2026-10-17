@@ -57,6 +57,31 @@ when_exists: ['go.mod']      # 任意。この glob が存在するプロジェ�
 
 `.claude/feedback/<topic>.md`, `~/.claude/feedback/<topic>.md` — トピックを英語のスネークケースで命名する（例: `tsconfig_rootdir.md`, `test_mocking.md`）
 
+### 後続コマンド（followup）
+
+あるコマンドの後に続けて実行するコマンドは、ユーザーが `~/.claude/followup/<topic>.md`（グローバル）か
+`.claude/followup/<topic>.md`（プロジェクト）に書いておく。hook（`src/followup.ts`）がきっかけのコマンドを
+検知すると、後続コマンドの実行を求めてくる。
+
+```markdown
+---
+name: pr_checks                     # 省略時はファイル名
+description: PR を作ったら CI を見届ける
+when: '^gh pr create\b'             # 必須。きっかけ（Bash のコマンドにマッチする正規表現）
+unless: '--dry-run'                 # 任意。マッチしたら発火しない
+run: 'gh pr checks {{pr}} --watch'  # 必須。後続コマンド。{{name}} は Claude が埋める引数
+args:                               # 任意。引数ごとの埋め方
+  pr: 'gh pr create の出力にある PR の URL（.../pull/N）の N'
+max_attempts: 3                     # 任意。失敗時に組み立て直す回数の上限（既定 3）
+---
+
+（任意の本文: 実行時の補足指示）
+```
+
+- 求められたら、`{{...}}` を直前のコマンドの出力などから推測した値で埋め、次の Bash でそのコマンドをそのまま実行し、結果をユーザーに報告する。実行するまで終了はブロックされる
+- 失敗したら、エラーを見てコマンドや引数が誤っていれば正しいコマンドに組み立て直して再実行する（`max_attempts` まで）。コマンドが正しく、失敗がそのまま結果（CI の失敗など）なら、再実行せずその結果を報告する
+- ユーザーから「〜を実行したら〜も実行して」と頼まれたら、この形式のファイルを作ることを提案する（書く前に確認する）
+
 ### enforce（count に応じた強制力）
 
 hook（`src/feedback-guard.ts` / `src/feedback-post-edit.ts` / `src/feedback-stop-check.ts`）が

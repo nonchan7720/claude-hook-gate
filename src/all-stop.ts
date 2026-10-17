@@ -1,5 +1,6 @@
-// Stop hook: gate の checks フェーズ → feedback ルールの stop_check → 完了通知、の順に実行する。
+// Stop hook: 後続コマンド（followup）の実行待ち → gate の checks フェーズ → feedback ルールの stop_check → 完了通知、の順に実行する。
 import { feedbackStopCheck } from './feedback-stop-check.ts'
+import { followupStopCheck } from './followup.ts'
 import type { Io, ScriptResult } from './io.ts'
 import { notification } from './notification.ts'
 import type { Dict } from './pyutil.ts'
@@ -9,8 +10,8 @@ export async function allStop(io: Io, payload: Dict): Promise<ScriptResult> {
   let stdout = ''
   let stderr = ''
   let reportConsumed = false
-  // gate が 1 つでも止めたらそこで終了し、通知は出さない
-  for (const step of [() => stopTestGate(io, 'checks', payload), () => feedbackStopCheck(io, payload)]) {
+  // 1 つでも止めたらそこで終了し、通知は出さない。まだ実行されていない後続コマンドがあれば、gate を走らせる前にそれを求める。
+  for (const step of [() => followupStopCheck(io, payload), () => stopTestGate(io, 'checks', payload), () => feedbackStopCheck(io, payload)]) {
     const r = await step()
     stdout += r.stdout
     stderr += r.stderr

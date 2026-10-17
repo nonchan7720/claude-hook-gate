@@ -33,6 +33,21 @@ stopCheck:
   gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
   fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
 
+followup:
+  triggered: "[followup] `{{command}}` has run, so run the following follow-up command next ({{label}}):"
+  argsHeader: "How to fill {{...}} (infer the values from the output of the command above and the context):"
+  argNoHint: "(no description; infer it from the context)"
+  instruction: "Run this command in your next Bash call and report its result to the user. Stopping is blocked until it has run."
+  done: "[followup] The follow-up command `{{command}}` ({{name}}) succeeded. Include its result in your report to the user."
+  failed: "[followup] The follow-up command `{{command}}` ({{name}}) failed (attempt {{attempt}}/{{max}}). Look at the error above: if the command or its arguments were wrong, rebuild the correct command and run it again. If the command was right and the failure is the result itself (for example failed CI checks), do not run it again; report that result to the user."
+  gaveUp: "[followup] The follow-up command ({{name}}) failed {{max}} times. Giving up; report the failure to the user."
+  stopHeader: "[followup] Follow-up commands have not been run yet. Run them before finishing (attempt {{attempt}}/{{max}}):"
+  stopItem: "- {{label}}: `{{run}}` (triggered by `{{command}}`)"
+  stopGaveUp: "[followup] The follow-up commands were not run {{max}} times in a row. Withdrawing the request; please check manually."
+  unreadable: "cannot read the follow-up definition: {{error}}"
+  missingKey: "{{key}} is missing (required)"
+  badRegex: "{{key}} is not a usable regular expression: {{error}}"
+
 subagentReport:
   header: "[feedback-gate] Results of the hooks run when subagent {{agent}} stopped (gate checks and feedback stop_check). Use these instead of reading the gate logs or re-running the checks:"
 

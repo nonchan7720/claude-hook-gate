@@ -60,7 +60,8 @@ const setup = (
     const r = run(e.argv)
     return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  for (const ev of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Notification', 'Stop', 'SubagentStop']) on(`classic.${ev}`, () => ({}))
+  for (const ev of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure', 'Notification', 'Stop', 'SubagentStop'])
+    on(`classic.${ev}`, () => ({}))
   on('ui.status', (_$: unknown, e: { text: string | undefined }) => {
     statuses.push(e.text)
     return { value: undefined }
@@ -436,6 +437,33 @@ test('SubagentStop: gate.yaml が無くても feedback ルールの stop_check �
   )
   const r = await $.classic.SubagentStop({ session_id: 'sess-1', stop_hook_active: false, agent_id: 'a', agent_transcript_path: '', agent_type: 't' } as never)
   expect(r.block).toContain('chk')
+})
+
+test('followup: きっかけの Bash で後続コマンドを求め、実行されるまで Stop を止め、失敗は PostToolUseFailure で組み立て直させる', async ($, on) => {
+  const { files } = setup(on, {
+    '/h/.claude/followup/pr_checks.md': "---\nname: pr_checks\nwhen: '^gh pr create'\nrun: 'gh pr checks {{pr}} --watch'\nargs:\n  pr: 'PR 番号'\n---\n",
+  })
+  const bash = (command: string, extra: Record<string, unknown> = {}) => ({
+    session_id: 'sess-1',
+    tool_name: 'Bash',
+    tool_input: { command },
+    tool_response: {},
+    tool_use_id: 't1',
+    ...extra,
+  })
+  const r = await $.classic.PostToolUse(bash('gh pr create --fill'))
+  expect(r.additionalContext?.join('\n')).toContain('[followup] `gh pr create --fill` を実行したので、続けて次の後続コマンドを実行してください（pr_checks）:')
+  expect(r.additionalContext?.join('\n')).toContain('  {{pr}}: PR 番号')
+  expect(Object.keys(files)).toContain('/h/.claude/followup/.pending/sess-1.json')
+  const stop = await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: false })
+  expect(stop.block).toContain('まだ実行していない後続コマンドがあります')
+  const failed = await $.classic.PostToolUseFailure({ ...bash('gh pr checks abc --watch', { tool_use_id: 't2' }), error: 'Exit code 1' } as never)
+  expect(failed.additionalContext?.join('\n')).toContain('（pr_checks）が失敗しました（試行 1/3）')
+  const done = await $.classic.PostToolUse(bash('gh pr checks 12 --watch', { tool_use_id: 't3' }))
+  expect(done.additionalContext?.join('\n')).toContain('（pr_checks）が成功しました')
+  expect(Object.keys(files)).not.toContain('/h/.claude/followup/.pending/sess-1.json')
+  const again = await $.classic.Stop({ session_id: 'sess-1', stop_hook_active: true })
+  expect(again.block).toBeUndefined()
 })
 
 test('PostToolUse(Agent): 終わったサブエージェントの SubagentStop の結果が呼び出し元の context に入る', async ($, on) => {
