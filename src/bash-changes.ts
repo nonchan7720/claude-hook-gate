@@ -2,7 +2,7 @@
 // PreToolUse(Bash) で開始時刻を控え（bashStarted）、PostToolUse(Bash) で git が見ている変更・未追跡ファイルのうち
 // mtime がコマンド開始以降のものだけを拾う（recordBashChanges）。git の履歴・作業ツリー操作（rebase / checkout など）で
 // 動いたファイルは「変更」ではないので、そのコマンドは最初から記録対象外にする。
-// 見る作業ツリーは cwd のものと <projectDir>/.claude/worktrees/ 配下の各 worktree で、同じコマンドの中で
+// 見る作業ツリーは cwd のものと <projectDir>/.claude/worktrees/ 配下の worktree のうちコマンドに出てくるもので、同じコマンドの中で
 // コミットされたファイルもコミット履歴から拾う（scanRoots / candidates）。
 // 拾ったファイルは feedback の post_edit / pre_edit でも検査する（src/feedback-bash-edit.ts）。Edit / Write を使わず
 // heredoc・python・sed -i などで書いても検査が抜けないようにするため。
@@ -140,7 +140,7 @@ async function detect(io: Io, projectDir: string, gate: boolean, startedDirPath:
   const threshold = saved.started - MTIME_SLACK_MS
   const stateDir = join(projectDir, '.claude', STATE_DIR)
   const picked = new Set<string>()
-  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd)) {
+  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd, command)) {
     for (const rel of await candidates(io, root, threshold)) {
       const abs = join(root, rel)
       if (abs.startsWith(`${stateDir}/`) || abs.startsWith(`${startedDirPath}/`) || rel.startsWith(`.claude/${STATE_DIR}/`)) continue
@@ -164,12 +164,24 @@ const gitTop = async (io: Io, dir: string): Promise<string> => {
   return top.exitCode === 0 ? top.stdout.replace(/\n+$/, '') : ''
 }
 
+/** command が worktree <name> を指しているか（`.claude/worktrees/<name>` を含み、その後に名前が続かない）。 */
+export const mentionsWorktree = (command: string, name: string): boolean => {
+  const needle = `worktrees/${name}`
+  for (let i = command.indexOf(needle); i >= 0; i = command.indexOf(needle, i + 1)) {
+    const next = command.charAt(i + needle.length)
+    if (!/[A-Za-z0-9._-]/.test(next)) return true
+  }
+  return false
+}
+
 /**
- * 変更を探す git の作業ツリー: cwd の作業ツリーと、<projectDir>/.claude/worktrees/ 直下の各 worktree。
- * worktree は .git を持つ入れ子の作業ツリーなので、外側から ls-files しても "<name>/" の 1 行にしかならない。
- * cwd が本体のまま worktree のファイルを書き換えるコマンド（絶対パスへの heredoc など）を拾うため、個別に見る。
+ * 変更を探す git の作業ツリー: cwd の作業ツリーと、<projectDir>/.claude/worktrees/ 直下の worktree のうちコマンドに
+ * パスが出てくるもの。worktree は .git を持つ入れ子の作業ツリーなので、外側から ls-files しても "<name>/" の 1 行に
+ * しかならない。cwd が本体のまま worktree のファイルを書き換えるコマンド（絶対パスへの heredoc など）を拾うため、個別に見る。
+ * コマンドに出てこない worktree は見ない。別のセッション（やエージェント）がその worktree で編集中だと、このコマンドの
+ * 間に書かれたファイルとして拾ってしまい、他人の書きかけ（Red のテストなど）で自分の gate が落ちるため。
  */
-async function scanRoots(io: Io, projectDir: string, cwd: string): Promise<string[]> {
+async function scanRoots(io: Io, projectDir: string, cwd: string, command: string): Promise<string[]> {
   const roots: string[] = []
   const add = (top: string) => {
     if (top !== '' && !roots.includes(top)) roots.push(top)
@@ -177,7 +189,7 @@ async function scanRoots(io: Io, projectDir: string, cwd: string): Promise<strin
   add(await gitTop(io, cwd))
   const worktreesDir = join(projectDir, '.claude', 'worktrees')
   for (const e of await io.list(worktreesDir)) {
-    if (e.kind === 'dir') add(await gitTop(io, join(worktreesDir, e.name)))
+    if (e.kind === 'dir' && mentionsWorktree(command, e.name)) add(await gitTop(io, join(worktreesDir, e.name)))
   }
   return roots
 }

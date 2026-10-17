@@ -43,6 +43,11 @@ followup:
   triggeredFilled: "[followup] \`{{command}}\` has run, so run the following follow-up command next ({{label}}). Its arguments are already filled in; run it as it is:"
   argsHeader: "How to fill {{...}} (infer the values from the output of the command above and the context):"
   argNoHint: "(no description; infer it from the context)"
+  argFilled: "{{value}} (filled by the hook with the pattern)"
+  filledValues: "Filled values (taken from the output / command of the triggering command with the patterns): {{values}}"
+  filledCheck: "If a filled value disagrees with the output above (the pattern captured the wrong thing), run the command with the correct value, fix the pattern of that argument in the definition file {{path}} so it matches this output, and tell the user what you changed."
+  patternMissed: "{{keys}} did not match the output / command of the triggering command. Run the command with the inferred value, then fix that pattern in the definition file {{path}} so it matches this output, and tell the user what you changed."
+  launchedFilled: "Its arguments were filled by the hook with the patterns of the definition file. If it fails because an argument was wrong, run the correct command again, fix the pattern of that argument in the definition file {{path}}, and tell the user what you changed."
   instruction: "Run this command in your next Bash call, always with run_in_background: true (a foreground call is denied). Claude Code hands you the result when it finishes; report it to the user. If it failed because the command or its arguments were wrong, rebuild the correct command and run it again. Stopping is blocked until it has been started."
   instructionTimeout: "Run this command in your next Bash call, always with run_in_background: true and timeout: {{ms}} (a foreground call is denied). Claude Code hands you the result when it finishes; report it to the user. If it failed because the command or its arguments were wrong, rebuild the correct command and run it again. Stopping is blocked until it has been started."
   foreground: "[followup] Run the follow-up command ({{name}}) \`{{command}}\` with run_in_background: true. In the foreground the Bash time limit may cut it off. Claude Code hands you the result when it finishes. Run the same command again with run_in_background: true."
@@ -208,6 +213,11 @@ followup:
   triggeredFilled: "[followup] \`{{command}}\` を実行したので、続けて次の後続コマンドを実行してください（{{label}}）。引数は埋めてあるので、このまま実行してください:"
   argsHeader: "{{...}} の埋め方（直前のコマンドの出力などから推測して埋める）:"
   argNoHint: "（説明なし。文脈から推測する）"
+  argFilled: "{{value}}（hook が正規表現で埋めた値）"
+  filledValues: "埋めた値（きっかけのコマンドの出力・コマンドから正規表現で取り出したもの）: {{values}}"
+  filledCheck: "埋めた値が直前の出力と食い違っていれば（正規表現の取り違え）、正しい値に直して実行し、定義ファイル {{path}} の該当する args の pattern もその出力に一致する形に直して、変更内容をユーザーに伝えてください。"
+  patternMissed: "{{keys}} がきっかけのコマンドの出力・コマンドに一致しませんでした。推測した値で実行したうえで、定義ファイル {{path}} のその pattern をこの出力に一致する形に直し、変更内容をユーザーに伝えてください。"
+  launchedFilled: "引数は hook が定義ファイルの正規表現で埋めたものです。失敗が引数の誤りによるものなら、正しいコマンドで再実行し、定義ファイル {{path}} の該当する args の pattern も直して、変更内容をユーザーに伝えてください。"
   instruction: "次の Bash で、このコマンドを必ず run_in_background: true で実行してください（前景では止められます）。完了すると Claude Code が結果を渡すので、それをユーザーに報告してください。引数の誤りで失敗していたら、正しいコマンドに組み立て直して再実行してください。起動するまで終了（Stop）はブロックされます。"
   instructionTimeout: "次の Bash で、このコマンドを必ず run_in_background: true、timeout: {{ms}} で実行してください（前景では止められます）。完了すると Claude Code が結果を渡すので、それをユーザーに報告してください。引数の誤りで失敗していたら、正しいコマンドに組み立て直して再実行してください。起動するまで終了（Stop）はブロックされます。"
   foreground: "[followup] 後続コマンド（{{name}}）\`{{command}}\` は run_in_background: true で実行してください。前景で実行すると Bash の時間制限で途中で切られることがあります。完了時の結果は Claude Code が渡します。同じコマンドを run_in_background: true にして実行し直してください。"
@@ -1689,20 +1699,26 @@ var outputOf = (payload) => {
 };
 function resolveArgs(f, command, output) {
   const values = {};
+  const missed = [];
+  let complete = true;
   for (const name of placeholders(f.run)) {
     const spec = f.args[name];
-    if (!spec?.pattern)
-      return;
+    if (!spec?.pattern) {
+      complete = false;
+      continue;
+    }
     const m = pyRegExp(spec.pattern).exec(spec.from === "command" ? command : output);
-    if (!m)
-      return;
-    const value = (m[1] ?? m[0]).trim();
-    if (value === "")
-      return;
+    const value = m ? (m[1] ?? m[0]).trim() : "";
+    if (value === "") {
+      missed.push(name);
+      complete = false;
+      continue;
+    }
     values[name] = value;
   }
-  const filled = f.run.replace(PLACEHOLDER_RE, (_, name) => shellQuote(values[name] ?? ""));
-  return { command: filled, values };
+  if (!complete)
+    return { values, missed };
+  return { command: f.run.replace(PLACEHOLDER_RE, (_, name) => shellQuote(values[name] ?? "")), values, missed };
 }
 var hintsOf = (f) => Object.fromEntries(Object.entries(f.args).flatMap(([k, v]) => v.hint ? [[k, v.hint]] : []));
 function parsePending(text, now) {
@@ -1712,7 +1728,7 @@ function parsePending(text, now) {
     const data = JSON.parse(text);
     if (!isDict(data) || !Array.isArray(data.entries))
       return { entries: [], stopBlocks: 0 };
-    const entries = data.entries.filter((e) => isDict(e) && typeof e.run === "string" && typeof e.createdAt === "number" && e.createdAt >= now - DAY_MS2);
+    const entries = data.entries.filter((e) => isDict(e) && typeof e.run === "string" && typeof e.createdAt === "number" && e.createdAt >= now - DAY_MS2).map((e) => ({ values: {}, missed: [], path: "", ...e }));
     return { entries, stopBlocks: toCount(data.stopBlocks) };
   } catch {
     return { entries: [], stopBlocks: 0 };
@@ -1748,16 +1764,20 @@ var labelOf = (p) => p.description ? `${p.name}: ${p.description}` : p.name;
 function instructionText(lang, p) {
   const t = tr(lang);
   const lines = [];
+  const valuesText = Object.entries(p.values).map(([k, v]) => `${k} = ${v}`).join(", ");
   if (p.command !== undefined) {
     lines.push(t("followup.triggeredFilled", { command: p.trigger, label: labelOf(p) }), `  ${p.command}`);
+    lines.push(t("followup.filledValues", { values: valuesText }), t("followup.filledCheck", { path: p.path }));
   } else {
     lines.push(t("followup.triggered", { command: p.trigger, label: labelOf(p) }), `  ${p.run}`);
     const names = placeholders(p.run);
     if (names.length > 0) {
       lines.push(t("followup.argsHeader"));
       for (const n of names)
-        lines.push(`  {{${n}}}: ${p.hints[n] ?? t("followup.argNoHint")}`);
+        lines.push(`  {{${n}}}: ${p.values[n] !== undefined ? t("followup.argFilled", { value: p.values[n] }) : p.hints[n] ?? t("followup.argNoHint")}`);
     }
+    if (p.missed.length > 0)
+      lines.push(t("followup.patternMissed", { keys: p.missed.map((n) => `args.${n}.pattern`).join(", "), path: p.path }));
   }
   if (p.body)
     lines.push(p.body);
@@ -1809,6 +1829,8 @@ async function afterBash(io, payload) {
     state.entries = state.entries.filter((p) => p !== done);
     changed = true;
     notes.push(t(inBackground(payload) ? "followup.launched" : "followup.done", { command: oneLine(command), name: done.name }));
+    if (inBackground(payload) && done.command !== undefined)
+      notes[notes.length - 1] += ` ${t("followup.launchedFilled", { path: done.path })}`;
   }
   const trigger = oneLine(command);
   const output = outputOf(payload);
@@ -1824,7 +1846,10 @@ async function afterBash(io, payload) {
       name: f.name,
       description: f.description,
       run: f.run,
-      ...resolved ? { command: resolved.command } : {},
+      ...resolved.command !== undefined ? { command: resolved.command } : {},
+      values: resolved.values,
+      missed: resolved.missed,
+      path: f.path,
       hints: hintsOf(f),
       body: f.body,
       trigger,
@@ -3932,7 +3957,7 @@ async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
   const threshold = saved.started - MTIME_SLACK_MS;
   const stateDir = join(projectDir, ".claude", STATE_DIR);
   const picked = new Set;
-  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd)) {
+  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd, command)) {
     for (const rel of await candidates(io, root, threshold)) {
       const abs = join(root, rel);
       if (abs.startsWith(`${stateDir}/`) || abs.startsWith(`${startedDirPath}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
@@ -3959,7 +3984,16 @@ var gitTop = async (io, dir) => {
   const top = await io.run(["git", "-C", dir, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 });
   return top.exitCode === 0 ? top.stdout.replace(/\n+$/, "") : "";
 };
-async function scanRoots(io, projectDir, cwd) {
+var mentionsWorktree = (command, name) => {
+  const needle = `worktrees/${name}`;
+  for (let i = command.indexOf(needle);i >= 0; i = command.indexOf(needle, i + 1)) {
+    const next = command.charAt(i + needle.length);
+    if (!/[A-Za-z0-9._-]/.test(next))
+      return true;
+  }
+  return false;
+};
+async function scanRoots(io, projectDir, cwd, command) {
   const roots = [];
   const add = (top) => {
     if (top !== "" && !roots.includes(top))
@@ -3968,7 +4002,7 @@ async function scanRoots(io, projectDir, cwd) {
   add(await gitTop(io, cwd));
   const worktreesDir = join(projectDir, ".claude", "worktrees");
   for (const e of await io.list(worktreesDir)) {
-    if (e.kind === "dir")
+    if (e.kind === "dir" && mentionsWorktree(command, e.name))
       add(await gitTop(io, join(worktreesDir, e.name)));
   }
   return roots;
