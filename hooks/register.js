@@ -38,6 +38,21 @@ stopCheck:
   gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
   fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
 
+followup:
+  triggered: "[followup] \`{{command}}\` has run, so run the following follow-up command next ({{label}}):"
+  argsHeader: "How to fill {{...}} (infer the values from the output of the command above and the context):"
+  argNoHint: "(no description; infer it from the context)"
+  instruction: "Run this command in your next Bash call and report its result to the user. Stopping is blocked until it has run."
+  done: "[followup] The follow-up command \`{{command}}\` ({{name}}) succeeded. Include its result in your report to the user."
+  failed: "[followup] The follow-up command \`{{command}}\` ({{name}}) failed (attempt {{attempt}}/{{max}}). Look at the error above: if the command or its arguments were wrong, rebuild the correct command and run it again. If the command was right and the failure is the result itself (for example failed CI checks), do not run it again; report that result to the user."
+  gaveUp: "[followup] The follow-up command ({{name}}) failed {{max}} times. Giving up; report the failure to the user."
+  stopHeader: "[followup] Follow-up commands have not been run yet. Run them before finishing (attempt {{attempt}}/{{max}}):"
+  stopItem: "- {{label}}: \`{{run}}\` (triggered by \`{{command}}\`)"
+  stopGaveUp: "[followup] The follow-up commands were not run {{max}} times in a row. Withdrawing the request; please check manually."
+  unreadable: "cannot read the follow-up definition: {{error}}"
+  missingKey: "{{key}} is missing (required)"
+  badRegex: "{{key}} is not a usable regular expression: {{error}}"
+
 subagentReport:
   header: "[feedback-gate] Results of the hooks run when subagent {{agent}} stopped (gate checks and feedback stop_check). Use these instead of reading the gate logs or re-running the checks:"
 
@@ -183,6 +198,21 @@ stopCheck:
   checking: "[feedback-stop-check] 検査中: {{rule}} ({{file}})"
   gaveUp: "[feedback-stop-check] {{max}} 回連続でブロックしました。ループを打ち切ります。手動確認を。"
   fixAbove: "[feedback-stop-check] 上記を修正してください（試行 {{attempt}}/{{max}}）。"
+
+followup:
+  triggered: "[followup] \`{{command}}\` を実行したので、続けて次の後続コマンドを実行してください（{{label}}）:"
+  argsHeader: "{{...}} の埋め方（直前のコマンドの出力などから推測して埋める）:"
+  argNoHint: "（説明なし。文脈から推測する）"
+  instruction: "次の Bash でこのコマンドを実行し、その結果をユーザーに報告してください。実行するまで終了（Stop）はブロックされます。"
+  done: "[followup] 後続コマンド \`{{command}}\`（{{name}}）が成功しました。その結果をユーザーへの報告に含めてください。"
+  failed: "[followup] 後続コマンド \`{{command}}\`（{{name}}）が失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て、コマンドや引数が誤っていれば正しいコマンドに組み立て直して再実行してください。コマンドは正しく、この失敗がそのまま結果（CI の失敗など）なら、再実行せずにその結果をユーザーに報告してください。"
+  gaveUp: "[followup] 後続コマンド（{{name}}）が {{max}} 回失敗したので打ち切ります。失敗の内容をユーザーに報告してください。"
+  stopHeader: "[followup] まだ実行していない後続コマンドがあります。先に実行してから終了してください（試行 {{attempt}}/{{max}}）:"
+  stopItem: "- {{label}}: \`{{run}}\`（きっかけ: \`{{command}}\`）"
+  stopGaveUp: "[followup] 後続コマンドが {{max}} 回続けて実行されなかったので、要求を取り下げます。手動で確認してください。"
+  unreadable: "後続コマンドの定義を読めません: {{error}}"
+  missingKey: "{{key}} がありません（必須）"
+  badRegex: "{{key}} の正規表現が使えません: {{error}}"
 
 subagentReport:
   header: "[feedback-gate] サブエージェント {{agent}} の停止時に実行された hook（gate の検証と feedback の stop_check）の結果です。gate のログを読んだり検証を再実行したりせず、これを使ってください:"
@@ -1440,6 +1470,323 @@ async function feedbackStopCheck(io, payload) {
   }
 }
 
+// src/followup.ts
+var MAX_STOP_BLOCKS = 3;
+var DEFAULT_MAX_ATTEMPTS = 3;
+var DAY_MS2 = 24 * 60 * 60 * 1000;
+function followupDir(io) {
+  const override = io.env.CLAUDE_FOLLOWUP_DIR;
+  if (override)
+    return override;
+  return join(io.env.HOME || "~", ".claude", "followup");
+}
+var projectFollowupDir = (io, projectDir) => join(projectDir || io.projectDir || io.cwd, ".claude", "followup");
+var stateIdOf = (payload) => {
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  const agentId = jqStr(payload.agent_id);
+  return agentId ? `${sessionId}--${agentId}` : sessionId;
+};
+var safeName = (s) => s.replace(/[^A-Za-z0-9_.-]/g, "_");
+var pendingPath = (io, stateId) => join(followupDir(io), ".pending", `${safeName(stateId)}.json`);
+var PLACEHOLDER_RE = /\{\{\s*([A-Za-z_][\w-]*)\s*\}\}/g;
+var placeholders = (run) => [...new Set([...run.matchAll(PLACEHOLDER_RE)].map((m) => m[1] ?? ""))];
+var escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function runRegExp(run) {
+  let src = "";
+  run.split(PLACEHOLDER_RE).forEach((part, i) => {
+    if (i % 2 === 1)
+      src += `(?:"[^"]*"|'[^']*'|\\S+)`;
+    else
+      src += escapeRegExp(part).replace(/\s+/g, "\\s+");
+  });
+  return new RegExp(src);
+}
+var argsOf = (raw) => {
+  const out = {};
+  if (!isDict(raw))
+    return out;
+  for (const [k, v] of Object.entries(raw))
+    if (truthy(v))
+      out[k] = String(v);
+  return out;
+};
+async function loadFollowup(io, path) {
+  const content = await io.readFile(path);
+  if (content === undefined)
+    return null;
+  const m = FRONTMATTER_RE.exec(content);
+  if (!m)
+    return null;
+  const data = loadYamlText(m[1] ?? "");
+  if (!isDict(data))
+    return null;
+  const t = tr(io.lang);
+  for (const key of ["when", "run"])
+    if (!truthy(data[key]))
+      throw new Error(t("followup.missingKey", { key }));
+  for (const key of ["when", "unless"]) {
+    const v = data[key];
+    if (!truthy(v))
+      continue;
+    try {
+      pyRegExp(String(v));
+    } catch (e) {
+      throw new Error(t("followup.badRegex", { key, error: errorText(e) }));
+    }
+  }
+  const file = path.slice(path.lastIndexOf("/") + 1);
+  const maxAttempts = toCount(data.max_attempts);
+  return {
+    name: truthy(data.name) ? String(data.name) : file.replace(/\.md$/, ""),
+    description: truthy(data.description) ? String(data.description) : "",
+    when: String(data.when),
+    ...truthy(data.unless) ? { unless: String(data.unless) } : {},
+    run: String(data.run).trim(),
+    args: argsOf(data.args),
+    maxAttempts: maxAttempts > 0 ? maxAttempts : DEFAULT_MAX_ATTEMPTS,
+    body: content.slice(m[0].length).trim(),
+    path,
+    expires: parseExpires(data.expires),
+    projects: stringList(data.projects),
+    whenExists: stringList(data.when_exists)
+  };
+}
+async function listFollowupsIn(io, dir, broken) {
+  const out = [];
+  const names = (await io.list(dir)).filter((e) => e.kind === "file" && e.name.endsWith(".md")).map((e) => e.name).sort();
+  for (const name of names) {
+    const path = join(dir, name);
+    try {
+      const f = await loadFollowup(io, path);
+      if (f)
+        out.push(f);
+    } catch (e) {
+      broken.push({ path, reason: tr(io.lang)("followup.unreadable", { error: errorText(e) }) });
+    }
+  }
+  return out;
+}
+async function scanFollowups(io) {
+  const broken = [];
+  const globalDir = followupDir(io);
+  const projectDir = projectFollowupDir(io);
+  const globalOnes = await listFollowupsIn(io, globalDir, broken);
+  let merged = globalOnes;
+  if (projectDir !== globalDir) {
+    const projectOnes = await listFollowupsIn(io, projectDir, broken);
+    const overridden = new Set(projectOnes.map((f) => f.name));
+    merged = [...globalOnes.filter((f) => !overridden.has(f.name)), ...projectOnes];
+  }
+  const active = [];
+  for (const f of merged)
+    if (await isRuleActive(io, f))
+      active.push(f);
+  return { followups: active, broken };
+}
+async function listFollowups(io) {
+  const { followups, broken } = await scanFollowups(io);
+  for (const b of broken)
+    await logError(io, "followup", b.reason, b.path);
+  return followups;
+}
+async function loadPending(io, stateId, now) {
+  try {
+    const text = await io.readFile(pendingPath(io, stateId));
+    if (text === undefined)
+      return { entries: [], stopBlocks: 0 };
+    const data = JSON.parse(text);
+    if (!isDict(data) || !Array.isArray(data.entries))
+      return { entries: [], stopBlocks: 0 };
+    const entries = data.entries.filter((e) => isDict(e) && typeof e.run === "string" && typeof e.createdAt === "number" && e.createdAt >= now - DAY_MS2);
+    return { entries, stopBlocks: toCount(data.stopBlocks) };
+  } catch {
+    return { entries: [], stopBlocks: 0 };
+  }
+}
+async function savePending(io, stateId, state) {
+  const path = pendingPath(io, stateId);
+  if (state.entries.length === 0) {
+    await io.removeFiles([path]);
+    return;
+  }
+  await io.writeFile(path, `${JSON.stringify(state)}
+`);
+}
+function oneLine(command, max = 120) {
+  const first = command.split(`
+`).find((l) => l.trim() !== "")?.trim() ?? "";
+  return first.length > max ? `${first.slice(0, max)} ...` : first;
+}
+var labelOf = (p) => p.description ? `${p.name}: ${p.description}` : p.name;
+function instructionText(lang, p) {
+  const t = tr(lang);
+  const lines = [t("followup.triggered", { command: p.command, label: labelOf(p) }), `  ${p.run}`];
+  const names = placeholders(p.run);
+  if (names.length > 0) {
+    lines.push(t("followup.argsHeader"));
+    for (const n of names)
+      lines.push(`  {{${n}}}: ${p.args[n] ?? t("followup.argNoHint")}`);
+  }
+  if (p.body)
+    lines.push(p.body);
+  lines.push(t("followup.instruction"));
+  return lines.join(`
+`);
+}
+var context = (event, body) => ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: body } })}
+`);
+var commandOf = (payload) => jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
+var matchPending = (entries, command) => entries.find((p) => runRegExp(p.run).test(command));
+async function afterBash(io, payload) {
+  const command = commandOf(payload);
+  if (command === "")
+    return ok();
+  const followups = await listFollowups(io);
+  const stateId = stateIdOf(payload);
+  const now = await io.now();
+  const state = await loadPending(io, stateId, now);
+  if (followups.length === 0 && state.entries.length === 0)
+    return ok();
+  const t = tr(io.lang);
+  const notes = [];
+  let changed = false;
+  const done = matchPending(state.entries, command);
+  if (done) {
+    state.entries = state.entries.filter((p) => p !== done);
+    changed = true;
+    notes.push(t("followup.done", { command: oneLine(command), name: done.name }));
+  }
+  for (const f of followups) {
+    if (done?.name === f.name)
+      continue;
+    if (!pyRegExp(f.when).test(command))
+      continue;
+    if (f.unless !== undefined && pyRegExp(f.unless).test(command))
+      continue;
+    const p = {
+      name: f.name,
+      description: f.description,
+      run: f.run,
+      args: f.args,
+      body: f.body,
+      command: oneLine(command),
+      toolUseId: jqStr(payload.tool_use_id),
+      attempts: 0,
+      attempted: false,
+      maxAttempts: f.maxAttempts,
+      createdAt: now
+    };
+    state.entries.push(p);
+    changed = true;
+    notes.push(instructionText(io.lang, p));
+  }
+  if (changed)
+    await savePending(io, stateId, state);
+  return notes.length > 0 ? context("PostToolUse", notes.join(`
+
+`)) : ok();
+}
+async function followupAfterBash(io, payload) {
+  try {
+    return await afterBash(io, payload);
+  } catch (e) {
+    await logError(io, "followup", errorText(e));
+    return ok("", `[followup] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+async function afterBashFailure(io, payload) {
+  const command = commandOf(payload);
+  if (command === "")
+    return ok();
+  const stateId = stateIdOf(payload);
+  const state = await loadPending(io, stateId, await io.now());
+  const p = matchPending(state.entries, command);
+  if (!p)
+    return ok();
+  const t = tr(io.lang);
+  if (payload.is_interrupt === true) {
+    state.entries = state.entries.filter((x) => x !== p);
+    await savePending(io, stateId, state);
+    return ok();
+  }
+  p.attempts += 1;
+  p.attempted = true;
+  if (p.attempts >= p.maxAttempts) {
+    state.entries = state.entries.filter((x) => x !== p);
+    await savePending(io, stateId, state);
+    return context("PostToolUseFailure", t("followup.gaveUp", { name: p.name, max: p.maxAttempts }));
+  }
+  await savePending(io, stateId, state);
+  return context("PostToolUseFailure", t("followup.failed", { command: oneLine(command), name: p.name, attempt: p.attempts, max: p.maxAttempts }));
+}
+async function followupAfterBashFailure(io, payload) {
+  try {
+    return await afterBashFailure(io, payload);
+  } catch (e) {
+    await logError(io, "followup", errorText(e));
+    return ok("", `[followup] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+async function stopCheck(io, payload) {
+  const stateId = stateIdOf(payload);
+  const state = await loadPending(io, stateId, await io.now());
+  const waiting = state.entries.filter((p) => !p.attempted);
+  if (waiting.length === 0) {
+    if (state.stopBlocks !== 0) {
+      state.stopBlocks = 0;
+      await savePending(io, stateId, state);
+    }
+    return ok();
+  }
+  const t = tr(io.lang);
+  state.stopBlocks += 1;
+  if (state.stopBlocks >= MAX_STOP_BLOCKS) {
+    state.entries = state.entries.filter((p) => p.attempted);
+    state.stopBlocks = 0;
+    await savePending(io, stateId, state);
+    return ok("", `${t("followup.stopGaveUp", { max: MAX_STOP_BLOCKS })}
+`);
+  }
+  await savePending(io, stateId, state);
+  const lines = [t("followup.stopHeader", { attempt: state.stopBlocks, max: MAX_STOP_BLOCKS })];
+  for (const p of waiting)
+    lines.push(t("followup.stopItem", { label: labelOf(p), run: p.run, command: p.command }));
+  const reason = lines.join(`
+`);
+  return { exitCode: 2, stdout: `${JSON.stringify({ decision: "block", reason })}
+`, stderr: `${reason}
+` };
+}
+async function followupStopCheck(io, payload) {
+  try {
+    return await stopCheck(io, payload);
+  } catch (e) {
+    await logError(io, "followup", errorText(e));
+    return ok("", `[followup] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+async function resetFollowups(io, payload) {
+  try {
+    const dir = join(followupDir(io), ".pending");
+    const sessionId = safeName(jqStr(payload.session_id) || "unknown");
+    const source = jqStr(payload.source);
+    const now = await io.now();
+    const doomed = [];
+    for (const e of await io.list(dir)) {
+      if (e.kind !== "file" || !e.name.endsWith(".json"))
+        continue;
+      const mine = e.name === `${sessionId}.json` || e.name.startsWith(`${sessionId}--`);
+      if (mine && (source === "startup" || source === "clear") || e.mtimeMs < now - DAY_MS2)
+        doomed.push(join(dir, e.name));
+    }
+    await io.removeFiles(doomed);
+  } catch {}
+  return ok();
+}
+
 // src/shell.ts
 var SAFE = /^[A-Za-z0-9@%+=:,./-]+$/;
 function shellQuote(s) {
@@ -1957,7 +2304,7 @@ function computePerFileRoots(mode, patternPairs, matched) {
   return roots;
 }
 var slug = (cmd) => cmd.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[_.]+|[_.]+$/g, "").slice(0, 80) || "cmd";
-function oneLine(cmd) {
+function oneLine2(cmd) {
   const lines = String(cmd).split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "");
   let text = lines[0] ?? "";
   if (lines.length > 1)
@@ -2186,7 +2533,7 @@ class Gate {
     }
   }
   note(kind, label, cmd, detail = "") {
-    this.status.push(`[gate] ${kind}: ${label} $ ${oneLine(cmd)}${detail ? ` ${detail}` : ""}`);
+    this.status.push(`[gate] ${kind}: ${label} $ ${oneLine2(cmd)}${detail ? ` ${detail}` : ""}`);
   }
   statusBlock(fallback = "") {
     return this.status.length > 0 ? this.status.join(`
@@ -2502,7 +2849,7 @@ ${this.t("gate.sharedResult", { logpath: r.outcome.logpath })}
     this.ranThisRun.add(Gate.deferKey({ root: scope.root, cwd, cmd }));
     await this.undeferCmd(scope.root, cwd, cmd);
     const { out, ok, timedOut, logpath } = ran;
-    this.executedLabels.push(name || oneLine(cmd));
+    this.executedLabels.push(name || oneLine2(cmd));
     this.note(ok ? "ok" : "fail", label, cmd, `(${((await this.io.now() - started) / 1000).toFixed(1)}s)`);
     const detail = [chunk.lines[0]];
     if (out) {
@@ -3205,7 +3552,7 @@ async function allStop(io, payload) {
   let stdout = "";
   let stderr = "";
   let reportConsumed = false;
-  for (const step of [() => stopTestGate(io, "checks", payload), () => feedbackStopCheck(io, payload)]) {
+  for (const step of [() => followupStopCheck(io, payload), () => stopTestGate(io, "checks", payload), () => feedbackStopCheck(io, payload)]) {
     const r = await step();
     stdout += r.stdout;
     stderr += r.stderr;
@@ -3420,7 +3767,7 @@ var SKIP_COMMAND_RE = /\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?
 var MTIME_SLACK_MS = 2000;
 var STALE_STARTED_MS = 2 * 60 * 60 * 1000;
 var STATE_DIR = ".gate-status";
-var stateIdOf = (payload) => {
+var stateIdOf2 = (payload) => {
   const sessionId = jqStr(payload.session_id) || "unknown";
   const agentId = jqStr(payload.agent_id);
   return agentId ? `${sessionId}--${agentId}` : sessionId;
@@ -3428,7 +3775,7 @@ var stateIdOf = (payload) => {
 var startedKey = (payload) => {
   const toolUseId = jqStr(payload.tool_use_id).replace(/[^A-Za-z0-9_.-]/g, "_");
   if (toolUseId === "")
-    return stateIdOf(payload);
+    return stateIdOf2(payload);
   const sessionId = jqStr(payload.session_id) || "unknown";
   return `${sessionId}--${toolUseId}`;
 };
@@ -3504,7 +3851,7 @@ async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
   const changed = [...picked];
   if (changed.length === 0 || !gate)
     return { changed, recorded: [], threshold, gate };
-  const memo = join(stateDir, `changed_files.${stateIdOf(payload)}.txt`);
+  const memo = join(stateDir, `changed_files.${stateIdOf2(payload)}.txt`);
   const existing = await io.readFile(memo) ?? "";
   const have = new Set(existing.split(`
 `));
@@ -3563,8 +3910,8 @@ function bashChangeSteps(payload) {
 
 // src/correct.ts
 var HOUR_MS = 3600000;
-var DAY_MS2 = 86400000;
-var DEFAULT_WINDOW_MS = 30 * DAY_MS2;
+var DAY_MS3 = 86400000;
+var DEFAULT_WINDOW_MS = 30 * DAY_MS3;
 var DEFAULT_MIN = 2;
 function parseCorrectArgs(args) {
   const out = { window: DEFAULT_WINDOW_MS, apply: false, min: DEFAULT_MIN };
@@ -3596,7 +3943,7 @@ function parseWindow(v) {
   if (!m)
     return;
   const n = Number(m[1]);
-  return n > 0 ? n * (m[2] === "d" ? DAY_MS2 : HOUR_MS) : undefined;
+  return n > 0 ? n * (m[2] === "d" ? DAY_MS3 : HOUR_MS) : undefined;
 }
 function parseMin(v) {
   if (!/^\d+$/.test(v))
@@ -3605,7 +3952,7 @@ function parseMin(v) {
   return n > 0 ? n : undefined;
 }
 function windowLabel(ms) {
-  return ms % DAY_MS2 === 0 ? `${ms / DAY_MS2}d` : `${Math.round(ms / HOUR_MS)}h`;
+  return ms % DAY_MS3 === 0 ? `${ms / DAY_MS3}d` : `${Math.round(ms / HOUR_MS)}h`;
 }
 async function readViolations(io) {
   const text = await io.readFile(violationsLogPath(io));
@@ -3683,7 +4030,7 @@ function aggregateViolations(entries, now, windowMs) {
   return stats;
 }
 var enforceTemplate = (lang) => tr(lang)("correct.enforceTemplate");
-var oneLine2 = (s, max = 60) => {
+var oneLine3 = (s, max = 60) => {
   const flat = s.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 };
@@ -3710,7 +4057,7 @@ function buildProposals(rules, inactive, stats, opts, broken = []) {
     const s = stats.get(rule.name);
     const n = s?.inWindow ?? 0;
     if (n >= opts.min && s) {
-      const top = s.topDetail ? t("correct.topDetail", { detail: oneLine2(s.topDetail) }) : "";
+      const top = s.topDetail ? t("correct.topDetail", { detail: oneLine3(s.topDetail) }) : "";
       if (rule.count < 3) {
         bumps.push({
           kind: "bump",
@@ -3864,10 +4211,11 @@ async function correctCommand(io, args) {
 // src/engine-io.ts
 var errorText2 = (e) => e instanceof Error ? e.message : String(e);
 async function readEnv($) {
-  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG] = await Promise.all([
+  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, CLAUDE_FOLLOWUP_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG] = await Promise.all([
     $.env.get("HOME"),
     $.env.get("PATH"),
     $.env.get("CLAUDE_FEEDBACK_DIR"),
+    $.env.get("CLAUDE_FOLLOWUP_DIR"),
     $.env.get("DOGWOOD_BIN"),
     $.env.get("TERM_PROGRAM"),
     $.env.get("__CFBundleIdentifier"),
@@ -3876,7 +4224,19 @@ async function readEnv($) {
     $.env.get("LC_MESSAGES"),
     $.env.get("LANG")
   ]);
-  return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG };
+  return {
+    HOME,
+    PATH,
+    CLAUDE_FEEDBACK_DIR,
+    CLAUDE_FOLLOWUP_DIR,
+    DOGWOOD_BIN,
+    TERM_PROGRAM,
+    __CFBundleIdentifier,
+    FEEDBACK_GATE_LANG,
+    LC_ALL,
+    LC_MESSAGES,
+    LANG
+  };
 }
 async function createIo($, options = {}) {
   const [env, projectDir, cwd] = await Promise.all([readEnv($), $.session.root(), $.session.cwd()]);
@@ -4138,7 +4498,7 @@ var STATE_FILES = [
   ["subagent_report", ".json"],
   ["summary", ".txt"]
 ];
-var DAY_MS3 = 1440 * 60 * 1000;
+var DAY_MS4 = 1440 * 60 * 1000;
 var globMatch = (name, prefix, suffix) => name.length >= prefix.length + suffix.length && name.startsWith(prefix) && name.endsWith(suffix);
 async function resetGate(io, payload) {
   const projectDir = io.projectDir || io.cwd;
@@ -4170,7 +4530,7 @@ async function resetGate(io, payload) {
   for (const dir of [stateDir, claudeDir]) {
     const old = [];
     for (const e of await io.list(dir)) {
-      if (e.kind !== "file" || e.mtimeMs >= now - DAY_MS3)
+      if (e.kind !== "file" || e.mtimeMs >= now - DAY_MS4)
         continue;
       if (STATE_FILES.some(([base, ext]) => globMatch(e.name, `${base}.`, ext))) {
         old.push(join(dir, e.name));
@@ -4183,7 +4543,7 @@ async function resetGate(io, payload) {
       if (e.kind !== "dir")
         continue;
       const st = await io.stat(join(logRoot, e.name));
-      if (st && st.mtimeMs < now - DAY_MS3)
+      if (st && st.mtimeMs < now - DAY_MS4)
         await io.removeTree(join(logRoot, e.name));
     }
   }
@@ -4350,7 +4710,7 @@ export const register = (on, options) => {
   });
   on("command.run", { command: "correct" }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? "")));
   on("classic.SessionStart", async ($, e, next) => {
-    const mine = await runSteps($, options, "SessionStart", [(io) => resetGate(io, e)]);
+    const mine = await runSteps($, options, "SessionStart", [(io) => resetGate(io, e), (io) => resetFollowups(io, e)]);
     return withNext(next, e, mine);
   });
   on("classic.UserPromptSubmit", async ($, e, next) => {
@@ -4382,7 +4742,7 @@ export const register = (on, options) => {
       return withNext(next, e, mine);
     }
     if (str(e.tool_name) === "Bash") {
-      const mine = await runSteps($, options, "PostToolUse", bashChangeSteps(e));
+      const mine = await runSteps($, options, "PostToolUse", [...bashChangeSteps(e), (io) => followupAfterBash(io, e)]);
       return withNext(next, e, mine);
     }
     if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name)))
@@ -4394,6 +4754,12 @@ export const register = (on, options) => {
     ]);
     return withNext(next, e, mine);
   });
+  on("classic.PostToolUseFailure", async ($, e, next) => {
+    if (str(e.tool_name) !== "Bash")
+      return next(e);
+    const mine = await runSteps($, options, "PostToolUseFailure", [(io) => followupAfterBashFailure(io, e)]);
+    return withNext(next, e, mine);
+  });
   on("classic.Notification", async ($, e, next) => {
     await runSteps($, options, "Notification", [(io) => notification(io, "notify", e)]);
     return next(e);
@@ -4403,12 +4769,28 @@ export const register = (on, options) => {
     return withNext(next, e, mine);
   });
   on("classic.SubagentStop", async ($, e, next) => {
+    let waiting = false;
     let gate;
     let feedback;
     const mine = await runSteps($, options, "SubagentStop", [
-      async (io) => gate = await stopTestGate(io, "checks", e),
-      async (io) => feedback = await feedbackStopCheck(io, e),
-      (io) => saveSubagentReport(io, e, gate, feedback)
+      async (io) => {
+        const r = await followupStopCheck(io, e);
+        waiting = r.exitCode !== 0;
+        return r;
+      },
+      async (io) => {
+        if (waiting)
+          return ok();
+        gate = await stopTestGate(io, "checks", e);
+        return gate;
+      },
+      async (io) => {
+        if (waiting)
+          return ok();
+        feedback = await feedbackStopCheck(io, e);
+        return feedback;
+      },
+      (io) => waiting ? Promise.resolve(ok()) : saveSubagentReport(io, e, gate, feedback)
     ]);
     return withNext(next, e, mine);
   });
