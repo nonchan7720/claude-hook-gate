@@ -3491,7 +3491,7 @@ async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
   const threshold = saved.started - MTIME_SLACK_MS;
   const stateDir = join(projectDir, ".claude", STATE_DIR);
   const picked = new Set;
-  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd)) {
+  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd, command)) {
     for (const rel of await candidates(io, root, threshold)) {
       const abs = join(root, rel);
       if (abs.startsWith(`${stateDir}/`) || abs.startsWith(`${startedDirPath}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
@@ -3518,7 +3518,16 @@ var gitTop = async (io, dir) => {
   const top = await io.run(["git", "-C", dir, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 });
   return top.exitCode === 0 ? top.stdout.replace(/\n+$/, "") : "";
 };
-async function scanRoots(io, projectDir, cwd) {
+var mentionsWorktree = (command, name) => {
+  const needle = `worktrees/${name}`;
+  for (let i = command.indexOf(needle);i >= 0; i = command.indexOf(needle, i + 1)) {
+    const next = command.charAt(i + needle.length);
+    if (!/[A-Za-z0-9._-]/.test(next))
+      return true;
+  }
+  return false;
+};
+async function scanRoots(io, projectDir, cwd, command) {
   const roots = [];
   const add = (top) => {
     if (top !== "" && !roots.includes(top))
@@ -3527,7 +3536,7 @@ async function scanRoots(io, projectDir, cwd) {
   add(await gitTop(io, cwd));
   const worktreesDir = join(projectDir, ".claude", "worktrees");
   for (const e of await io.list(worktreesDir)) {
-    if (e.kind === "dir")
+    if (e.kind === "dir" && mentionsWorktree(command, e.name))
       add(await gitTop(io, join(worktreesDir, e.name)));
   }
   return roots;
