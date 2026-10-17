@@ -1999,7 +1999,7 @@ function shareKey(root, cwd, cmd, env) {
   const shared = Object.entries(env).filter(([k]) => !AGENT_ENV_KEYS.includes(k) && k !== FILES_ENV_KEY).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
   return JSON.stringify([root, cwd, cmd, shared]);
 }
-var serialKey = (name, cmd) => name ? `name:${name}` : `cmd:${cmd}`;
+var serialKey = (sessionId, name, cmd) => JSON.stringify([sessionId, name ? `name:${name}` : `cmd:${cmd}`]);
 var shareFiles = (env, files) => files && env[FILES_ENV_KEY] ? shellSplit(env[FILES_ENV_KEY]) : [];
 var isParallel = (item) => isDict(item) && ("parallel" in item);
 function summarizeCmds(cmds) {
@@ -2424,7 +2424,7 @@ class Gate {
     const key = shareKey(scope.root, cwd, cmd, env);
     const r = await runShared(this.io, key, shareFiles(env, scope.files !== false), Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS), (pidFiles) => this.runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles), {
       onWait,
-      serial: serialKey(name, cmd)
+      serial: serialKey(this.sessionId, name, cmd)
     });
     if (!r.shared)
       return r.outcome;
