@@ -42,7 +42,13 @@ followup:
   triggered: "[followup] \`{{command}}\` has run, so run the following follow-up command next ({{label}}):"
   argsHeader: "How to fill {{...}} (infer the values from the output of the command above and the context):"
   argNoHint: "(no description; infer it from the context)"
-  instruction: "Run this command in your next Bash call and report its result to the user. Stopping is blocked until it has run."
+  instruction: "Run this command in your next Bash call (with run_in_background: true if it takes long) and report its result to the user. Stopping is blocked until it has run."
+  started: "[followup] \`{{trigger}}\` has run, so the follow-up command ({{label}}) was started in the background: \`{{command}}\`. Its result will be handed to you as soon as it finishes (at the latest when you stop, where it is waited for). Keep working; do not wait for it."
+  result: "[followup] The follow-up command \`{{command}}\` ({{name}}) finished (exit {{code}}, {{seconds}}s). Report this result to the user (full output: {{log}}):"
+  resultTimeout: "[followup] The follow-up command \`{{command}}\` ({{name}}) did not finish within {{timeout}}s and was stopped. Report the output so far to the user (full output: {{log}}):"
+  resultLost: "[followup] The process of the follow-up command \`{{command}}\` ({{name}}) disappeared without leaving an exit status (killed or restarted?). Report the output so far to the user (full output: {{log}}):"
+  waiting: "[followup] waiting: {{command}} ({{seconds}}s)"
+  outputOmitted: "… (first {{n}} lines omitted)"
   done: "[followup] The follow-up command \`{{command}}\` ({{name}}) succeeded. Include its result in your report to the user."
   failed: "[followup] The follow-up command \`{{command}}\` ({{name}}) failed (attempt {{attempt}}/{{max}}). Look at the error above: if the command or its arguments were wrong, rebuild the correct command and run it again. If the command was right and the failure is the result itself (for example failed CI checks), do not run it again; report that result to the user."
   gaveUp: "[followup] The follow-up command ({{name}}) failed {{max}} times. Giving up; report the failure to the user."
@@ -203,7 +209,13 @@ followup:
   triggered: "[followup] \`{{command}}\` を実行したので、続けて次の後続コマンドを実行してください（{{label}}）:"
   argsHeader: "{{...}} の埋め方（直前のコマンドの出力などから推測して埋める）:"
   argNoHint: "（説明なし。文脈から推測する）"
-  instruction: "次の Bash でこのコマンドを実行し、その結果をユーザーに報告してください。実行するまで終了（Stop）はブロックされます。"
+  instruction: "次の Bash でこのコマンドを実行し（時間がかかるなら run_in_background: true で）、その結果をユーザーに報告してください。実行するまで終了（Stop）はブロックされます。"
+  started: "[followup] \`{{trigger}}\` を実行したので、後続コマンド（{{label}}）をバックグラウンドで開始しました: \`{{command}}\`。結果は終わり次第渡します（遅くとも終了（Stop）時に待ち合わせて渡します）。待たずに作業を続けてください。"
+  result: "[followup] 後続コマンド \`{{command}}\`（{{name}}）が終了しました（exit {{code}}、{{seconds}}s）。この結果をユーザーに報告してください（出力の全文: {{log}}）:"
+  resultTimeout: "[followup] 後続コマンド \`{{command}}\`（{{name}}）が {{timeout}} 秒以内に終わらなかったので止めました。ここまでの出力をユーザーに報告してください（出力の全文: {{log}}）:"
+  resultLost: "[followup] 後続コマンド \`{{command}}\`（{{name}}）のプロセスが終了コードを残さずに消えました（kill や再起動の可能性）。ここまでの出力をユーザーに報告してください（出力の全文: {{log}}）:"
+  waiting: "[followup] 待機中: {{command}} ({{seconds}}s)"
+  outputOmitted: "…（先頭 {{n}} 行省略）"
   done: "[followup] 後続コマンド \`{{command}}\`（{{name}}）が成功しました。その結果をユーザーへの報告に含めてください。"
   failed: "[followup] 後続コマンド \`{{command}}\`（{{name}}）が失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て、コマンドや引数が誤っていれば正しいコマンドに組み立て直して再実行してください。コマンドは正しく、この失敗がそのまま結果（CI の失敗など）なら、再実行せずにその結果をユーザーに報告してください。"
   gaveUp: "[followup] 後続コマンド（{{name}}）が {{max}} 回失敗したので打ち切ります。失敗の内容をユーザーに報告してください。"
@@ -1470,323 +1482,6 @@ async function feedbackStopCheck(io, payload) {
   }
 }
 
-// src/followup.ts
-var MAX_STOP_BLOCKS = 3;
-var DEFAULT_MAX_ATTEMPTS = 3;
-var DAY_MS2 = 24 * 60 * 60 * 1000;
-function followupDir(io) {
-  const override = io.env.CLAUDE_FOLLOWUP_DIR;
-  if (override)
-    return override;
-  return join(io.env.HOME || "~", ".claude", "followup");
-}
-var projectFollowupDir = (io, projectDir) => join(projectDir || io.projectDir || io.cwd, ".claude", "followup");
-var stateIdOf = (payload) => {
-  const sessionId = jqStr(payload.session_id) || "unknown";
-  const agentId = jqStr(payload.agent_id);
-  return agentId ? `${sessionId}--${agentId}` : sessionId;
-};
-var safeName = (s) => s.replace(/[^A-Za-z0-9_.-]/g, "_");
-var pendingPath = (io, stateId) => join(followupDir(io), ".pending", `${safeName(stateId)}.json`);
-var PLACEHOLDER_RE = /\{\{\s*([A-Za-z_][\w-]*)\s*\}\}/g;
-var placeholders = (run) => [...new Set([...run.matchAll(PLACEHOLDER_RE)].map((m) => m[1] ?? ""))];
-var escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function runRegExp(run) {
-  let src = "";
-  run.split(PLACEHOLDER_RE).forEach((part, i) => {
-    if (i % 2 === 1)
-      src += `(?:"[^"]*"|'[^']*'|\\S+)`;
-    else
-      src += escapeRegExp(part).replace(/\s+/g, "\\s+");
-  });
-  return new RegExp(src);
-}
-var argsOf = (raw) => {
-  const out = {};
-  if (!isDict(raw))
-    return out;
-  for (const [k, v] of Object.entries(raw))
-    if (truthy(v))
-      out[k] = String(v);
-  return out;
-};
-async function loadFollowup(io, path) {
-  const content = await io.readFile(path);
-  if (content === undefined)
-    return null;
-  const m = FRONTMATTER_RE.exec(content);
-  if (!m)
-    return null;
-  const data = loadYamlText(m[1] ?? "");
-  if (!isDict(data))
-    return null;
-  const t = tr(io.lang);
-  for (const key of ["when", "run"])
-    if (!truthy(data[key]))
-      throw new Error(t("followup.missingKey", { key }));
-  for (const key of ["when", "unless"]) {
-    const v = data[key];
-    if (!truthy(v))
-      continue;
-    try {
-      pyRegExp(String(v));
-    } catch (e) {
-      throw new Error(t("followup.badRegex", { key, error: errorText(e) }));
-    }
-  }
-  const file = path.slice(path.lastIndexOf("/") + 1);
-  const maxAttempts = toCount(data.max_attempts);
-  return {
-    name: truthy(data.name) ? String(data.name) : file.replace(/\.md$/, ""),
-    description: truthy(data.description) ? String(data.description) : "",
-    when: String(data.when),
-    ...truthy(data.unless) ? { unless: String(data.unless) } : {},
-    run: String(data.run).trim(),
-    args: argsOf(data.args),
-    maxAttempts: maxAttempts > 0 ? maxAttempts : DEFAULT_MAX_ATTEMPTS,
-    body: content.slice(m[0].length).trim(),
-    path,
-    expires: parseExpires(data.expires),
-    projects: stringList(data.projects),
-    whenExists: stringList(data.when_exists)
-  };
-}
-async function listFollowupsIn(io, dir, broken) {
-  const out = [];
-  const names = (await io.list(dir)).filter((e) => e.kind === "file" && e.name.endsWith(".md")).map((e) => e.name).sort();
-  for (const name of names) {
-    const path = join(dir, name);
-    try {
-      const f = await loadFollowup(io, path);
-      if (f)
-        out.push(f);
-    } catch (e) {
-      broken.push({ path, reason: tr(io.lang)("followup.unreadable", { error: errorText(e) }) });
-    }
-  }
-  return out;
-}
-async function scanFollowups(io) {
-  const broken = [];
-  const globalDir = followupDir(io);
-  const projectDir = projectFollowupDir(io);
-  const globalOnes = await listFollowupsIn(io, globalDir, broken);
-  let merged = globalOnes;
-  if (projectDir !== globalDir) {
-    const projectOnes = await listFollowupsIn(io, projectDir, broken);
-    const overridden = new Set(projectOnes.map((f) => f.name));
-    merged = [...globalOnes.filter((f) => !overridden.has(f.name)), ...projectOnes];
-  }
-  const active = [];
-  for (const f of merged)
-    if (await isRuleActive(io, f))
-      active.push(f);
-  return { followups: active, broken };
-}
-async function listFollowups(io) {
-  const { followups, broken } = await scanFollowups(io);
-  for (const b of broken)
-    await logError(io, "followup", b.reason, b.path);
-  return followups;
-}
-async function loadPending(io, stateId, now) {
-  try {
-    const text = await io.readFile(pendingPath(io, stateId));
-    if (text === undefined)
-      return { entries: [], stopBlocks: 0 };
-    const data = JSON.parse(text);
-    if (!isDict(data) || !Array.isArray(data.entries))
-      return { entries: [], stopBlocks: 0 };
-    const entries = data.entries.filter((e) => isDict(e) && typeof e.run === "string" && typeof e.createdAt === "number" && e.createdAt >= now - DAY_MS2);
-    return { entries, stopBlocks: toCount(data.stopBlocks) };
-  } catch {
-    return { entries: [], stopBlocks: 0 };
-  }
-}
-async function savePending(io, stateId, state) {
-  const path = pendingPath(io, stateId);
-  if (state.entries.length === 0) {
-    await io.removeFiles([path]);
-    return;
-  }
-  await io.writeFile(path, `${JSON.stringify(state)}
-`);
-}
-function oneLine(command, max = 120) {
-  const first = command.split(`
-`).find((l) => l.trim() !== "")?.trim() ?? "";
-  return first.length > max ? `${first.slice(0, max)} ...` : first;
-}
-var labelOf = (p) => p.description ? `${p.name}: ${p.description}` : p.name;
-function instructionText(lang, p) {
-  const t = tr(lang);
-  const lines = [t("followup.triggered", { command: p.command, label: labelOf(p) }), `  ${p.run}`];
-  const names = placeholders(p.run);
-  if (names.length > 0) {
-    lines.push(t("followup.argsHeader"));
-    for (const n of names)
-      lines.push(`  {{${n}}}: ${p.args[n] ?? t("followup.argNoHint")}`);
-  }
-  if (p.body)
-    lines.push(p.body);
-  lines.push(t("followup.instruction"));
-  return lines.join(`
-`);
-}
-var context = (event, body) => ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: body } })}
-`);
-var commandOf = (payload) => jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
-var matchPending = (entries, command) => entries.find((p) => runRegExp(p.run).test(command));
-async function afterBash(io, payload) {
-  const command = commandOf(payload);
-  if (command === "")
-    return ok();
-  const followups = await listFollowups(io);
-  const stateId = stateIdOf(payload);
-  const now = await io.now();
-  const state = await loadPending(io, stateId, now);
-  if (followups.length === 0 && state.entries.length === 0)
-    return ok();
-  const t = tr(io.lang);
-  const notes = [];
-  let changed = false;
-  const done = matchPending(state.entries, command);
-  if (done) {
-    state.entries = state.entries.filter((p) => p !== done);
-    changed = true;
-    notes.push(t("followup.done", { command: oneLine(command), name: done.name }));
-  }
-  for (const f of followups) {
-    if (done?.name === f.name)
-      continue;
-    if (!pyRegExp(f.when).test(command))
-      continue;
-    if (f.unless !== undefined && pyRegExp(f.unless).test(command))
-      continue;
-    const p = {
-      name: f.name,
-      description: f.description,
-      run: f.run,
-      args: f.args,
-      body: f.body,
-      command: oneLine(command),
-      toolUseId: jqStr(payload.tool_use_id),
-      attempts: 0,
-      attempted: false,
-      maxAttempts: f.maxAttempts,
-      createdAt: now
-    };
-    state.entries.push(p);
-    changed = true;
-    notes.push(instructionText(io.lang, p));
-  }
-  if (changed)
-    await savePending(io, stateId, state);
-  return notes.length > 0 ? context("PostToolUse", notes.join(`
-
-`)) : ok();
-}
-async function followupAfterBash(io, payload) {
-  try {
-    return await afterBash(io, payload);
-  } catch (e) {
-    await logError(io, "followup", errorText(e));
-    return ok("", `[followup] internal error (ignored): ${errorText(e)}
-`);
-  }
-}
-async function afterBashFailure(io, payload) {
-  const command = commandOf(payload);
-  if (command === "")
-    return ok();
-  const stateId = stateIdOf(payload);
-  const state = await loadPending(io, stateId, await io.now());
-  const p = matchPending(state.entries, command);
-  if (!p)
-    return ok();
-  const t = tr(io.lang);
-  if (payload.is_interrupt === true) {
-    state.entries = state.entries.filter((x) => x !== p);
-    await savePending(io, stateId, state);
-    return ok();
-  }
-  p.attempts += 1;
-  p.attempted = true;
-  if (p.attempts >= p.maxAttempts) {
-    state.entries = state.entries.filter((x) => x !== p);
-    await savePending(io, stateId, state);
-    return context("PostToolUseFailure", t("followup.gaveUp", { name: p.name, max: p.maxAttempts }));
-  }
-  await savePending(io, stateId, state);
-  return context("PostToolUseFailure", t("followup.failed", { command: oneLine(command), name: p.name, attempt: p.attempts, max: p.maxAttempts }));
-}
-async function followupAfterBashFailure(io, payload) {
-  try {
-    return await afterBashFailure(io, payload);
-  } catch (e) {
-    await logError(io, "followup", errorText(e));
-    return ok("", `[followup] internal error (ignored): ${errorText(e)}
-`);
-  }
-}
-async function stopCheck(io, payload) {
-  const stateId = stateIdOf(payload);
-  const state = await loadPending(io, stateId, await io.now());
-  const waiting = state.entries.filter((p) => !p.attempted);
-  if (waiting.length === 0) {
-    if (state.stopBlocks !== 0) {
-      state.stopBlocks = 0;
-      await savePending(io, stateId, state);
-    }
-    return ok();
-  }
-  const t = tr(io.lang);
-  state.stopBlocks += 1;
-  if (state.stopBlocks >= MAX_STOP_BLOCKS) {
-    state.entries = state.entries.filter((p) => p.attempted);
-    state.stopBlocks = 0;
-    await savePending(io, stateId, state);
-    return ok("", `${t("followup.stopGaveUp", { max: MAX_STOP_BLOCKS })}
-`);
-  }
-  await savePending(io, stateId, state);
-  const lines = [t("followup.stopHeader", { attempt: state.stopBlocks, max: MAX_STOP_BLOCKS })];
-  for (const p of waiting)
-    lines.push(t("followup.stopItem", { label: labelOf(p), run: p.run, command: p.command }));
-  const reason = lines.join(`
-`);
-  return { exitCode: 2, stdout: `${JSON.stringify({ decision: "block", reason })}
-`, stderr: `${reason}
-` };
-}
-async function followupStopCheck(io, payload) {
-  try {
-    return await stopCheck(io, payload);
-  } catch (e) {
-    await logError(io, "followup", errorText(e));
-    return ok("", `[followup] internal error (ignored): ${errorText(e)}
-`);
-  }
-}
-async function resetFollowups(io, payload) {
-  try {
-    const dir = join(followupDir(io), ".pending");
-    const sessionId = safeName(jqStr(payload.session_id) || "unknown");
-    const source = jqStr(payload.source);
-    const now = await io.now();
-    const doomed = [];
-    for (const e of await io.list(dir)) {
-      if (e.kind !== "file" || !e.name.endsWith(".json"))
-        continue;
-      const mine = e.name === `${sessionId}.json` || e.name.startsWith(`${sessionId}--`);
-      if (mine && (source === "startup" || source === "clear") || e.mtimeMs < now - DAY_MS2)
-        doomed.push(join(dir, e.name));
-    }
-    await io.removeFiles(doomed);
-  } catch {}
-  return ok();
-}
-
 // src/shell.ts
 var SAFE = /^[A-Za-z0-9@%+=:,./-]+$/;
 function shellQuote(s) {
@@ -1850,6 +1545,556 @@ function shellSplit(s) {
   if (inToken)
     out.push(cur);
   return out;
+}
+
+// src/followup.ts
+var MAX_STOP_BLOCKS = 3;
+var DEFAULT_MAX_ATTEMPTS = 3;
+var DEFAULT_TIMEOUT_S = 1800;
+var OUTPUT_TAIL_LINES = 60;
+var OUTPUT_TAIL_BYTES = 8192;
+var DAY_MS2 = 24 * 60 * 60 * 1000;
+var POLL_MS = 1000;
+function followupDir(io) {
+  const override = io.env.CLAUDE_FOLLOWUP_DIR;
+  if (override)
+    return override;
+  return join(io.env.HOME || "~", ".claude", "followup");
+}
+var projectFollowupDir = (io, projectDir) => join(projectDir || io.projectDir || io.cwd, ".claude", "followup");
+var stateIdOf = (payload) => {
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  const agentId = jqStr(payload.agent_id);
+  return agentId ? `${sessionId}--${agentId}` : sessionId;
+};
+var safeName = (s) => s.replace(/[^A-Za-z0-9_.-]/g, "_");
+var pendingPath = (io, stateId) => join(followupDir(io), ".pending", `${safeName(stateId)}.json`);
+var runsDir = (io) => join(followupDir(io), ".runs");
+var runFiles = (io, runId) => ({
+  log: join(runsDir(io), `${runId}.log`),
+  exit: join(runsDir(io), `${runId}.exit`),
+  pid: join(runsDir(io), `${runId}.pid`)
+});
+var PLACEHOLDER_RE = /\{\{\s*([A-Za-z_][\w-]*)\s*\}\}/g;
+var placeholders = (run) => [...new Set([...run.matchAll(PLACEHOLDER_RE)].map((m) => m[1] ?? ""))];
+var escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function runRegExp(run) {
+  let src = "";
+  run.split(PLACEHOLDER_RE).forEach((part, i) => {
+    if (i % 2 === 1)
+      src += `(?:"[^"]*"|'[^']*'|\\S+)`;
+    else
+      src += escapeRegExp(part).replace(/\s+/g, "\\s+");
+  });
+  return new RegExp(src);
+}
+function argsOf(lang, raw) {
+  const out = {};
+  if (!isDict(raw))
+    return out;
+  for (const [k, v] of Object.entries(raw)) {
+    if (isDict(v)) {
+      const spec = { from: v.from === "command" ? "command" : "output" };
+      if (truthy(v.pattern)) {
+        try {
+          pyRegExp(String(v.pattern));
+        } catch (e) {
+          throw new Error(tr(lang)("followup.badRegex", { key: `args.${k}.pattern`, error: errorText(e) }));
+        }
+        spec.pattern = String(v.pattern);
+      }
+      if (truthy(v.hint))
+        spec.hint = String(v.hint);
+      out[k] = spec;
+    } else if (truthy(v)) {
+      out[k] = { from: "output", hint: String(v) };
+    }
+  }
+  return out;
+}
+async function loadFollowup(io, path) {
+  const content = await io.readFile(path);
+  if (content === undefined)
+    return null;
+  const m = FRONTMATTER_RE.exec(content);
+  if (!m)
+    return null;
+  const data = loadYamlText(m[1] ?? "");
+  if (!isDict(data))
+    return null;
+  const t = tr(io.lang);
+  for (const key of ["when", "run"])
+    if (!truthy(data[key]))
+      throw new Error(t("followup.missingKey", { key }));
+  for (const key of ["when", "unless"]) {
+    const v = data[key];
+    if (!truthy(v))
+      continue;
+    try {
+      pyRegExp(String(v));
+    } catch (e) {
+      throw new Error(t("followup.badRegex", { key, error: errorText(e) }));
+    }
+  }
+  const file = path.slice(path.lastIndexOf("/") + 1);
+  const maxAttempts = toCount(data.max_attempts);
+  const timeout = toCount(data.timeout);
+  return {
+    name: truthy(data.name) ? String(data.name) : file.replace(/\.md$/, ""),
+    description: truthy(data.description) ? String(data.description) : "",
+    when: String(data.when),
+    ...truthy(data.unless) ? { unless: String(data.unless) } : {},
+    run: String(data.run).trim(),
+    args: argsOf(io.lang, data.args),
+    timeout: timeout > 0 ? timeout : DEFAULT_TIMEOUT_S,
+    maxAttempts: maxAttempts > 0 ? maxAttempts : DEFAULT_MAX_ATTEMPTS,
+    body: content.slice(m[0].length).trim(),
+    path,
+    expires: parseExpires(data.expires),
+    projects: stringList(data.projects),
+    whenExists: stringList(data.when_exists)
+  };
+}
+async function listFollowupsIn(io, dir, broken) {
+  const out = [];
+  const names = (await io.list(dir)).filter((e) => e.kind === "file" && e.name.endsWith(".md")).map((e) => e.name).sort();
+  for (const name of names) {
+    const path = join(dir, name);
+    try {
+      const f = await loadFollowup(io, path);
+      if (f)
+        out.push(f);
+    } catch (e) {
+      broken.push({ path, reason: tr(io.lang)("followup.unreadable", { error: errorText(e) }) });
+    }
+  }
+  return out;
+}
+async function scanFollowups(io) {
+  const broken = [];
+  const globalDir = followupDir(io);
+  const projectDir = projectFollowupDir(io);
+  const globalOnes = await listFollowupsIn(io, globalDir, broken);
+  let merged = globalOnes;
+  if (projectDir !== globalDir) {
+    const projectOnes = await listFollowupsIn(io, projectDir, broken);
+    const overridden = new Set(projectOnes.map((f) => f.name));
+    merged = [...globalOnes.filter((f) => !overridden.has(f.name)), ...projectOnes];
+  }
+  const active = [];
+  for (const f of merged)
+    if (await isRuleActive(io, f))
+      active.push(f);
+  return { followups: active, broken };
+}
+async function listFollowups(io) {
+  const { followups, broken } = await scanFollowups(io);
+  for (const b of broken)
+    await logError(io, "followup", b.reason, b.path);
+  return followups;
+}
+var outputOf = (payload) => {
+  const r = payload.tool_response;
+  if (!isDict(r))
+    return "";
+  return [jqStr(r.stdout), jqStr(r.stderr)].filter((s) => s !== "").join(`
+`);
+};
+function resolveArgs(f, command, output) {
+  const values = {};
+  for (const name of placeholders(f.run)) {
+    const spec = f.args[name];
+    if (!spec?.pattern)
+      return;
+    const m = pyRegExp(spec.pattern).exec(spec.from === "command" ? command : output);
+    if (!m)
+      return;
+    const value = (m[1] ?? m[0]).trim();
+    if (value === "")
+      return;
+    values[name] = value;
+  }
+  const filled = f.run.replace(PLACEHOLDER_RE, (_, name) => shellQuote(values[name] ?? ""));
+  return { command: filled, values };
+}
+var hintsOf = (f) => Object.fromEntries(Object.entries(f.args).flatMap(([k, v]) => v.hint ? [[k, v.hint]] : []));
+async function loadPending(io, stateId, now) {
+  try {
+    const text = await io.readFile(pendingPath(io, stateId));
+    if (text === undefined)
+      return { entries: [], stopBlocks: 0 };
+    const data = JSON.parse(text);
+    if (!isDict(data) || !Array.isArray(data.entries))
+      return { entries: [], stopBlocks: 0 };
+    const entries = data.entries.filter((e) => isDict(e) && typeof e.run === "string" && typeof e.createdAt === "number" && e.createdAt >= now - DAY_MS2);
+    return { entries, stopBlocks: toCount(data.stopBlocks) };
+  } catch {
+    return { entries: [], stopBlocks: 0 };
+  }
+}
+async function savePending(io, stateId, state) {
+  const path = pendingPath(io, stateId);
+  if (state.entries.length === 0) {
+    await io.removeFiles([path]);
+    return;
+  }
+  await io.writeFile(path, `${JSON.stringify(state)}
+`);
+}
+function oneLine(command, max = 120) {
+  const first = command.split(`
+`).find((l) => l.trim() !== "")?.trim() ?? "";
+  return first.length > max ? `${first.slice(0, max)} ...` : first;
+}
+var labelOf = (p) => p.description ? `${p.name}: ${p.description}` : p.name;
+function instructionText(lang, p) {
+  const t = tr(lang);
+  const lines = [t("followup.triggered", { command: p.trigger, label: labelOf(p) }), `  ${p.run}`];
+  const names = placeholders(p.run);
+  if (names.length > 0) {
+    lines.push(t("followup.argsHeader"));
+    for (const n of names)
+      lines.push(`  {{${n}}}: ${p.hints[n] ?? t("followup.argNoHint")}`);
+  }
+  if (p.body)
+    lines.push(p.body);
+  lines.push(t("followup.instruction"));
+  return lines.join(`
+`);
+}
+function outputTail(lang, text) {
+  const lines = text.replace(/\n+$/, "").split(`
+`);
+  let kept = lines.slice(-OUTPUT_TAIL_LINES);
+  while (kept.length > 1 && kept.join(`
+`).length > OUTPUT_TAIL_BYTES)
+    kept = kept.slice(1);
+  const omitted = lines.length - kept.length;
+  const body = kept.join(`
+`);
+  return omitted > 0 ? `${tr(lang)("followup.outputOmitted", { n: omitted })}
+${body}` : body;
+}
+var context = (event, body) => ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: body } })}
+`);
+var commandOf = (payload) => jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
+var matchPending = (entries, command) => entries.find((p) => p.mode === "claude" && runRegExp(p.run).test(command));
+var LAUNCH_SCRIPT = [
+  `runner='sh -c "$1" </dev/null >>"$2" 2>&1; echo $? >"$3"'`,
+  'if command -v setsid >/dev/null 2>&1; then setsid sh -c "$runner" sh "$1" "$2" "$3" </dev/null >/dev/null 2>&1 &',
+  'else nohup sh -c "$runner" sh "$1" "$2" "$3" </dev/null >/dev/null 2>&1 & fi',
+  'echo $! >"$4"'
+].join(`
+`);
+async function launch(io, f, command, trigger, payload, now) {
+  const runId = `${safeName(stateIdOf(payload))}.${Math.floor(now)}-${Math.random().toString(36).slice(2, 8)}`;
+  const files = runFiles(io, runId);
+  const cwd = jqStr(payload.cwd) || io.cwd;
+  const projectDir = io.projectDir || io.cwd;
+  await io.writeFile(files.log, `$ ${command}  (cwd: ${cwd})
+`);
+  const r = await io.run(["sh", "-c", LAUNCH_SCRIPT, "sh", command, files.log, files.exit, files.pid], {
+    cwd,
+    env: { CLAUDE_PROJECT_DIR: projectDir },
+    timeoutMs: 1e4
+  });
+  if (r.exitCode !== 0 || r.error !== undefined) {
+    await logError(io, "followup", `launch failed: ${r.error ?? r.stderr}`, f.path);
+    await io.removeFiles([files.log, files.exit, files.pid]);
+    return;
+  }
+  return {
+    name: f.name,
+    description: f.description,
+    mode: "hook",
+    run: f.run,
+    hints: hintsOf(f),
+    body: f.body,
+    trigger,
+    toolUseId: jqStr(payload.tool_use_id),
+    attempts: 0,
+    attempted: true,
+    maxAttempts: f.maxAttempts,
+    createdAt: now,
+    command,
+    runId,
+    started: now,
+    timeout: f.timeout,
+    cwd
+  };
+}
+var readExit = async (io, exitFile) => {
+  const text = await io.readFile(exitFile);
+  if (text === undefined || !/^\s*\d+\s*$/.test(text))
+    return;
+  return Number.parseInt(text.trim(), 10);
+};
+var pidAlive = async (io, pidFile) => {
+  const pid = (await io.readFile(pidFile) ?? "").trim();
+  if (!/^\d+$/.test(pid))
+    return false;
+  return (await io.run(["sh", "-c", 'kill -0 "$1" 2>/dev/null', "sh", pid], { timeoutMs: 5000 })).exitCode === 0;
+};
+var killRun = async (io, pidFile) => {
+  const pid = (await io.readFile(pidFile) ?? "").trim();
+  if (!/^\d+$/.test(pid))
+    return;
+  await io.run(["sh", "-c", 'kill -s TERM -- "-$1" 2>/dev/null || kill -s TERM "$1" 2>/dev/null', "sh", pid], { timeoutMs: 5000 });
+};
+async function outcomeOf(io, p, now) {
+  if (!p.runId)
+    return { kind: "lost" };
+  const files = runFiles(io, p.runId);
+  const code = await readExit(io, files.exit);
+  if (code !== undefined)
+    return { kind: "done", code };
+  if (now >= (p.started ?? p.createdAt) + (p.timeout ?? DEFAULT_TIMEOUT_S) * 1000)
+    return { kind: "timeout" };
+  if (!await pidAlive(io, files.pid)) {
+    await io.run(["sleep", "0.2"]);
+    const late = await readExit(io, files.exit);
+    return late !== undefined ? { kind: "done", code: late } : { kind: "lost" };
+  }
+  return;
+}
+async function resultText(io, p, outcome, now) {
+  const t = tr(io.lang);
+  const files = p.runId ? runFiles(io, p.runId) : undefined;
+  const log = files ? await io.readFile(files.log) ?? "" : "";
+  const command = oneLine(p.command ?? p.run);
+  const seconds = Math.round((now - (p.started ?? p.createdAt)) / 1000);
+  let head;
+  if (outcome.kind === "done")
+    head = t("followup.result", { command, name: p.name, code: outcome.code, seconds, log: files?.log ?? "" });
+  else if (outcome.kind === "timeout") {
+    if (files)
+      await killRun(io, files.pid);
+    head = t("followup.resultTimeout", { command, name: p.name, timeout: p.timeout ?? DEFAULT_TIMEOUT_S, log: files?.log ?? "" });
+  } else
+    head = t("followup.resultLost", { command, name: p.name, log: files?.log ?? "" });
+  const body = outputTail(io.lang, log.split(`
+`).slice(1).join(`
+`));
+  if (files)
+    await io.removeFiles([files.exit, files.pid]);
+  return body === "" ? head : `${head}
+${body}`;
+}
+async function collect(io, stateId, state, wait) {
+  const notes = [];
+  const t = tr(io.lang);
+  for (const p of state.entries.filter((e) => e.mode === "hook")) {
+    let now = await io.now();
+    let outcome = await outcomeOf(io, p, now);
+    while (outcome === undefined && wait) {
+      io.progress?.(t("followup.waiting", { command: oneLine(p.command ?? p.run, 60), seconds: Math.floor((now - (p.started ?? p.createdAt)) / 1000) }));
+      await io.run(["sleep", String(POLL_MS / 1000)]);
+      now = await io.now();
+      outcome = await outcomeOf(io, p, now);
+    }
+    if (outcome === undefined)
+      continue;
+    notes.push(await resultText(io, p, outcome, now));
+    state.entries = state.entries.filter((e) => e !== p);
+  }
+  if (notes.length > 0)
+    await savePending(io, stateId, state);
+  return notes;
+}
+async function collectStep(io, payload, event) {
+  const stateId = stateIdOf(payload);
+  const state = await loadPending(io, stateId, await io.now());
+  if (!state.entries.some((e) => e.mode === "hook"))
+    return ok();
+  const notes = await collect(io, stateId, state, false);
+  if (notes.length === 0)
+    return ok();
+  const body = notes.join(`
+
+`);
+  return event === "UserPromptSubmit" ? ok(body) : context(event, body);
+}
+async function followupCollect(io, payload, event = "PostToolUse") {
+  try {
+    return await collectStep(io, payload, event);
+  } catch (e) {
+    await logError(io, "followup", errorText(e));
+    return ok("", `[followup] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+async function afterBash(io, payload) {
+  const command = commandOf(payload);
+  if (command === "")
+    return ok();
+  const followups = await listFollowups(io);
+  const stateId = stateIdOf(payload);
+  const now = await io.now();
+  const state = await loadPending(io, stateId, now);
+  if (followups.length === 0 && state.entries.length === 0)
+    return ok();
+  const t = tr(io.lang);
+  const notes = [];
+  let changed = false;
+  notes.push(...await collect(io, stateId, state, false));
+  const done = matchPending(state.entries, command);
+  if (done) {
+    state.entries = state.entries.filter((p) => p !== done);
+    changed = true;
+    notes.push(t("followup.done", { command: oneLine(command), name: done.name }));
+  }
+  const trigger = oneLine(command);
+  const output = outputOf(payload);
+  for (const f of followups) {
+    if (done?.name === f.name)
+      continue;
+    if (!pyRegExp(f.when).test(command))
+      continue;
+    if (f.unless !== undefined && pyRegExp(f.unless).test(command))
+      continue;
+    const resolved = resolveArgs(f, command, output);
+    if (resolved) {
+      const p = await launch(io, f, resolved.command, trigger, payload, now);
+      if (p) {
+        state.entries.push(p);
+        changed = true;
+        notes.push(t("followup.started", { trigger, label: labelOf(f), command: resolved.command }));
+        continue;
+      }
+    }
+    const p = {
+      name: f.name,
+      description: f.description,
+      mode: "claude",
+      run: f.run,
+      hints: hintsOf(f),
+      body: f.body,
+      trigger,
+      toolUseId: jqStr(payload.tool_use_id),
+      attempts: 0,
+      attempted: false,
+      maxAttempts: f.maxAttempts,
+      createdAt: now
+    };
+    state.entries.push(p);
+    changed = true;
+    notes.push(instructionText(io.lang, p));
+  }
+  if (changed)
+    await savePending(io, stateId, state);
+  return notes.length > 0 ? context("PostToolUse", notes.join(`
+
+`)) : ok();
+}
+async function followupAfterBash(io, payload) {
+  try {
+    return await afterBash(io, payload);
+  } catch (e) {
+    await logError(io, "followup", errorText(e));
+    return ok("", `[followup] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+async function afterBashFailure(io, payload) {
+  const command = commandOf(payload);
+  if (command === "")
+    return ok();
+  const stateId = stateIdOf(payload);
+  const state = await loadPending(io, stateId, await io.now());
+  const p = matchPending(state.entries, command);
+  if (!p)
+    return ok();
+  const t = tr(io.lang);
+  if (payload.is_interrupt === true) {
+    state.entries = state.entries.filter((x) => x !== p);
+    await savePending(io, stateId, state);
+    return ok();
+  }
+  p.attempts += 1;
+  p.attempted = true;
+  if (p.attempts >= p.maxAttempts) {
+    state.entries = state.entries.filter((x) => x !== p);
+    await savePending(io, stateId, state);
+    return context("PostToolUseFailure", t("followup.gaveUp", { name: p.name, max: p.maxAttempts }));
+  }
+  await savePending(io, stateId, state);
+  return context("PostToolUseFailure", t("followup.failed", { command: oneLine(command), name: p.name, attempt: p.attempts, max: p.maxAttempts }));
+}
+async function followupAfterBashFailure(io, payload) {
+  try {
+    return await afterBashFailure(io, payload);
+  } catch (e) {
+    await logError(io, "followup", errorText(e));
+    return ok("", `[followup] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+var block = (reason) => ({ exitCode: 2, stdout: `${JSON.stringify({ decision: "block", reason })}
+`, stderr: `${reason}
+` });
+async function stopCheck(io, payload) {
+  const stateId = stateIdOf(payload);
+  const state = await loadPending(io, stateId, await io.now());
+  const t = tr(io.lang);
+  const results = await collect(io, stateId, state, true);
+  if (results.length > 0)
+    return block(results.join(`
+
+`));
+  const waiting = state.entries.filter((p) => p.mode === "claude" && !p.attempted);
+  if (waiting.length === 0) {
+    if (state.stopBlocks !== 0) {
+      state.stopBlocks = 0;
+      await savePending(io, stateId, state);
+    }
+    return ok();
+  }
+  state.stopBlocks += 1;
+  if (state.stopBlocks >= MAX_STOP_BLOCKS) {
+    state.entries = state.entries.filter((p) => p.attempted);
+    state.stopBlocks = 0;
+    await savePending(io, stateId, state);
+    return ok("", `${t("followup.stopGaveUp", { max: MAX_STOP_BLOCKS })}
+`);
+  }
+  await savePending(io, stateId, state);
+  const lines = [t("followup.stopHeader", { attempt: state.stopBlocks, max: MAX_STOP_BLOCKS })];
+  for (const p of waiting)
+    lines.push(t("followup.stopItem", { label: labelOf(p), run: p.run, command: p.trigger }));
+  return block(lines.join(`
+`));
+}
+async function followupStopCheck(io, payload) {
+  try {
+    return await stopCheck(io, payload);
+  } catch (e) {
+    await logError(io, "followup", errorText(e));
+    return ok("", `[followup] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+async function resetFollowups(io, payload) {
+  try {
+    const sessionId = safeName(jqStr(payload.session_id) || "unknown");
+    const source = jqStr(payload.source);
+    const fresh = source === "startup" || source === "clear";
+    const now = await io.now();
+    const doomed = [];
+    for (const [dir, ext] of [
+      [join(followupDir(io), ".pending"), ".json"],
+      [runsDir(io), ""]
+    ]) {
+      for (const e of await io.list(dir)) {
+        if (e.kind !== "file" || !e.name.endsWith(ext))
+          continue;
+        const mine = e.name.startsWith(`${sessionId}.`) || e.name.startsWith(`${sessionId}--`);
+        if (mine && fresh || e.mtimeMs < now - DAY_MS2)
+          doomed.push(join(dir, e.name));
+      }
+    }
+    await io.removeFiles(doomed);
+  } catch {}
+  return ok();
 }
 
 // src/which.ts
@@ -4718,7 +4963,7 @@ export const register = (on, options) => {
     const text = await createIo($, options).then((io) => loadRules(io, options.rulesFile));
     if (text !== "")
       mine.additionalContext = [text];
-    const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io)]);
+    const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io), (io) => followupCollect(io, e, "UserPromptSubmit")]);
     return withNext(next, e, merge(mine, inject));
   });
   on("classic.PreToolUse", async ($guard, guardEvent, guardNext) => {
@@ -4737,21 +4982,20 @@ export const register = (on, options) => {
     return guardNext(guardEvent);
   });
   on("classic.PostToolUse", async ($, e, next) => {
-    if (/^(Agent|Task)$/.test(str(e.tool_name))) {
-      const mine = await runSteps($, options, "PostToolUse", [(io) => subagentReport(io, e)]);
-      return withNext(next, e, mine);
+    const tool = str(e.tool_name);
+    let steps;
+    if (/^(Agent|Task)$/.test(tool)) {
+      steps = [(io) => subagentReport(io, e)];
+    } else if (tool === "Bash") {
+      steps = [...bashChangeSteps(e), (io) => followupAfterBash(io, e)];
+    } else if (/^(Write|Edit|MultiEdit)$/.test(tool)) {
+      steps = [(io) => recordChanges(io, e), (io) => feedbackPostEdit(io, e), (io) => stopTestGate(io, "rules", e)];
+    } else {
+      steps = [];
     }
-    if (str(e.tool_name) === "Bash") {
-      const mine = await runSteps($, options, "PostToolUse", [...bashChangeSteps(e), (io) => followupAfterBash(io, e)]);
-      return withNext(next, e, mine);
-    }
-    if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name)))
-      return next(e);
-    const mine = await runSteps($, options, "PostToolUse", [
-      (io) => recordChanges(io, e),
-      (io) => feedbackPostEdit(io, e),
-      (io) => stopTestGate(io, "rules", e)
-    ]);
+    if (tool !== "Bash")
+      steps.push((io) => followupCollect(io, e));
+    const mine = await runSteps($, options, "PostToolUse", steps);
     return withNext(next, e, mine);
   });
   on("classic.PostToolUseFailure", async ($, e, next) => {
