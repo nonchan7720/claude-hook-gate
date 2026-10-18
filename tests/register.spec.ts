@@ -481,6 +481,7 @@ describe('Stop / SubagentStop / Notification', () => {
         3,
         "enforce:\n  - event: stop_check\n    changed: '**/*.py'\n    check: 'exit 1'\n    message: 'update README'\n    severity: warn\n",
       )
+      fs.writeFileSync(path.join(proj, 'x.py'), 'x = 1\n')
       await m.call('classic.PostToolUse', { session_id: 'sess-1', agent_id: 'a1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
       for (let i = 0; i < 5; i++) await m.call('classic.SubagentStop', { session_id: 'sess-1', agent_id: 'a1', stop_hook_active: i > 0 })
       const r = (await m.call('classic.PostToolUse', {

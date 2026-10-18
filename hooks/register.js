@@ -1336,6 +1336,8 @@ async function evalStopCheck(io, rules, projectDir, changedFiles) {
     const badFiles = [];
     for (const [root, rel] of matched) {
       const absPath = join(root, rel);
+      if (!await io.exists(absPath))
+        continue;
       let bad = false;
       if (truthy(requireSibling)) {
         const sibNames = expandStem(String(requireSibling), absPath);

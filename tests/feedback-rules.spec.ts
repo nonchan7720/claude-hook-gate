@@ -738,6 +738,30 @@ describe('evalStopCheck', () => {
   test('unrelated changed file is ignored', async () => {
     expect(await evalStopCheck(ioFor(tmp), readme, tmp, ['main.go'])).toEqual([])
   })
+
+  test('changed file deleted during the session is skipped (require_sibling)', async () => {
+    expect(await evalStopCheck(ioFor(tmp), readme, tmp, ['README.md'])).toEqual([])
+  })
+
+  test('changed file deleted during the session is skipped (check)', async () => {
+    const r = rule('chk_rule', 4, { event: 'stop_check', changed: '**/*.txt', check: 'false', message: 'm', severity: 'block' })
+    fs.writeFileSync(path.join(tmp, 'kept.txt'), '')
+    const v = await evalStopCheck(ioFor(tmp), [r], tmp, ['gone.txt', 'kept.txt'])
+    expect(v.length).toBe(1)
+    expect(v[0]?.detail).toBe('changed files violating: kept.txt')
+  })
+
+  test('changed file in a removed worktree is skipped', async () => {
+    const wt = path.join(tmp, '.claude', 'worktrees', 'wt')
+    fs.mkdirSync(path.join(wt, '.github', 'workflows'), { recursive: true })
+    fs.writeFileSync(path.join(wt, '.git'), `gitdir: ${path.join(tmp, '.git', 'worktrees', 'wt')}\n`)
+    const f = path.join(wt, '.github', 'workflows', 'ci.yaml')
+    fs.writeFileSync(f, '')
+    const r = rule('pin_actions', 4, { event: 'stop_check', changed: '.github/workflows/**', check: 'false', message: 'm', severity: 'block' })
+    expect((await evalStopCheck(ioFor(tmp), [r], tmp, [f])).length).toBe(1)
+    fs.rmSync(wt, { recursive: true, force: true })
+    expect(await evalStopCheck(ioFor(tmp), [r], tmp, [f])).toEqual([])
+  })
 })
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, stdio: 'ignore' })

@@ -430,6 +430,7 @@ test('SubagentStop: gate.yaml が無くても feedback ルールの stop_check �
         "enforce:\n  - event: stop_check\n    changed: '**/*.py'\n    check: 'exit 1'\n    message: bad\n    severity: block\n",
       ),
       '/proj/.claude/.gate-status/changed_files.sess-1--a.txt': 'x.py\n',
+      '/proj/x.py': 'x = 1\n',
     },
     {},
     (argv) => ({ exitCode: argv[0] === 'sh' ? 1 : 0, stdout: '' }),
@@ -446,6 +447,7 @@ test('PostToolUse(Agent): 終わったサブエージェントの SubagentStop �
       "enforce:\n  - event: stop_check\n    changed: '**/*.py'\n    check: 'exit 1'\n    message: bad\n    severity: warn\n",
     ),
     '/proj/.claude/.gate-status/changed_files.sess-1--a.txt': 'x.py\n',
+    '/proj/x.py': 'x = 1\n',
   }
   setup(on, files, {}, (argv) => ({ exitCode: argv[0] === 'sh' ? 1 : 0, stdout: '' }))
   await $.classic.SubagentStop({ session_id: 'sess-1', stop_hook_active: false, agent_id: 'a', agent_transcript_path: '', agent_type: 't' } as never)

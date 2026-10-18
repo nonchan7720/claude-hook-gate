@@ -51,6 +51,7 @@
 //
 //   - event: stop_check        # Stop 時、そのセッションの変更ファイルを検査
 //     changed: 'glob'          # 必須。worktree 内のファイルは worktree ルート相対で判定する
+//                              # （セッション中に削除され既に存在しないファイルは検査しない）
 //     check: 'shell cmd'       # 任意。$FILE に該当ファイルの絶対パスが入る。非0で違反。
 //                              # cwd はそのファイルのルート（worktree 内なら worktree、それ以外は project_dir）
 //     require_sibling: 'name'  # 任意。同ディレクトリにこのファイルが無ければ違反
@@ -823,6 +824,8 @@ export async function evalStopCheck(io: Io, rules: Rule[], projectDir: string, c
     const badFiles: string[] = []
     for (const [root, rel] of matched) {
       const absPath = join(root, rel)
+      // セッション中に削除されたファイル（worktree ごと消えた場合など）は検査対象が無いので飛ばす
+      if (!(await io.exists(absPath))) continue
       let bad = false
       if (truthy(requireSibling)) {
         const sibNames = expandStem(String(requireSibling), absPath)
