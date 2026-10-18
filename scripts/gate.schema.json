@@ -78,7 +78,8 @@
     "rule": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["match", "run"],
+      "required": ["match"],
+      "anyOf": [{ "required": ["run"] }, { "required": ["content"] }],
       "properties": {
         "match": {
           "description": "変更ファイルのパスに対する glob パターン（プロジェクトルートからの相対パス基準）。* は / を跨がない、** は跨ぐ、{a,b} でブレース展開可能。文字列1つ、または複数パターンのリストを指定できる。",
@@ -122,6 +123,14 @@
             "$ref": "#/definitions/runItem"
           }
         },
+        "content": {
+          "type": "array",
+          "description": "マッチした各ファイル（per_file_dir のときはそのルートに属するファイル）のディスク上の全文に対する内容検査。feedback ルールの pre_edit / post_edit と同じ字句解析器（scope / lang）で when / unless を判定し、マッチしたら違反＝ルールの失敗として扱う（失敗したファイルは run のコマンド失敗と同じく checks フェーズで再評価される）。run と併記したときは content を先に評価し、その後 run を実行する。プロセスを起こさず即時に終わるため、dogwood ポリシー・共有 / 直列化・ログファイル・帯の対象外。consistency_checks では使えない（ファイル単位でなくプロジェクト横断のコマンド置き場なので）。設定が不正なルールはスキップされ、rules フェーズが失敗扱いになる。",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/definitions/contentCheck"
+          }
+        },
         "run_checks": {
           "type": "array",
           "description": "このルールが rules フェーズでマッチしたとき、checks フェーズ（Stop/SubagentStop）へ予約する consistency_checks の名前一覧。実行タイミングは rules フェーズ自身ではなく、後続の checks フェーズ。複数ルールから同じ名前を参照しても、1回のチェック実行につき1回だけ実行される。run_checks を持たないルールのマッチファイルは rules フェーズ通過時点で追跡対象から外れ、以後の別ファイルの変更で壊れても検出されない。パッケージを跨いで壊れうるルールには必ず指定すること。",
@@ -163,6 +172,57 @@
           "const": false
         }
       ]
+    },
+    "contentCheck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["when", "message"],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "description": "summary・ログに使う識別名。省略時は when から生成される。"
+        },
+        "scope": {
+          "enum": ["all", "comments", "strings", "code"],
+          "description": "when / unless を当てる範囲。all（既定）はファイル全文、comments は各コメント（区切り記号込み）、strings は各文字列リテラル（引用符込み）、code はコメントと文字列リテラルを同じ長さの空白に置き換えたコード本体。"
+        },
+        "lang": {
+          "type": "string",
+          "minLength": 1,
+          "description": "言語 id の上書き（ts, py, go, rs, rb, sql, html, yaml など。src/code-scan.ts 参照）。省略時は拡張子（Dockerfile / Makefile などはファイル名）から決める。決められないとき comments / strings は違反なし、code は全文をそのまま評価する。"
+        },
+        "when": {
+          "type": "string",
+          "minLength": 1,
+          "description": "違反とみなす正規表現（feedback ルールと同じ Python 風の書き方、複数行モード）。scope が comments / strings のときは各セグメントごとに評価する。"
+        },
+        "unless": {
+          "type": "string",
+          "minLength": 1,
+          "description": "when にマッチしても、これにもマッチする（同じセグメント・同じテキストの）ものは違反としない正規表現。"
+        },
+        "exclude": {
+          "description": "match に加えて、この glob にマッチするファイルを対象外にする（プロジェクト / worktree ルートからの相対パス）。文字列1つ、またはリスト。",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/globPattern"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/definitions/globPattern"
+              }
+            }
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "description": "違反時に失敗詳細へ出すメッセージ。`<path>:<line> <message> (<detail>)` の形で 1 違反 1 行になる。"
+        }
+      }
     },
     "runItem": {
       "description": "run の要素。単一コマンド（文字列 or {cmd, timeout}）、または {parallel: [...]} の並行実行ブロック。",

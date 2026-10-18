@@ -119,6 +119,8 @@ gate:
   skipUnmatched: "[gate] skip: {{files}} (matches no rule)"
   badPerFileDir: "=== [gate] Invalid per_file_dir value: {{value}} (use true / \"file\" / \"pattern_root\"). Skipping this rule. ==="
   skipBadPerFileDir: "[skip: invalid per_file_dir]"
+  badContent: "=== [gate] Invalid content check: {{reason}}. Skipping this rule. ==="
+  skipBadContent: "[skip: invalid content]"
   rootNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this root. ==="
   ruleNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this rule. ==="
   checkNoCwd: "=== [gate] (check:{{name}}) cwd does not exist: {{cwd}}. Skipping this check. ==="

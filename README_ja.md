@@ -138,6 +138,21 @@ flowchart LR
 ## 読み込むもの
 
 - プロジェクトの `.claude/gate.yaml`（オプトイン。無ければゲートは何もしません）。書式は `scripts/gate.schema.json`、既定ポリシーは `scripts/dogwood/` にあります。
+- <a id="gate-content"></a>`content:`（`.claude/gate.yaml` の `rules[]` のキー）: [`scope`](#scope) と同じ字句単位の検査を gate から走らせます。ルールにマッチした各ファイル（`per_file_dir` のときはそのルートに属するファイル）について、ディスク上の全文を読み、各 `content` の要素を feedback ルールと同じ字句解析器で評価します（`when` / `unless` は Python `re` 風、`scope` は `all`（既定）/ `comments` / `strings` / `code`、`lang`）。マッチしたらルールの失敗で、コマンド失敗と同じ扱いです。`<path>:<line> <message> (<detail>)` の形で表示され（`all` / `code` は行番号なし）、ファイルは失敗リストに控えられ、停止時に再評価されて、直るまで停止をブロックします。評価順は `content` が先、その後に `run` です（どちらか一方は省略できますが、両方は省けません）。`exclude`（glob または配列）は `match` に加えて対象外にするファイル、`name` は summary に `content:<name>` として出ます。プロセスを起こさないので、dogwood ポリシー・共有 / 直列化・ログファイル・帯の対象外で、`consistency_checks` では使えません。不正な要素（`when` / `message` が無い、`scope` / `lang` が不正、正規表現がコンパイルできない）があるとそのルールをスキップし、理由をログに出して rules フェーズを失敗扱いにします。
+
+  ```yaml
+  rules:
+    - match: ["src/**/*.ts"]
+      content:
+        - name: comment-format
+          scope: comments
+          when: '^//(?! (TODO|NOTE|FIXME)\(\w+\): )'
+          unless: '^///'
+          exclude: ["src/**/*.spec.ts"]
+          message: 'コメントは // TODO(name): 形式で書く'
+      run:
+        - bun run lint
+  ```
 - `~/.claude/feedback/*.md`: frontmatter（`name`、`description`、`type`、`count`、任意で `enforce`、`expires`、`projects`、`when_exists`）付きのフィードバックルール。`count >= 3` のルールが注入・強制されます。`expires`（`YYYY-MM-DD` ならその日の終わり（UTC）まで有効、または ISO 8601 日時）を過ぎたルールは無効になり、`projects`（プロジェクトディレクトリの絶対パスにマッチする glob の文字列または配列。先頭の `~` は `HOME` に展開）はマッチするプロジェクトに、`when_exists`（プロジェクトルート相対の glob の文字列または配列）は1つでも存在するプロジェクトに適用を絞ります。指定したキーすべてを満たしたときだけ有効で、解釈できない `expires` は無視されます。これらの絞り込みはグローバルとプロジェクトをマージして読む経路にだけかかり、プロジェクト側の同名ルールが無効ならグローバル側も使われません。ディレクトリは `CLAUDE_FEEDBACK_DIR` で変更できます。プロジェクトの `.claude/feedback/*.md` も読み込まれ、グローバルと同じ `name` のルールがあればプロジェクト側が優先されます。
 - <a id="scope"></a>`scope` / `lang`（`pre_edit` / `post_edit` の要素のみ）: 既定では `when` / `unless` を全文に当てます。`scope: comments` はコメント 1 つごと（`//`、`/* */`、`#` などの区切りを含む原文。ブロックコメントは改行を含む 1 セグメント）、`scope: strings` は文字列リテラル 1 つごと（引用符を含む）に当て、`scope: code` はコメントと文字列リテラルを同じ長さの空白に置き換えた全文に当てます（改行は残すので行番号は保たれます）。`comments` / `strings` では、`when` があるセグメントにマッチし、同じセグメントに `unless` がマッチしなければ違反です。違反の detail は `comment matched: ... (line N)` / `string matched: ... (line N)`（`code` は `code matched: ...`、`scope` なしは従来どおり `content matched: ...`）です。言語はファイルの拡張子（`Dockerfile` / `Makefile` はファイル名）か `lang`（`ts`、`py`、`go`、`rs`、`rb`、`sql`、`html`、`yaml` など。一覧は `src/code-scan.ts`）で決めます。言語が判定できないとき、`comments` / `strings` はセグメント無し（違反なし）、`code` は全文をそのまま評価します。プラグインに同梱した小さな字句解析器で（言語サーバーは使いません）、切り分けは字句レベルだけです。構文解析ではないので、JS/TS の `${ }` 以外の文字列補間、シェルの heredoc、Ruby の `%q` や正規表現リテラル、HTML 内の `<script>` などは正しく扱えません。閉じられていない文字列・コメントはファイル末尾まで続くものとして扱います。`pre_edit` の対象は新しい断片（`new_string` / `content`）なので、コメントや文字列の途中から始まる断片はその先頭から読みます。不正な `scope`、未知の `lang`、`pre_bash` / `stop_check` への `scope` / `lang` は、その要素を壊れたものとして捨てます（壊れたルールを参照）。
 - <a id="broken-rules"></a>壊れたルール: 1つのルールファイルの不備で、他のルールまで無効になることはありません。frontmatter が YAML として読めないファイルは、そのファイルだけを飛ばします。`enforce` がリストでない（`- ` の書き忘れなど）ルールは `enforce` を空として扱い、`enforce` の要素のうち辞書でないもの（`- ` の後が空など）や、`when` / `unless` が使えない正規表現のものや `scope` / `lang` が不正なもの（[`scope`](#scope) を参照）は、その要素だけを捨てます（ルールの他の部分は効きます）。評価中に例外になった要素も、その要素だけを飛ばします。正規表現は Python の `re` の書き方で書き、JavaScript で実行します。先頭の `(?i)` / `(?s)` / `(?m)`、`(?P<name>...)`、`(?P=name)`、`\A` / `\Z` / `\z`（テキスト全体の先頭・末尾。`pre_edit` / `post_edit` の複数行モードでも同じ意味）は読み替えます。先頭の `(?x)` と、JavaScript が受け付けない書き方（途中の `x(?i)y` のようなインラインフラグ、`a*+`、`(?#...)`、`(?P>name)` など）は、その要素を不正として扱います。壊れたファイル・要素は、ファイルと理由を `~/.claude/feedback/.errors.jsonl`（`.violations.jsonl` と同じ場所）に 1 回だけ記録し、直すまで毎回のプロンプトで注入するコンテキストの先頭に一覧を出します（「次のルールファイルが読めず無効になっています: ...」）。`/correct` でも `broken` の提案として報告します。feedback の hook が作業を止めないために握りつぶす内部エラーも、同じファイルに記録します。
