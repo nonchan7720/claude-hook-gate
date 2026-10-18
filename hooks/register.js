@@ -493,7 +493,7 @@ define(["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"], { ...CFAMILY, js:
 define(["go"], { ...CFAMILY, rawQuotes: "`" });
 define(["rs"], { line: ["//"], block: CBLOCK, nest: true, quotes: '"', rust: true });
 define(["java"], { line: ["//"], block: CBLOCK, quotes: `"'`, triple: ['"""'] });
-define(["kt", "kts", "scala"], { line: ["//"], block: CBLOCK, nest: true, quotes: `"'`, triple: ['"""'], rawTriple: true });
+define(["kt", "kts", "scala"], { line: ["//"], block: CBLOCK, nest: true, quotes: `"'`, triple: ['"""'], rawTriple: ['"""'] });
 define(["swift"], { line: ["//"], block: CBLOCK, nest: true, quotes: '"', triple: ['"""'] });
 define(["c", "h"], { line: ["//"], block: CBLOCK, quotes: `"'` });
 define(["cpp", "hpp", "cc", "cxx"], { line: ["//"], block: CBLOCK, quotes: `"'`, cppRaw: true });
@@ -504,13 +504,14 @@ define(["py"], { ...HASH, triple: ['"""', "'''"] });
 define(["rb"], { ...HASH, quotes: "\"'`", rubyBegin: true });
 define(["sh", "bash", "zsh", "makefile", "mk", "dockerfile"], SHELL);
 define(["yaml", "yml"], { line: ["#"], quotes: `"'`, dbl: "'", rawQuotes: "'", hashBoundary: true, yamlQuote: true });
-define(["toml"], { line: ["#"], quotes: `"'`, rawQuotes: "'", triple: ['"""', "'''"] });
+define(["toml"], { line: ["#"], quotes: `"'`, rawQuotes: "'", triple: ['"""', "'''"], rawTriple: ["'''"] });
 define(["pl"], HASH);
 define(["r"], { line: ["#"], quotes: "\"'`" });
 define(["sql"], { line: ["--"], block: CBLOCK, quotes: "\"'`", rawQuotes: "\"'`", dbl: "\"'`" });
 define(["lua"], { line: ["--"], quotes: `"'`, lua: true });
 define(["html", "htm", "xml", "vue", "svelte"], { block: [["<!--", "-->"]] });
-define(["css", "scss", "less"], { block: CBLOCK, quotes: `"'` });
+define(["css"], { block: CBLOCK, quotes: `"'` });
+define(["scss", "less"], { line: ["//"], block: CBLOCK, quotes: `"'`, colonGuard: true });
 var EXT_ALIAS = { mk: "makefile", make: "makefile" };
 var FILE_NAMES = { makefile: "makefile", gnumakefile: "makefile" };
 var normalizeId = (id) => {
@@ -579,6 +580,7 @@ function regexEnd(text, i) {
 function scanRanges(text, def) {
   const n = text.length;
   const out = [];
+  let regexFailedUntil = -1;
   const atLineStart = (i) => i === 0 || text.charAt(i - 1) === `
 `;
   const lineEnd = (i) => {
@@ -744,7 +746,7 @@ function scanRanges(text, def) {
         continue;
       }
       const lineStart = def.line?.find((s) => text.startsWith(s, i));
-      if (lineStart && (lineStart !== "#" || hashIsComment(i))) {
+      if (lineStart && (lineStart !== "#" || hashIsComment(i)) && !(def.colonGuard && text.charAt(i - 1) === ":")) {
         emit("comment", lineEnd(i));
         continue;
       }
@@ -783,7 +785,7 @@ function scanRanges(text, def) {
       }
       const triple = def.triple?.find((t) => text.startsWith(t, i));
       if (triple) {
-        emit("string", untilEnd(i + 3, triple, !def.rawTriple));
+        emit("string", untilEnd(i + 3, triple, !def.rawTriple?.includes(triple)));
         continue;
       }
       if (def.js && c === "`") {
@@ -791,11 +793,16 @@ function scanRanges(text, def) {
         continue;
       }
       if (def.js && c === "/") {
-        const end = regexAllowed(text, i) ? regexEnd(text, i) : -1;
+        let end = -1;
+        if (i >= regexFailedUntil && regexAllowed(text, i)) {
+          end = regexEnd(text, i);
+          if (end < 0)
+            regexFailedUntil = lineEnd(i);
+        }
         i = end >= 0 ? end : i + 1;
         continue;
       }
-      if (def.quotes?.includes(c) && quoteAllowed(i)) {
+      if (def.quotes?.includes(c) && quoteAllowed(i) && !(def.js && isIdentChar(text.charAt(i - 1)))) {
         emit("string", quoteEnd(i, c));
         continue;
       }
@@ -1555,7 +1562,7 @@ function matchScoped(text, filePath, entry) {
       return { matched: false, detail: "" };
     const kind = scope === "comments" ? "comment" : "string";
     const seg = scanCode(text, lang).find((s) => s.kind === kind && hit(s.text));
-    return seg ? { matched: true, detail: `${kind} matched: ${String(when)} (line ${seg.line})` } : { matched: false, detail: "" };
+    return seg ? { matched: true, detail: `${kind} matched: ${String(when)} (line ${seg.line})`, line: seg.line } : { matched: false, detail: "" };
   }
   if (scope === "code") {
     const lang = truthy(entry.lang) ? String(entry.lang) : langOf(filePath);
@@ -3149,8 +3156,7 @@ ${details}` : "");
         const r = matchScoped(text, abs, c.entry);
         if (!r?.matched)
           continue;
-        const line = /\(line (\d+)\)/.exec(r.detail)?.[1];
-        const msg = `${rel}${line ? `:${line}` : ""} ${String(c.entry.message)} (${r.detail})`;
+        const msg = `${rel}${r.line === undefined ? "" : `:${r.line}`} ${String(c.entry.message)} (${r.detail})`;
         logs.push(msg);
         this.failures.push(msg);
         bad.add(rel);
