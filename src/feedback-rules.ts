@@ -85,6 +85,10 @@
 // このフィルタは listRules を feedbackDirPath 省略で呼んだとき（グローバル＋プロジェクトのマージ後）にだけ
 // かかる。ディレクトリを明示したときは無加工で返す。
 //
+// scope / lang が効く範囲: event が pre_edit / post_edit の要素だけ。event が無い・未知のイベントの要素では
+// scope / lang は検査されず（不正な値でも捨てられない）、評価もされない。`check:` のみの post_edit や、
+// absent_sibling / absent_glob の pre_edit に付けた scope は、when が無いので無視される。
+//
 // 壊れたルールの扱い（1つのルールの不備で他のルールまで止めないため）:
 //   - frontmatter が YAML として読めないファイルは、そのファイルだけを飛ばす
 //   - enforce がリストでない（`- ` の書き忘れなど）ルールは enforce を空として扱う
@@ -654,10 +658,11 @@ export async function evalPreBash(io: Io, rules: Rule[], command: string, projec
  * pre_edit / post_edit の when / unless を text に当てる。entry.scope で範囲を選ぶ:
  * all（省略時。全文）/ comments / strings（セグメントごと）/ code（コメントと文字列を空白にした全文）。
  * when が無ければ undefined（呼び出し側で評価しない）。matched=false のときの detail は空。
+ * line は comments / strings でマッチしたセグメントの開始行（1 始まり）。all / code では undefined。
  * 言語は entry.lang、無ければ filePath の拡張子・ファイル名から決める。分からないとき comments / strings はセグメント無し
  * （違反なし）、code は全文をそのまま 1 セグメントとして評価する。
  */
-export function matchScoped(text: string, filePath: string, entry: Dict): { matched: boolean; detail: string } | undefined {
+export function matchScoped(text: string, filePath: string, entry: Dict): { matched: boolean; detail: string; line?: number } | undefined {
   const when = entry.when
   if (!truthy(when)) return undefined
   const whenRx = pyRegExp(String(when), 'm')
@@ -670,7 +675,7 @@ export function matchScoped(text: string, filePath: string, entry: Dict): { matc
     if (lang === undefined) return { matched: false, detail: '' }
     const kind = scope === 'comments' ? 'comment' : 'string'
     const seg = scanCode(text, lang).find((s) => s.kind === kind && hit(s.text))
-    return seg ? { matched: true, detail: `${kind} matched: ${String(when)} (line ${seg.line})` } : { matched: false, detail: '' }
+    return seg ? { matched: true, detail: `${kind} matched: ${String(when)} (line ${seg.line})`, line: seg.line } : { matched: false, detail: '' }
   }
   if (scope === 'code') {
     const lang = truthy(entry.lang) ? String(entry.lang) : langOf(filePath)

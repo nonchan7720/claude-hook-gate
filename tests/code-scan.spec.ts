@@ -128,3 +128,84 @@ describe('stripToCode', () => {
     expect(stripToCode('a /* b\nc', 'ts')).toBe('a     \n ')
   })
 })
+
+describe('scanCode: review fixes', () => {
+  test('JSX text apostrophe after a letter does not open a string', () => {
+    const src = `const a = <p>don't do it</p>\n// comment "x"\nconst b = 'y'\n`
+    expect(texts(src, 'tsx')).toEqual(['// comment "x"', "'y'"])
+    expect(texts(src, 'tsx', 'comment')).toEqual(['// comment "x"'])
+  })
+  test('quotes after a space still open strings in JS', () => {
+    expect(texts(`f('a', "b")`, 'js', 'string')).toEqual(["'a'", '"b"'])
+  })
+  test('unclosed slashes on one line scan in linear time', () => {
+    const src = '(/['.repeat(30_000)
+    const t0 = performance.now()
+    expect(scanCode(src, 'ts')).toEqual([])
+    expect(stripToCode(src, 'ts')).toBe(src)
+    expect(performance.now() - t0).toBeLessThan(1000)
+  })
+  test('a failed regex scan on one line does not affect the next line', () => {
+    expect(texts('x = (/[\ny = /"/.test(z) // c\n', 'ts', 'comment')).toEqual(['// c'])
+  })
+  test('SCSS / Less have // comments, but not after a colon (URL)', () => {
+    for (const lang of ['scss', 'less']) {
+      expect(texts('a { b: url(http://x.y/z); } // c\n/* d */', lang, 'comment')).toEqual(['// c', '/* d */'])
+    }
+    expect(texts('a { b: 1 } // c', 'css', 'comment')).toEqual([])
+  })
+  test('TOML: """ has escapes, \'\'\' is literal', () => {
+    expect(texts(`a = '''x\\'''\n# c\n`, 'toml')).toEqual([`'''x\\'''`, '# c'])
+    expect(texts('a = """x\\"""y"""\n# c\n', 'toml')).toEqual(['"""x\\"""y"""', '# c'])
+  })
+  test('Python triple quotes keep escapes for both delimiters', () => {
+    expect(texts(`a = '''x\\'''y'''\n# c\n`, 'py')).toEqual([`'''x\\'''y'''`, '# c'])
+  })
+  test('Kotlin raw triple has no escapes and block comments nest', () => {
+    expect(texts('val a = """x\\"""\n// c\n/* a /* b */ c */ // d', 'kt')).toEqual(['"""x\\"""', '// c', '/* a /* b */ c */', '// d'])
+  })
+})
+
+describe('scanCode: edge cases', () => {
+  test('a string ending in "x\\ at EOF runs to the end', () => {
+    expect(texts('a = "x\\', 'ts')).toEqual(['"x\\'])
+  })
+  test('unterminated ${ in a template runs to the end', () => {
+    expect(texts('a = `x ${ y + "z', 'ts')).toEqual(['`x ${ y + "z'])
+  })
+  test('comment containing } inside ${ }', () => {
+    const src = 'a = `x ${ /* } */ 1 }` // c'
+    expect(texts(src, 'ts')).toEqual(['`x ${ /* } */ 1 }`', '// c'])
+  })
+  test('regex character class may contain /', () => {
+    expect(texts('a = /[/]"/; // c', 'ts')).toEqual(['// c'])
+  })
+  test("Go rune '\\''", () => {
+    expect(texts("a := '\\''\n// c\n", 'go')).toEqual(["'\\''", '// c'])
+  })
+  test('C++ raw string', () => {
+    expect(texts('auto s = R"x(a)"b" // not)x"; // c', 'cpp')).toEqual(['R"x(a)"b" // not)x"', '// c'])
+  })
+  test('Java text block', () => {
+    expect(texts('String s = """\n  a "b" // not\n  """; // c', 'java')).toEqual(['"""\n  a "b" // not\n  """', '// c'])
+  })
+  test('shell: ${#x} is not a comment, # after a tab is', () => {
+    expect(texts('echo ${#x}\n\t# c\n', 'sh')).toEqual(['# c'])
+    expect(texts('echo a\t# c', 'sh')).toEqual(['# c'])
+  })
+})
+
+describe('stripToCode: length and line breaks', () => {
+  test('CRLF is kept (also in a block comment), length is kept', () => {
+    const src = 'a /* x\r\ny */ b\r\n// c\r\n'
+    const out = stripToCode(src, 'ts')
+    expect(out).toBe('a     \r\n     b\r\n    \r\n')
+    expect(out.length).toBe(src.length)
+  })
+  test('surrogate pairs and tabs count in UTF-16 units', () => {
+    const src = '"😀\t" x'
+    const out = stripToCode(src, 'ts')
+    expect(out.length).toBe(src.length)
+    expect(out).toBe(`${' '.repeat(5)} x`)
+  })
+})

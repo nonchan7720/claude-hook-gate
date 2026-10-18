@@ -1167,8 +1167,7 @@ export class Gate {
         if (c.exclude.some((rx) => rx.test(rel))) continue
         const r = matchScoped(text, abs, c.entry)
         if (!r?.matched) continue
-        const line = /\(line (\d+)\)/.exec(r.detail)?.[1]
-        const msg = `${rel}${line ? `:${line}` : ''} ${String(c.entry.message)} (${r.detail})`
+        const msg = `${rel}${r.line === undefined ? '' : `:${r.line}`} ${String(c.entry.message)} (${r.detail})`
         logs.push(msg)
         this.failures.push(msg)
         bad.add(rel)

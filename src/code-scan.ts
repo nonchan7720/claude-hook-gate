@@ -6,6 +6,15 @@
 // 既知の限界: 文字列補間の入れ子（JS/TS のテンプレートリテラルの `${ }` 以外）、Ruby の %q や正規表現リテラル、
 // シェルの heredoc、Perl の POD、Swift の `\( )` 補間、C++ の数字区切り `1'000`、HTML 内の <script> / <style>
 // などは正しく扱わない。閉じられていない文字列・コメントはファイル末尾まで続くものとして扱う。
+// そのほか:
+//  - JSX / TSX のテキスト中のアポストロフィは、直前が識別子文字なら（`don't`）文字列を始めないが、`it 's` のように
+//    直前が空白だと文字列の開始とみなす（JSX テキスト）。
+//  - JS/TS の正規表現リテラルは、直前の文字から判断する。`)` の直後（`if (x) /"/.test(y)`）は除算とみなす。
+//  - YAML のブロックスカラー（`|` / `>`）の中で行頭に来た引用符は、文字列を開く。
+//  - C# の verbatim 文字列 `@"a""b"` は 2 つの文字列に割れる。
+//  - `.vue` / `.svelte` は `<!-- -->` だけを見る（`<script>` / `<style>` の中のコメントや文字列は見ない）。
+//  - SCSS / Less の `//` は、直前が `:` のとき（`url(http://...)`）はコメントにしない。
+//  - `make` は makefile の別名（言語 id の一覧にはない。isKnownLang は真）。
 
 export type Segment = { kind: 'comment' | 'string'; text: string; line: number }
 
@@ -28,8 +37,10 @@ type Def = {
   dbl?: string
   /** `#` は空白・行頭・`;&|()` の直後にあるときだけコメント（シェル系）。 */
   hashBoundary?: boolean
-  /** 三重引用文字列がエスケープを持たない（Kotlin / Scala / TOML リテラル）。 */
-  rawTriple?: boolean
+  /** エスケープを持たない三重引用文字列の区切り（Kotlin / Scala の `"""`、TOML の `'''`）。triple のうちここに無いものはエスケープを持つ。 */
+  rawTriple?: string[]
+  /** SCSS / Less: 直前が `:` の `//`（URL）は行コメントにしない。 */
+  colonGuard?: boolean
   /** JS 系: テンプレートリテラルの `${ }` と正規表現リテラル。 */
   js?: boolean
   /** Rust: 文字リテラルとライフタイムの区別、raw 文字列。 */
@@ -60,7 +71,7 @@ define(['ts', 'tsx', 'mts', 'cts', 'js', 'jsx', 'mjs', 'cjs'], { ...CFAMILY, js:
 define(['go'], { ...CFAMILY, rawQuotes: '`' })
 define(['rs'], { line: ['//'], block: CBLOCK, nest: true, quotes: '"', rust: true })
 define(['java'], { line: ['//'], block: CBLOCK, quotes: '"\'', triple: ['"""'] })
-define(['kt', 'kts', 'scala'], { line: ['//'], block: CBLOCK, nest: true, quotes: '"\'', triple: ['"""'], rawTriple: true })
+define(['kt', 'kts', 'scala'], { line: ['//'], block: CBLOCK, nest: true, quotes: '"\'', triple: ['"""'], rawTriple: ['"""'] })
 define(['swift'], { line: ['//'], block: CBLOCK, nest: true, quotes: '"', triple: ['"""'] })
 define(['c', 'h'], { line: ['//'], block: CBLOCK, quotes: '"\'' })
 define(['cpp', 'hpp', 'cc', 'cxx'], { line: ['//'], block: CBLOCK, quotes: '"\'', cppRaw: true })
@@ -72,7 +83,7 @@ define(['py'], { ...HASH, triple: ['"""', "'''"] })
 define(['rb'], { ...HASH, quotes: '"\'`', rubyBegin: true })
 define(['sh', 'bash', 'zsh', 'makefile', 'mk', 'dockerfile'], SHELL)
 define(['yaml', 'yml'], { line: ['#'], quotes: '"\'', dbl: "'", rawQuotes: "'", hashBoundary: true, yamlQuote: true })
-define(['toml'], { line: ['#'], quotes: '"\'', rawQuotes: "'", triple: ['"""', "'''"] })
+define(['toml'], { line: ['#'], quotes: '"\'', rawQuotes: "'", triple: ['"""', "'''"], rawTriple: ["'''"] })
 define(['pl'], HASH)
 define(['r'], { line: ['#'], quotes: '"\'`' })
 
@@ -80,7 +91,8 @@ define(['sql'], { line: ['--'], block: CBLOCK, quotes: '"\'`', rawQuotes: '"\'`'
 define(['lua'], { line: ['--'], quotes: '"\'', lua: true })
 
 define(['html', 'htm', 'xml', 'vue', 'svelte'], { block: [['<!--', '-->']] })
-define(['css', 'scss', 'less'], { block: CBLOCK, quotes: '"\'' })
+define(['css'], { block: CBLOCK, quotes: '"\'' })
+define(['scss', 'less'], { line: ['//'], block: CBLOCK, quotes: '"\'', colonGuard: true })
 
 const EXT_ALIAS: Record<string, string> = { mk: 'makefile', make: 'makefile' }
 const FILE_NAMES: Record<string, string> = { makefile: 'makefile', gnumakefile: 'makefile' }
@@ -149,6 +161,9 @@ function regexEnd(text: string, i: number): number {
 function scanRanges(text: string, def: Def): Range[] {
   const n = text.length
   const out: Range[] = []
+
+  /** 正規表現リテラルの探索が失敗した行の終端。同じ行の以降の `/` は再探索しない（二乗時間の防止）。 */
+  let regexFailedUntil = -1
 
   const atLineStart = (i: number): boolean => i === 0 || text.charAt(i - 1) === '\n'
 
@@ -313,7 +328,7 @@ function scanRanges(text: string, def: Def): Range[] {
         continue
       }
       const lineStart = def.line?.find((s) => text.startsWith(s, i))
-      if (lineStart && (lineStart !== '#' || hashIsComment(i))) {
+      if (lineStart && (lineStart !== '#' || hashIsComment(i)) && !(def.colonGuard && text.charAt(i - 1) === ':')) {
         emit('comment', lineEnd(i))
         continue
       }
@@ -352,7 +367,7 @@ function scanRanges(text: string, def: Def): Range[] {
 
       const triple = def.triple?.find((t) => text.startsWith(t, i))
       if (triple) {
-        emit('string', untilEnd(i + 3, triple, !def.rawTriple))
+        emit('string', untilEnd(i + 3, triple, !def.rawTriple?.includes(triple)))
         continue
       }
 
@@ -361,12 +376,17 @@ function scanRanges(text: string, def: Def): Range[] {
         continue
       }
       if (def.js && c === '/') {
-        const end = regexAllowed(text, i) ? regexEnd(text, i) : -1
+        let end = -1
+        if (i >= regexFailedUntil && regexAllowed(text, i)) {
+          end = regexEnd(text, i)
+          if (end < 0) regexFailedUntil = lineEnd(i)
+        }
         i = end >= 0 ? end : i + 1
         continue
       }
 
-      if (def.quotes?.includes(c) && quoteAllowed(i)) {
+      // JS/TS には文字列プレフィックスが無いので、識別子文字の直後の引用符は文字列ではない（JSX テキストの `don't`）。
+      if (def.quotes?.includes(c) && quoteAllowed(i) && !(def.js && isIdentChar(text.charAt(i - 1)))) {
         emit('string', quoteEnd(i, c))
         continue
       }

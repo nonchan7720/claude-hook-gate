@@ -305,6 +305,17 @@ describe('normalizeEnforce: scope / lang', () => {
     ])
   })
 
+  test('scope / lang edge values', () => {
+    const base: Dict = { event: 'post_edit', path: 'a', when: 'x' }
+    expect(norm('en', [{ ...base, scope: null }])).toEqual({ enforce: [{ ...base, scope: null }], problems: [] })
+    expect(norm('en', [{ ...base, scope: '' }]).enforce).toEqual([])
+    expect(norm('en', [{ ...base, lang: '' }]).enforce).toEqual([])
+    expect(norm('en', [{ ...base, lang: 1 }]).enforce).toEqual([])
+    expect(norm('en', [{ ...base, lang: 'TS' }]).enforce).toHaveLength(1)
+    const noEvent: Dict = { path: 'a', when: 'x', scope: 'bogus' }
+    expect(norm('en', [noEvent])).toEqual({ enforce: [noEvent], problems: [] })
+  })
+
   test('Japanese messages exist', () => {
     const r = norm('ja', [{ ...ok, scope: 'x' }])
     expect(r.problems[0]).toContain('enforce[0].scope')
