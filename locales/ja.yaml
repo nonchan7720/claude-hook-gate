@@ -17,6 +17,9 @@ rules:
   enforceItemNotMapping: "enforce[{{index}}] が辞書ではありません（{{type}}）"
   badRegex: "enforce[{{index}}].{{key}} の正規表現が使えません: {{error}}"
   evalError: "enforce[{{index}}] の評価に失敗しました: {{error}}"
+  badScope: "enforce[{{index}}].scope は {{allowed}} のいずれかにしてください（{{value}}）"
+  badLang: "enforce[{{index}}].lang は未知の言語 id です（{{value}}）"
+  scopeNotAllowed: "enforce[{{index}}] は {{event}} では {{key}} を使えません（pre_edit / post_edit のみ）"
 
 guard:
   evaluating: "[feedback-guard] 評価中: {{rule}}"
@@ -116,6 +119,8 @@ gate:
   skipUnmatched: "[gate] skip: {{files}} (どのルールにもマッチしません)"
   badPerFileDir: "=== [gate] per_file_dir の値が不正です: {{value}}（true / \"file\" / \"pattern_root\" のいずれかを指定してください）。このルールをスキップします。 ==="
   skipBadPerFileDir: "[skip: per_file_dir不正]"
+  badContent: "=== [gate] content の設定が不正です: {{reason}}。このルールをスキップします。 ==="
+  skipBadContent: "[skip: content不正]"
   rootNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルートをスキップします。 ==="
   ruleNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルールをスキップします。 ==="
   checkNoCwd: "=== [gate] (check:{{name}}) cwd が存在しません: {{cwd}}。このチェックをスキップします。 ==="

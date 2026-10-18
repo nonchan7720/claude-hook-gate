@@ -22,6 +22,9 @@ rules:
   enforceItemNotMapping: "enforce[{{index}}] is not a mapping ({{type}})"
   badRegex: "enforce[{{index}}].{{key}} is not a usable regular expression: {{error}}"
   evalError: "enforce[{{index}}] failed to evaluate: {{error}}"
+  badScope: "enforce[{{index}}].scope must be one of {{allowed}} ({{value}})"
+  badLang: "enforce[{{index}}].lang is not a known language id ({{value}})"
+  scopeNotAllowed: "enforce[{{index}}]: {{key}} cannot be used with {{event}} (pre_edit / post_edit only)"
 
 guard:
   evaluating: "[feedback-guard] evaluating: {{rule}}"
@@ -121,6 +124,8 @@ gate:
   skipUnmatched: "[gate] skip: {{files}} (matches no rule)"
   badPerFileDir: "=== [gate] Invalid per_file_dir value: {{value}} (use true / \\"file\\" / \\"pattern_root\\"). Skipping this rule. ==="
   skipBadPerFileDir: "[skip: invalid per_file_dir]"
+  badContent: "=== [gate] Invalid content check: {{reason}}. Skipping this rule. ==="
+  skipBadContent: "[skip: invalid content]"
   rootNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this root. ==="
   ruleNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this rule. ==="
   checkNoCwd: "=== [gate] (check:{{name}}) cwd does not exist: {{cwd}}. Skipping this check. ==="
@@ -168,6 +173,9 @@ rules:
   enforceItemNotMapping: "enforce[{{index}}] が辞書ではありません（{{type}}）"
   badRegex: "enforce[{{index}}].{{key}} の正規表現が使えません: {{error}}"
   evalError: "enforce[{{index}}] の評価に失敗しました: {{error}}"
+  badScope: "enforce[{{index}}].scope は {{allowed}} のいずれかにしてください（{{value}}）"
+  badLang: "enforce[{{index}}].lang は未知の言語 id です（{{value}}）"
+  scopeNotAllowed: "enforce[{{index}}] は {{event}} では {{key}} を使えません（pre_edit / post_edit のみ）"
 
 guard:
   evaluating: "[feedback-guard] 評価中: {{rule}}"
@@ -267,6 +275,8 @@ gate:
   skipUnmatched: "[gate] skip: {{files}} (どのルールにもマッチしません)"
   badPerFileDir: "=== [gate] per_file_dir の値が不正です: {{value}}（true / \\"file\\" / \\"pattern_root\\" のいずれかを指定してください）。このルールをスキップします。 ==="
   skipBadPerFileDir: "[skip: per_file_dir不正]"
+  badContent: "=== [gate] content の設定が不正です: {{reason}}。このルールをスキップします。 ==="
+  skipBadContent: "[skip: content不正]"
   rootNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルートをスキップします。 ==="
   ruleNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルールをスキップします。 ==="
   checkNoCwd: "=== [gate] (check:{{name}}) cwd が存在しません: {{cwd}}。このチェックをスキップします。 ==="
@@ -467,6 +477,383 @@ ${t("launch.checklist")}`);
     }
   }
   return ok();
+}
+
+// src/code-scan.ts
+var CBLOCK = [["/*", "*/"]];
+var CFAMILY = { line: ["//"], block: CBLOCK, quotes: "\"'`" };
+var HASH = { line: ["#"], quotes: `"'` };
+var SHELL = { line: ["#"], quotes: `"'`, rawQuotes: "'", hashBoundary: true };
+var DEFS = {};
+var define = (ids, def) => {
+  for (const id of ids)
+    DEFS[id] = def;
+};
+define(["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs"], { ...CFAMILY, js: true });
+define(["go"], { ...CFAMILY, rawQuotes: "`" });
+define(["rs"], { line: ["//"], block: CBLOCK, nest: true, quotes: '"', rust: true });
+define(["java"], { line: ["//"], block: CBLOCK, quotes: `"'`, triple: ['"""'] });
+define(["kt", "kts", "scala"], { line: ["//"], block: CBLOCK, nest: true, quotes: `"'`, triple: ['"""'], rawTriple: ['"""'] });
+define(["swift"], { line: ["//"], block: CBLOCK, nest: true, quotes: '"', triple: ['"""'] });
+define(["c", "h"], { line: ["//"], block: CBLOCK, quotes: `"'` });
+define(["cpp", "hpp", "cc", "cxx"], { line: ["//"], block: CBLOCK, quotes: `"'`, cppRaw: true });
+define(["cs"], { line: ["//"], block: CBLOCK, quotes: `"'`, triple: ['"""'] });
+define(["dart"], { line: ["//"], block: CBLOCK, nest: true, quotes: `"'`, triple: ['"""', "'''"] });
+define(["php"], { line: ["//", "#"], block: CBLOCK, quotes: "\"'`", phpAttr: true });
+define(["py"], { ...HASH, triple: ['"""', "'''"] });
+define(["rb"], { ...HASH, quotes: "\"'`", rubyBegin: true });
+define(["sh", "bash", "zsh", "makefile", "mk", "dockerfile"], SHELL);
+define(["yaml", "yml"], { line: ["#"], quotes: `"'`, dbl: "'", rawQuotes: "'", hashBoundary: true, yamlQuote: true });
+define(["toml"], { line: ["#"], quotes: `"'`, rawQuotes: "'", triple: ['"""', "'''"], rawTriple: ["'''"] });
+define(["pl"], HASH);
+define(["r"], { line: ["#"], quotes: "\"'`" });
+define(["sql"], { line: ["--"], block: CBLOCK, quotes: "\"'`", rawQuotes: "\"'`", dbl: "\"'`" });
+define(["lua"], { line: ["--"], quotes: `"'`, lua: true });
+define(["html", "htm", "xml", "vue", "svelte"], { block: [["<!--", "-->"]] });
+define(["css"], { block: CBLOCK, quotes: `"'` });
+define(["scss", "less"], { line: ["//"], block: CBLOCK, quotes: `"'`, colonGuard: true });
+var EXT_ALIAS = { mk: "makefile", make: "makefile" };
+var FILE_NAMES = { makefile: "makefile", gnumakefile: "makefile" };
+var normalizeId = (id) => {
+  const lower = id.toLowerCase();
+  return EXT_ALIAS[lower] ?? lower;
+};
+function isKnownLang(id) {
+  return Object.hasOwn(DEFS, normalizeId(id));
+}
+function langOf(filePath) {
+  const name = (filePath.split(/[\\/]/).pop() ?? "").toLowerCase();
+  if (name === "")
+    return;
+  const byName = FILE_NAMES[name];
+  if (byName)
+    return byName;
+  if (name === "dockerfile" || name.startsWith("dockerfile."))
+    return "dockerfile";
+  const dot = name.lastIndexOf(".");
+  if (dot < 0)
+    return;
+  const ext = normalizeId(name.slice(dot + 1));
+  return Object.hasOwn(DEFS, ext) ? ext : undefined;
+}
+var isIdentChar = (c) => c !== undefined && /[A-Za-z0-9_$]/.test(c);
+function regexAllowed(text, i) {
+  let j = i - 1;
+  while (j >= 0 && /\s/.test(text.charAt(j)))
+    j--;
+  if (j < 0)
+    return true;
+  const c = text.charAt(j);
+  if ("(,=:[!&|?{};+-*%~^".includes(c))
+    return true;
+  if (isIdentChar(c)) {
+    let k = j;
+    while (k >= 0 && isIdentChar(text.charAt(k)))
+      k--;
+    return /^(return|typeof|case|do|else|in|of|void|delete|throw|new|yield|await)$/.test(text.slice(k + 1, j + 1));
+  }
+  return false;
+}
+function regexEnd(text, i) {
+  let j = i + 1;
+  let inClass = false;
+  while (j < text.length) {
+    const c = text.charAt(j);
+    if (c === `
+`)
+      return -1;
+    if (c === "\\")
+      j += 2;
+    else if (c === "[") {
+      inClass = true;
+      j++;
+    } else if (c === "]") {
+      inClass = false;
+      j++;
+    } else if (c === "/" && !inClass)
+      return j + 1;
+    else
+      j++;
+  }
+  return -1;
+}
+function scanRanges(text, def) {
+  const n = text.length;
+  const out = [];
+  let regexFailedUntil = -1;
+  const atLineStart = (i) => i === 0 || text.charAt(i - 1) === `
+`;
+  const lineEnd = (i) => {
+    let j = text.indexOf(`
+`, i);
+    if (j < 0)
+      j = n;
+    if (j > i && text.charAt(j - 1) === "\r")
+      j--;
+    return j;
+  };
+  const blockEnd = (i, open, close) => {
+    let depth = 1;
+    let j = i + open.length;
+    while (j < n) {
+      if (def.nest && text.startsWith(open, j)) {
+        depth++;
+        j += open.length;
+      } else if (text.startsWith(close, j)) {
+        depth--;
+        j += close.length;
+        if (depth === 0)
+          return j;
+      } else
+        j++;
+    }
+    return n;
+  };
+  const quoteEnd = (i, q) => {
+    const raw = def.rawQuotes?.includes(q) ?? false;
+    const dbl = def.dbl?.includes(q) ?? false;
+    let j = i + 1;
+    while (j < n) {
+      const c = text.charAt(j);
+      if (c === "\\" && !raw)
+        j += 2;
+      else if (c === q) {
+        if (dbl && text.charAt(j + 1) === q)
+          j += 2;
+        else
+          return j + 1;
+      } else
+        j++;
+    }
+    return n;
+  };
+  const untilEnd = (from, close, escapes) => {
+    let j = from;
+    while (j < n) {
+      if (escapes && text.charAt(j) === "\\")
+        j += 2;
+      else if (text.startsWith(close, j))
+        return j + close.length;
+      else
+        j++;
+    }
+    return n;
+  };
+  const templateEnd = (i) => {
+    let j = i + 1;
+    while (j < n) {
+      const c = text.charAt(j);
+      if (c === "\\")
+        j += 2;
+      else if (c === "`")
+        return j + 1;
+      else if (c === "$" && text.charAt(j + 1) === "{")
+        j = scan(j + 2, true, null);
+      else
+        j++;
+    }
+    return n;
+  };
+  const rustCharEnd = (i) => {
+    if (text.charAt(i + 1) === "\\") {
+      const close = text.indexOf("'", i + 3);
+      return close >= 0 && close - i <= 12 ? close + 1 : -1;
+    }
+    const cp = text.codePointAt(i + 1);
+    if (cp === undefined || cp === 39 || cp === 10)
+      return -1;
+    const len = cp > 65535 ? 2 : 1;
+    return text.charAt(i + 1 + len) === "'" ? i + 2 + len : -1;
+  };
+  const rustRawEnd = (i) => {
+    let j = i;
+    if (text.charAt(j) === "b")
+      j++;
+    if (text.charAt(j) !== "r")
+      return -1;
+    j++;
+    let hashes = 0;
+    while (text.charAt(j) === "#") {
+      hashes++;
+      j++;
+    }
+    if (text.charAt(j) !== '"')
+      return -1;
+    return untilEnd(j + 1, `"${"#".repeat(hashes)}`, false);
+  };
+  const cppRawEnd = (i) => {
+    const m = /^(?:u8|u|U|L)?R"([^()\\\s]{0,16})\(/.exec(text.slice(i, i + 32));
+    if (!m)
+      return -1;
+    return untilEnd(i + m[0].length, `)${m[1] ?? ""}"`, false);
+  };
+  const luaLongEnd = (i) => {
+    const m = /^\[(=*)\[/.exec(text.slice(i, i + 40));
+    if (!m)
+      return -1;
+    return untilEnd(i + m[0].length, `]${m[1] ?? ""}]`, false);
+  };
+  const hashIsComment = (i) => {
+    const prev = i > 0 ? text.charAt(i - 1) : "";
+    if (prev === "$")
+      return false;
+    if (def.hashBoundary && prev !== "" && !/[\s;&|()]/.test(prev))
+      return false;
+    if (def.phpAttr && text.charAt(i + 1) === "[")
+      return false;
+    return true;
+  };
+  const quoteAllowed = (i) => {
+    if (!def.yamlQuote)
+      return true;
+    let j = i - 1;
+    while (j >= 0 && (text.charAt(j) === " " || text.charAt(j) === "\t"))
+      j--;
+    return j < 0 || `
+:-[{,?`.includes(text.charAt(j));
+  };
+  function scan(from, stopAtBrace, sink) {
+    let depth = 0;
+    let i = from;
+    const emit = (kind, end) => {
+      sink?.push({ kind, start: i, end });
+      i = end;
+    };
+    while (i < n) {
+      const c = text.charAt(i);
+      if (stopAtBrace) {
+        if (c === "{")
+          depth++;
+        else if (c === "}") {
+          if (depth === 0)
+            return i + 1;
+          depth--;
+        }
+      }
+      if (def.rubyBegin && c === "=" && atLineStart(i) && text.startsWith("=begin", i)) {
+        const m = /^=end\b.*$/m.exec(text.slice(i + 6));
+        emit("comment", m ? i + 6 + m.index + m[0].length : n);
+        continue;
+      }
+      if (def.lua && c === "-" && text.startsWith("--", i)) {
+        const long = text.charAt(i + 2) === "[" ? luaLongEnd(i + 2) : -1;
+        emit("comment", long >= 0 ? long : lineEnd(i));
+        continue;
+      }
+      const block = def.block?.find(([open]) => text.startsWith(open, i));
+      if (block) {
+        emit("comment", blockEnd(i, block[0], block[1]));
+        continue;
+      }
+      const lineStart = def.line?.find((s) => text.startsWith(s, i));
+      if (lineStart && (lineStart !== "#" || hashIsComment(i)) && !(def.colonGuard && text.charAt(i - 1) === ":")) {
+        emit("comment", lineEnd(i));
+        continue;
+      }
+      if (def.rust && (c === "r" || c === "b") && !isIdentChar(text.charAt(i - 1))) {
+        const end = rustRawEnd(i);
+        if (end >= 0) {
+          emit("string", end);
+          continue;
+        }
+      }
+      if (def.cppRaw && (c === "R" || c === "u" || c === "U" || c === "L") && !isIdentChar(text.charAt(i - 1))) {
+        const end = cppRawEnd(i);
+        if (end >= 0) {
+          emit("string", end);
+          continue;
+        }
+      }
+      if (def.rust && c === '"') {
+        emit("string", quoteEnd(i, '"'));
+        continue;
+      }
+      if (def.rust && c === "'") {
+        const end = rustCharEnd(i);
+        if (end >= 0)
+          emit("string", end);
+        else
+          i++;
+        continue;
+      }
+      if (def.lua && c === "[") {
+        const end = luaLongEnd(i);
+        if (end >= 0) {
+          emit("string", end);
+          continue;
+        }
+      }
+      const triple = def.triple?.find((t) => text.startsWith(t, i));
+      if (triple) {
+        emit("string", untilEnd(i + 3, triple, !def.rawTriple?.includes(triple)));
+        continue;
+      }
+      if (def.js && c === "`") {
+        emit("string", templateEnd(i));
+        continue;
+      }
+      if (def.js && c === "/") {
+        let end = -1;
+        if (i >= regexFailedUntil && regexAllowed(text, i)) {
+          end = regexEnd(text, i);
+          if (end < 0)
+            regexFailedUntil = lineEnd(i);
+        }
+        i = end >= 0 ? end : i + 1;
+        continue;
+      }
+      if (def.quotes?.includes(c) && quoteAllowed(i) && !(def.js && isIdentChar(text.charAt(i - 1)))) {
+        emit("string", quoteEnd(i, c));
+        continue;
+      }
+      i++;
+    }
+    return n;
+  }
+  scan(0, false, out);
+  return out;
+}
+var defOf = (lang) => {
+  const id = normalizeId(lang);
+  return Object.hasOwn(DEFS, id) ? DEFS[id] : undefined;
+};
+function lineIndex(text) {
+  const nl = [];
+  for (let i = text.indexOf(`
+`);i >= 0; i = text.indexOf(`
+`, i + 1))
+    nl.push(i);
+  return (pos) => {
+    let lo = 0;
+    let hi = nl.length;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (nl[mid] < pos)
+        lo = mid + 1;
+      else
+        hi = mid;
+    }
+    return lo + 1;
+  };
+}
+function scanCode(text, lang) {
+  const def = defOf(lang);
+  if (!def)
+    return [];
+  const lineAt = lineIndex(text);
+  return scanRanges(text, def).map((r) => ({ kind: r.kind, text: text.slice(r.start, r.end), line: lineAt(r.start) }));
+}
+function stripToCode(text, lang) {
+  const def = defOf(lang);
+  if (!def)
+    return text;
+  let out = "";
+  let pos = 0;
+  for (const r of scanRanges(text, def)) {
+    out += text.slice(pos, r.start) + text.slice(r.start, r.end).replace(/[^\r\n]/g, " ");
+    pos = r.end;
+  }
+  return out + text.slice(pos);
 }
 
 // src/path.ts
@@ -763,6 +1150,23 @@ function parseExpires(v) {
 var stringList = (v) => asList(v).filter((x) => typeof x === "string");
 var typeName = (v) => v === null || v === undefined ? "null" : Array.isArray(v) ? "list" : isDict(v) ? "mapping" : typeof v;
 var REGEX_FLAGS = { pre_bash: "", pre_edit: "m", post_edit: "m" };
+var SCOPES = ["all", "comments", "strings", "code"];
+function checkScopeKeys(t, index, entry, editEvent) {
+  const given = (key) => entry[key] !== undefined && entry[key] !== null;
+  const event = typeof entry.event === "string" ? entry.event : "";
+  for (const key of ["scope", "lang"]) {
+    if (given(key) && (event === "pre_bash" || event === "stop_check"))
+      return t("rules.scopeNotAllowed", { index, key, event });
+  }
+  if (!editEvent)
+    return;
+  if (given("scope") && !(typeof entry.scope === "string" && SCOPES.includes(entry.scope))) {
+    return t("rules.badScope", { index, value: String(entry.scope), allowed: SCOPES.join(" / ") });
+  }
+  if (given("lang") && !(typeof entry.lang === "string" && isKnownLang(entry.lang)))
+    return t("rules.badLang", { index, value: String(entry.lang) });
+  return;
+}
 function normalizeEnforce(io, raw) {
   const t = tr(io.lang);
   const problems = [];
@@ -777,6 +1181,11 @@ function normalizeEnforce(io, raw) {
       return;
     }
     const flags = typeof entry.event === "string" ? REGEX_FLAGS[entry.event] : undefined;
+    const scopeProblem = checkScopeKeys(t, index, entry, flags !== undefined && entry.event !== "pre_bash");
+    if (scopeProblem) {
+      problems.push(scopeProblem);
+      return;
+    }
     if (flags !== undefined) {
       for (const key of ["when", "unless"]) {
         const v = entry[key];
@@ -1091,7 +1500,7 @@ function extractPreEditContent(toolName, toolInput) {
   }
   return "";
 }
-var SHELL = ["sh", "-c"];
+var SHELL2 = ["sh", "-c"];
 async function evalEntries(io, rules, event, fn) {
   const violations = [];
   for (const rule of rules) {
@@ -1124,7 +1533,7 @@ async function evalPreBash(io, rules, command, projectDir) {
     const checkCmd = entry.check;
     if (truthy(checkCmd)) {
       io.progress?.(tr(io.lang)("guard.evaluating", { rule: rule.name }));
-      const r = await io.run([...SHELL, String(checkCmd)], { cwd: dir, env: { CLAUDE_PROJECT_DIR: dir }, timeoutMs: 1e4 });
+      const r = await io.run([...SHELL2, String(checkCmd)], { cwd: dir, env: { CLAUDE_PROJECT_DIR: dir }, timeoutMs: 1e4 });
       if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
         return;
     }
@@ -1137,6 +1546,30 @@ async function evalPreBash(io, rules, command, projectDir) {
       detail: `command matched: ${String(when)}`
     };
   });
+}
+function matchScoped(text, filePath, entry) {
+  const when = entry.when;
+  if (!truthy(when))
+    return;
+  const whenRx = pyRegExp(String(when), "m");
+  const unless = entry.unless;
+  const unlessRx = truthy(unless) ? pyRegExp(String(unless), "m") : undefined;
+  const hit = (s) => whenRx.test(s) && !unlessRx?.test(s);
+  const scope = typeof entry.scope === "string" ? entry.scope : "all";
+  if (scope === "comments" || scope === "strings") {
+    const lang = truthy(entry.lang) ? String(entry.lang) : langOf(filePath);
+    if (lang === undefined)
+      return { matched: false, detail: "" };
+    const kind = scope === "comments" ? "comment" : "string";
+    const seg = scanCode(text, lang).find((s) => s.kind === kind && hit(s.text));
+    return seg ? { matched: true, detail: `${kind} matched: ${String(when)} (line ${seg.line})`, line: seg.line } : { matched: false, detail: "" };
+  }
+  if (scope === "code") {
+    const lang = truthy(entry.lang) ? String(entry.lang) : langOf(filePath);
+    const code = lang === undefined ? text : stripToCode(text, lang);
+    return hit(code) ? { matched: true, detail: `code matched: ${String(when)}` } : { matched: false, detail: "" };
+  }
+  return hit(text) ? { matched: true, detail: `content matched: ${String(when)}` } : { matched: false, detail: "" };
 }
 async function evalPreEdit(io, rules, filePath, content, projectDir) {
   const dir = projectDir || io.projectDir || io.cwd;
@@ -1185,13 +1618,10 @@ async function evalPreEdit(io, rules, filePath, content, projectDir) {
         return;
       detail = `missing test file: ${candidates.join(", ")}`;
     } else {
-      const when = entry.when;
-      if (!truthy(when) || !pyRegExp(String(when), "m").test(text))
+      const m = matchScoped(text, filePath, entry);
+      if (!m?.matched)
         return;
-      const unless = entry.unless;
-      if (truthy(unless) && pyRegExp(String(unless), "m").test(text))
-        return;
-      detail = `content matched: ${String(when)}`;
+      detail = m.detail;
     }
     return {
       rule: rule.name,
@@ -1233,16 +1663,14 @@ async function evalPostEdit(io, rules, filePath, projectDir) {
     }
     const details = [];
     if (truthy(when)) {
-      if (!pyRegExp(String(when), "m").test(text))
+      const m = matchScoped(text, filePath, entry);
+      if (!m?.matched)
         return;
-      const unless = entry.unless;
-      if (truthy(unless) && pyRegExp(String(unless), "m").test(text))
-        return;
-      details.push(`content matched: ${String(when)}`);
+      details.push(m.detail);
     }
     if (truthy(checkCmd)) {
       io.progress?.(tr(io.lang)("postEdit.checking", { rule: rule.name, file: absPath }));
-      const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: dir, FILE: absPath }, timeoutMs: 15000 });
+      const r = await io.run([...SHELL2, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: dir, FILE: absPath }, timeoutMs: 15000 });
       if (r.exitCode === 0 && !r.timedOut && r.error === undefined)
         return;
       details.push(`check failed: ${String(checkCmd)}`);
@@ -1351,7 +1779,7 @@ async function evalStopCheck(io, rules, projectDir, changedFiles) {
       }
       if (truthy(checkCmd)) {
         io.progress?.(tr(io.lang)("stopCheck.checking", { rule: rule.name, file: absPath }));
-        const r = await io.run([...SHELL, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: projectDir, FILE: absPath }, timeoutMs: 15000 });
+        const r = await io.run([...SHELL2, String(checkCmd)], { cwd: root, env: { CLAUDE_PROJECT_DIR: projectDir, FILE: absPath }, timeoutMs: 15000 });
         if (r.exitCode !== 0 || r.timedOut || r.error !== undefined)
           bad = true;
       }
@@ -2014,6 +2442,46 @@ function summarizeCmds(cmds) {
   }
   return parts.join(" ; ");
 }
+var CONTENT_SCOPES = ["all", "comments", "strings", "code"];
+function parseContentChecks(raw) {
+  if (raw === undefined || raw === null)
+    return [];
+  if (!Array.isArray(raw))
+    return "content must be a list";
+  const out = [];
+  for (const [i, item] of raw.entries()) {
+    const at = `content[${i}]`;
+    if (!isDict(item))
+      return `${at} must be a mapping`;
+    for (const key of ["when", "message"]) {
+      if (typeof item[key] !== "string" || item[key] === "")
+        return `${at}.${key} is required and must be a string`;
+    }
+    if (item.scope !== undefined && !(typeof item.scope === "string" && CONTENT_SCOPES.includes(item.scope)))
+      return `${at}.scope must be one of ${CONTENT_SCOPES.join(" / ")} (got ${pyRepr(item.scope)})`;
+    if (item.lang !== undefined && !(typeof item.lang === "string" && isKnownLang(item.lang)))
+      return `${at}.lang is unknown (got ${pyRepr(item.lang)})`;
+    if (item.name !== undefined && typeof item.name !== "string")
+      return `${at}.name must be a string`;
+    for (const key of ["when", "unless"]) {
+      if (item[key] === undefined)
+        continue;
+      if (typeof item[key] !== "string")
+        return `${at}.${key} must be a string`;
+      try {
+        pyRegExp(item[key], "m");
+      } catch (e) {
+        return `${at}.${key} is not a valid regex: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+    const ex = item.exclude;
+    if (ex !== undefined && !(typeof ex === "string" || Array.isArray(ex) && ex.every((x) => typeof x === "string")))
+      return `${at}.exclude must be a string or a list of strings`;
+    out.push({ name: item.name || slug(item.when), entry: item, exclude: compileGlobs(asList(ex)) });
+  }
+  return out;
+}
+var summarizeRule = (contents, cmds) => [...contents.map((c) => `content:${c.name}`), ...cmds.length > 0 ? [summarizeCmds(cmds)] : []].join(" ; ");
 function tailOutput(lang, out, limit = FAIL_TAIL_LINES) {
   const lines = out.trimEnd().split(/\r?\n/);
   if (lines.length <= limit)
@@ -2675,6 +3143,27 @@ ${details}` : "");
     const more = unmatched.length > UNMATCHED_SHOWN ? this.t("gate.andMore", { n: unmatched.length - UNMATCHED_SHOWN }) : "";
     this.status.push(this.t("gate.skipUnmatched", { files: `${shown}${more}` }));
   }
+  async runContentChecks(contents, files, rootDir, logs) {
+    const bad = new Set;
+    for (const rel of files) {
+      const abs = join(rootDir, rel);
+      const text = await this.io.readFile(abs);
+      if (text === undefined)
+        continue;
+      for (const c of contents) {
+        if (c.exclude.some((rx) => rx.test(rel)))
+          continue;
+        const r = matchScoped(text, abs, c.entry);
+        if (!r?.matched)
+          continue;
+        const msg = `${rel}${r.line === undefined ? "" : `:${r.line}`} ${String(c.entry.message)} (${r.detail})`;
+        logs.push(msg);
+        this.failures.push(msg);
+        bad.add(rel);
+      }
+    }
+    return bad;
+  }
   async runRules(cfg, rels, logs, rootDir, policyState) {
     const rules = cfg?.rules || [];
     const triggered = [];
@@ -2695,7 +3184,9 @@ ${details}` : "");
     for (const { rule, matched, pairs } of triggered) {
       const cmds = rule.run || [];
       const timeout = rule.timeout || DEFAULT_TIMEOUT;
-      const policy = await this.makePolicyContext(cfg, rule, rootDir, policyState, logs);
+      const parsed = parseContentChecks(rule.content);
+      const contents = typeof parsed === "string" ? [] : parsed;
+      const policy = cmds.length > 0 ? await this.makePolicyContext(cfg, rule, rootDir, policyState, logs) : null;
       const ruleFiles = new Set(matched);
       for (const name of rule.run_checks || []) {
         let set = checkRefFiles.get(name);
@@ -2708,6 +3199,37 @@ ${details}` : "");
         if (!checkNames.includes(name))
           checkNames.push(name);
       }
+      if (typeof parsed === "string") {
+        logs.push(this.t("gate.badContent", { reason: parsed }));
+        summary.push(`${summarizeRule([], cmds)}  ${this.t("gate.skipBadContent")}`);
+        failed = true;
+        for (const f of ruleFiles)
+          failFiles.add(f);
+        continue;
+      }
+      const runGroup = async (label, cwd, files, noCwdMsg) => {
+        const bad = await this.runContentChecks(contents, files, rootDir, logs);
+        let runFailed = false;
+        let skipped = false;
+        if (cmds.length > 0 && (await this.io.stat(cwd))?.kind !== "dir") {
+          logs.push(noCwdMsg);
+          summary.push(`(${label}) ${summarizeRule(contents, cmds)}  ${this.t("gate.skipNoCwd")}`);
+          this.note("skip", label, summarizeCmds(cmds), this.t("gate.noteNoCwd"));
+          skipped = true;
+        } else {
+          summary.push(`(${label}) ${summarizeRule(contents, cmds)}`);
+          if (cmds.length > 0)
+            runFailed = await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(files), rootDir);
+        }
+        for (const f of files) {
+          if (runFailed || bad.has(f))
+            failFiles.add(f);
+          else if (!skipped)
+            successFiles.add(f);
+        }
+        if (runFailed || bad.size > 0)
+          failed = true;
+      };
       const rawPerFileDir = rule.per_file_dir;
       if (truthy(rawPerFileDir)) {
         const mode = normalizePerFileDirMode(rawPerFileDir);
@@ -2724,40 +3246,12 @@ ${details}` : "");
           const cwd = d ? join(rootDir, d) : rootDir;
           const label = d || ".";
           const dirFiles = matched.filter((rp) => rootsByRel[rp] === d);
-          if ((await this.io.stat(cwd))?.kind !== "dir") {
-            logs.push(this.t("gate.rootNoCwd", { label, cwd }));
-            summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t("gate.skipNoCwd")}`);
-            this.note("skip", label, summarizeCmds(cmds), this.t("gate.noteNoCwd"));
-            continue;
-          }
-          summary.push(`(${label}) ${summarizeCmds(cmds)}`);
-          if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(dirFiles), rootDir)) {
-            failed = true;
-            for (const f of dirFiles)
-              failFiles.add(f);
-          } else {
-            for (const f of dirFiles)
-              successFiles.add(f);
-          }
+          await runGroup(label, cwd, dirFiles, this.t("gate.rootNoCwd", { label, cwd }));
         }
       } else {
         const cwd = rule.dir ? join(rootDir, rule.dir) : rootDir;
         const label = rule.dir ?? ".";
-        if ((await this.io.stat(cwd))?.kind !== "dir") {
-          logs.push(this.t("gate.ruleNoCwd", { label, cwd }));
-          summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t("gate.skipNoCwd")}`);
-          this.note("skip", label, summarizeCmds(cmds), this.t("gate.noteNoCwd"));
-          continue;
-        }
-        summary.push(`(${label}) ${summarizeCmds(cmds)}`);
-        if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(ruleFiles), rootDir)) {
-          failed = true;
-          for (const f of ruleFiles)
-            failFiles.add(f);
-        } else {
-          for (const f of ruleFiles)
-            successFiles.add(f);
-        }
+        await runGroup(label, cwd, [...ruleFiles], this.t("gate.ruleNoCwd", { label, cwd }));
       }
     }
     this.noteUnmatchedFiles(rels, triggered);

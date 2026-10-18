@@ -25,6 +25,8 @@
 //                              # これにマッチしたら検査対象外（テスト不要なファイルの除外）
 //     when: '正規表現'          # 任意。new_string / content / new_source に対して
 //     unless: '正規表現'        # 任意
+//     scope: comments          # 任意。when / unless を当てる範囲（post_edit と共通。下記）
+//     lang: ts                 # 任意。言語 id の指定（post_edit と共通。下記）
 //     absent_sibling: 'name'   # 任意。同ディレクトリにこの名前のファイルが無ければ違反
 //                              # ({stem} はファイル名 (拡張子抜き) に置換される。
 //                              # kebab-case/snake_case 両方の候補が展開される)
@@ -43,6 +45,14 @@
 //     exclude_path: 'glob'     # 任意。文字列または配列。マッチしたら検査対象外
 //     when: '正規表現'          # 任意。編集後のファイル内容（ディスク上の全文）に対して（m フラグ）
 //     unless: '正規表現'        # 任意。マッチすれば違反ではない
+//     scope: all               # 任意。when / unless を当てる範囲（pre_edit と共通）:
+//                              #   all（既定。従来どおり全文）/ comments / strings / code。
+//                              #   comments / strings はコメント・文字列リテラル 1 つごとに評価（when がどれかに
+//                              #   マッチし、そのセグメントに unless がマッチしなければ違反）。code はコメントと
+//                              #   文字列を同じ長さの空白に置換した全文（行番号は保たれる）。
+//                              #   言語は path の拡張子（または lang）から code-scan.ts の字句解析器で決める。
+//                              #   言語が分からないとき: comments / strings は違反なし、code は全文のまま評価
+//     lang: ts                 # 任意。言語 id（拡張子から判定できないとき・上書きしたいとき）
 //     check: 'shell cmd'       # 任意。$FILE に絶対パス、cwd はそのファイルのルート。非0終了で違反
 //                              # when と check の少なくとも一方が必要（どちらも無い要素は無視）。
 //                              # 両方あれば AND（when がマッチし、かつ check が非0）
@@ -75,13 +85,20 @@
 // このフィルタは listRules を feedbackDirPath 省略で呼んだとき（グローバル＋プロジェクトのマージ後）にだけ
 // かかる。ディレクトリを明示したときは無加工で返す。
 //
+// scope / lang が効く範囲: event が pre_edit / post_edit の要素だけ。event が無い・未知のイベントの要素では
+// scope / lang は検査されず（不正な値でも捨てられない）、評価もされない。`check:` のみの post_edit や、
+// absent_sibling / absent_glob の pre_edit に付けた scope は、when が無いので無視される。
+//
 // 壊れたルールの扱い（1つのルールの不備で他のルールまで止めないため）:
 //   - frontmatter が YAML として読めないファイルは、そのファイルだけを飛ばす
 //   - enforce がリストでない（`- ` の書き忘れなど）ルールは enforce を空として扱う
-//   - enforce の要素のうち、辞書でないもの・when / unless が使えない正規表現のものは、その要素だけを捨てる
+//   - enforce の要素のうち、辞書でないもの・when / unless が使えない正規表現のもの・scope / lang が不正なもの
+//     （scope が all / comments / strings / code 以外、lang が未知の言語 id、pre_bash / stop_check への scope / lang）は、
+//     その要素だけを捨てる
 //   - 評価中に例外になった要素は、その要素だけを飛ばす
 // いずれも、ファイルと理由を ~/.claude/feedback/.errors.jsonl に残し（BrokenRule）、UserPromptSubmit の注入と
 // /correct で知らせる。
+import { isKnownLang, langOf, scanCode, stripToCode } from './code-scan.ts'
 import { asList, compileGlobs, expandBraces, globExists } from './glob.ts'
 import { type Lang, tr } from './i18n.ts'
 import type { Io } from './io.ts'
@@ -172,9 +189,28 @@ const typeName = (v: unknown): string => (v === null || v === undefined ? 'null'
 /** when / unless を評価するイベントと、そのときのフラグ（evalPreBash / evalPreEdit / evalPostEdit と同じ）。 */
 const REGEX_FLAGS: Record<string, string> = { pre_bash: '', pre_edit: 'm', post_edit: 'm' }
 
+const SCOPES = ['all', 'comments', 'strings', 'code']
+
+type Translate = ReturnType<typeof tr>
+
+/** scope / lang の不備（不正な値、pre_edit / post_edit 以外のイベントでの指定）の理由。問題なければ undefined。 */
+function checkScopeKeys(t: Translate, index: number, entry: Dict, editEvent: boolean): string | undefined {
+  const given = (key: string): boolean => entry[key] !== undefined && entry[key] !== null
+  const event = typeof entry.event === 'string' ? entry.event : ''
+  for (const key of ['scope', 'lang']) {
+    if (given(key) && (event === 'pre_bash' || event === 'stop_check')) return t('rules.scopeNotAllowed', { index, key, event })
+  }
+  if (!editEvent) return undefined
+  if (given('scope') && !(typeof entry.scope === 'string' && SCOPES.includes(entry.scope))) {
+    return t('rules.badScope', { index, value: String(entry.scope), allowed: SCOPES.join(' / ') })
+  }
+  if (given('lang') && !(typeof entry.lang === 'string' && isKnownLang(entry.lang))) return t('rules.badLang', { index, value: String(entry.lang) })
+  return undefined
+}
+
 /**
  * frontmatter の enforce を「辞書のリスト」にそろえる。リストでなければ空、辞書でない要素と
- * when / unless が使えない正規表現の要素は捨て、その理由を problems に入れる。
+ * when / unless が使えない正規表現の要素、scope / lang が不正な要素は捨て、その理由を problems に入れる。
  */
 export function normalizeEnforce(io: Io, raw: unknown): { enforce: Dict[]; problems: string[] } {
   const t = tr(io.lang)
@@ -188,6 +224,11 @@ export function normalizeEnforce(io: Io, raw: unknown): { enforce: Dict[]; probl
       return
     }
     const flags = typeof entry.event === 'string' ? REGEX_FLAGS[entry.event] : undefined
+    const scopeProblem = checkScopeKeys(t, index, entry, flags !== undefined && entry.event !== 'pre_bash')
+    if (scopeProblem) {
+      problems.push(scopeProblem)
+      return
+    }
     if (flags !== undefined) {
       for (const key of ['when', 'unless']) {
         const v = entry[key]
@@ -612,6 +653,38 @@ export async function evalPreBash(io: Io, rules: Rule[], command: string, projec
   })
 }
 
+// ---- when / unless の評価範囲（scope） ----
+/**
+ * pre_edit / post_edit の when / unless を text に当てる。entry.scope で範囲を選ぶ:
+ * all（省略時。全文）/ comments / strings（セグメントごと）/ code（コメントと文字列を空白にした全文）。
+ * when が無ければ undefined（呼び出し側で評価しない）。matched=false のときの detail は空。
+ * line は comments / strings でマッチしたセグメントの開始行（1 始まり）。all / code では undefined。
+ * 言語は entry.lang、無ければ filePath の拡張子・ファイル名から決める。分からないとき comments / strings はセグメント無し
+ * （違反なし）、code は全文をそのまま 1 セグメントとして評価する。
+ */
+export function matchScoped(text: string, filePath: string, entry: Dict): { matched: boolean; detail: string; line?: number } | undefined {
+  const when = entry.when
+  if (!truthy(when)) return undefined
+  const whenRx = pyRegExp(String(when), 'm')
+  const unless = entry.unless
+  const unlessRx = truthy(unless) ? pyRegExp(String(unless), 'm') : undefined
+  const hit = (s: string): boolean => whenRx.test(s) && !unlessRx?.test(s)
+  const scope = typeof entry.scope === 'string' ? entry.scope : 'all'
+  if (scope === 'comments' || scope === 'strings') {
+    const lang = truthy(entry.lang) ? String(entry.lang) : langOf(filePath)
+    if (lang === undefined) return { matched: false, detail: '' }
+    const kind = scope === 'comments' ? 'comment' : 'string'
+    const seg = scanCode(text, lang).find((s) => s.kind === kind && hit(s.text))
+    return seg ? { matched: true, detail: `${kind} matched: ${String(when)} (line ${seg.line})`, line: seg.line } : { matched: false, detail: '' }
+  }
+  if (scope === 'code') {
+    const lang = truthy(entry.lang) ? String(entry.lang) : langOf(filePath)
+    const code = lang === undefined ? text : stripToCode(text, lang)
+    return hit(code) ? { matched: true, detail: `code matched: ${String(when)}` } : { matched: false, detail: '' }
+  }
+  return hit(text) ? { matched: true, detail: `content matched: ${String(when)}` } : { matched: false, detail: '' }
+}
+
 // ---- enforce 評価: pre_edit ----
 export async function evalPreEdit(io: Io, rules: Rule[], filePath: string, content: string, projectDir?: string): Promise<Violation[]> {
   const dir = projectDir || io.projectDir || io.cwd
@@ -656,11 +729,9 @@ export async function evalPreEdit(io: Io, rules: Rule[], filePath: string, conte
       if (found) return undefined
       detail = `missing test file: ${candidates.join(', ')}`
     } else {
-      const when = entry.when
-      if (!truthy(when) || !pyRegExp(String(when), 'm').test(text)) return undefined
-      const unless = entry.unless
-      if (truthy(unless) && pyRegExp(String(unless), 'm').test(text)) return undefined
-      detail = `content matched: ${String(when)}`
+      const m = matchScoped(text, filePath, entry)
+      if (!m?.matched) return undefined
+      detail = m.detail
     }
     return {
       rule: rule.name,
@@ -704,10 +775,9 @@ export async function evalPostEdit(io: Io, rules: Rule[], filePath: string, proj
     }
     const details: string[] = []
     if (truthy(when)) {
-      if (!pyRegExp(String(when), 'm').test(text)) return undefined
-      const unless = entry.unless
-      if (truthy(unless) && pyRegExp(String(unless), 'm').test(text)) return undefined
-      details.push(`content matched: ${String(when)}`)
+      const m = matchScoped(text, filePath, entry)
+      if (!m?.matched) return undefined
+      details.push(m.detail)
     }
     if (truthy(checkCmd)) {
       io.progress?.(tr(io.lang)('postEdit.checking', { rule: rule.name, file: absPath }))

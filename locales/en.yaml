@@ -17,6 +17,9 @@ rules:
   enforceItemNotMapping: "enforce[{{index}}] is not a mapping ({{type}})"
   badRegex: "enforce[{{index}}].{{key}} is not a usable regular expression: {{error}}"
   evalError: "enforce[{{index}}] failed to evaluate: {{error}}"
+  badScope: "enforce[{{index}}].scope must be one of {{allowed}} ({{value}})"
+  badLang: "enforce[{{index}}].lang is not a known language id ({{value}})"
+  scopeNotAllowed: "enforce[{{index}}]: {{key}} cannot be used with {{event}} (pre_edit / post_edit only)"
 
 guard:
   evaluating: "[feedback-guard] evaluating: {{rule}}"
@@ -116,6 +119,8 @@ gate:
   skipUnmatched: "[gate] skip: {{files}} (matches no rule)"
   badPerFileDir: "=== [gate] Invalid per_file_dir value: {{value}} (use true / \"file\" / \"pattern_root\"). Skipping this rule. ==="
   skipBadPerFileDir: "[skip: invalid per_file_dir]"
+  badContent: "=== [gate] Invalid content check: {{reason}}. Skipping this rule. ==="
+  skipBadContent: "[skip: invalid content]"
   rootNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this root. ==="
   ruleNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this rule. ==="
   checkNoCwd: "=== [gate] (check:{{name}}) cwd does not exist: {{cwd}}. Skipping this check. ==="

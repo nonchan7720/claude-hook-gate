@@ -172,3 +172,99 @@ describe('feedback-post-edit', () => {
     expect(r).toEqual({ exitCode: 0, stdout: '', stderr: '' })
   })
 })
+
+describe('feedback-post-edit: scope', () => {
+  let feedbackDir: string
+  let projectDir: string
+
+  const writeRule = (enforce: string[], count = 4): void => {
+    const content = ['---', 'name: scoped', 'description: test', 'type: feedback', `count: ${count}`, 'enforce:', ...enforce, '---', '', '本文', ''].join('\n')
+    fs.writeFileSync(path.join(feedbackDir, 'scoped.md'), content, 'utf8')
+  }
+  const writeFile = (rel: string, content: string): string => {
+    const abs = path.join(projectDir, rel)
+    fs.mkdirSync(path.dirname(abs), { recursive: true })
+    fs.writeFileSync(abs, content, 'utf8')
+    return abs
+  }
+  const edit = (filePath: string) =>
+    feedbackPostEdit(makeIo({ projectDir, env: { CLAUDE_FEEDBACK_DIR: feedbackDir } }), { tool_name: 'Edit', tool_input: { file_path: filePath } })
+  const reason = (stdout: string): string => (JSON.parse(stdout) as { reason: string }).reason
+
+  const commentRule = (extra: string[] = [], path_ = 'src/**/*') =>
+    writeRule([
+      '  - event: post_edit',
+      `    path: '${path_}'`,
+      ...extra,
+      "    when: '^//(?! (TODO|NOTE|FIXME)\\(\\w+\\): )'",
+      "    message: 'コメントは // TODO(name): 形式'",
+      '    scope: comments',
+    ])
+
+  beforeEach(() => {
+    feedbackDir = tmpDir()
+    projectDir = tmpDir()
+  })
+  afterEach(() => {
+    rmTree(feedbackDir)
+    rmTree(projectDir)
+  })
+
+  test('scope: comments flags a badly formatted comment with its line', async () => {
+    commentRule()
+    const r = await edit(writeFile('src/a.ts', 'const a = 1\n// TODO(me): ok\n// bad comment\n'))
+    const out = JSON.parse(r.stdout)
+    expect(out.decision).toBe('block')
+    expect(reason(r.stdout)).toContain('comment matched: ^//(?! (TODO|NOTE|FIXME)\\(\\w+\\): ) (line 3)')
+  })
+
+  test('the same text inside a string literal is not a violation, a well-formed comment passes', async () => {
+    commentRule()
+    const r = await edit(writeFile('src/a.ts', 'const a = "// bad comment"\nconst b = `\n// bad\n`\n// NOTE(me): fine\n'))
+    expect(r).toEqual({ exitCode: 0, stdout: '', stderr: '' })
+  })
+
+  test('unless is evaluated per segment', async () => {
+    commentRule(["    unless: '^///'"])
+    // `///` のコメントは免除。同じファイル内の別コメントの違反は免除されない
+    expect((await edit(writeFile('src/a.ts', '/// doc\n'))).stdout).toBe('')
+    const r = await edit(writeFile('src/b.ts', '/// doc\n// bad\n'))
+    expect(reason(r.stdout)).toContain('comment matched')
+    expect(reason(r.stdout)).toContain('(line 2)')
+  })
+
+  test('scope: strings checks string literals only', async () => {
+    writeRule(['  - event: post_edit', "    path: 'src/**/*.ts'", "    when: 'password'", '    scope: strings', "    message: 'no secrets'"])
+    expect((await edit(writeFile('src/a.ts', '// password here\nconst password = 1\n'))).stdout).toBe('')
+    const r = await edit(writeFile('src/b.ts', 'const a = 1\nconst p = "my password"\n'))
+    expect(reason(r.stdout)).toContain('string matched: password (line 2)')
+  })
+
+  test('scope: code ignores console.log in comments and strings, and still finds real calls', async () => {
+    writeRule(['  - event: post_edit', "    path: 'src/**/*.ts'", "    when: '^\\s*console\\.log\\('", '    scope: code', "    message: 'no console.log'"])
+    expect((await edit(writeFile('src/a.ts', '/*\nconsole.log(1)\n*/\nconst s = `\nconsole.log(2)\n`\n// console.log(3)\n'))).stdout).toBe('')
+    const r = await edit(writeFile('src/b.ts', '/* x */\nconsole.log(1)\n'))
+    expect(reason(r.stdout)).toContain('code matched: ^\\s*console\\.log\\(')
+  })
+
+  test('scope: all (and omitted) keeps evaluating the whole file', async () => {
+    writeRule(['  - event: post_edit', "    path: 'src/**/*.ts'", "    when: '^\\s*console\\.log\\('", '    scope: all', "    message: 'm'"])
+    const r = await edit(writeFile('src/a.ts', '/*\nconsole.log(1)\n*/\n'))
+    expect(reason(r.stdout)).toContain('content matched: ^\\s*console\\.log\\(')
+  })
+
+  test('lang overrides the language of the extension', async () => {
+    commentRule(['    lang: py'], 'src/**/*.txt')
+    // py では // はコメントではない（# が行コメント）
+    expect((await edit(writeFile('src/a.txt', '// bad comment\n'))).stdout).toBe('')
+    writeRule(['  - event: post_edit', "    path: 'src/**/*.txt'", '    lang: py', "    when: '^# (?!TODO)'", '    scope: comments', "    message: 'm'"])
+    expect(reason((await edit(writeFile('src/b.txt', 'x = 1\n# plain\n'))).stdout)).toContain('comment matched')
+  })
+
+  test('unknown extension: comments / strings find nothing, code evaluates the whole text', async () => {
+    commentRule([], 'src/**/*.zzz')
+    expect((await edit(writeFile('src/a.zzz', '// bad comment\n'))).stdout).toBe('')
+    writeRule(['  - event: post_edit', "    path: 'src/**/*.zzz'", "    when: 'console'", '    scope: code', "    message: 'm'"])
+    expect(reason((await edit(writeFile('src/b.zzz', '// console\n'))).stdout)).toContain('code matched: console')
+  })
+})

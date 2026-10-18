@@ -72,6 +72,19 @@
 // parallel:    run の要素として {parallel: [文字列 or {cmd, timeout}, ...]} を書くと、その中のコマンドは
 //              並行実行される（全て完了してから次の要素へ進む）。parallel の中に parallel はネストできない
 //              （失敗扱い）。
+// content:     ルール単位の「ファイル内容の検査」のリスト（run の代わり、または run に加えて書ける）。マッチした各
+//              ファイル（per_file_dir のときはそのルートに属するファイル）のディスク上の全文を読み、feedback
+//              ルールの pre_edit / post_edit と同じ matchScoped（src/feedback-rules.ts）で when / unless
+//              （Python 風の正規表現）を判定する。マッチしたら違反＝そのファイルはルールの失敗（コマンド失敗と同じ
+//              経路で failures・logs・FAILED に載り、checks フェーズで再評価される）。content を先に評価し、その後
+//              run を実行する。読めないファイルは違反なしで飛ばす。dogwood ポリシー・共有 / 直列化・ログファイル・帯の
+//              対象外（プロセスを起こさず即時に終わる）。consistency_checks には書けない。
+//              各要素: when（必須・正規表現）/ unless（正規表現）/ message（必須）/ name（summary 用、省略時は when
+//              から生成）/ scope（all=既定 / comments / strings / code）/ lang（言語 id の上書き）/ exclude（match
+//              に加えて除外する glob、文字列 or リスト）。
+//              設定不正（リストでない・要素が辞書でない・when / message が無い・scope が 4 値以外・lang が未知・正規表現
+//              が不正）のときは per_file_dir 不正と同様に、ルールをスキップして理由をログに出し rules フェーズを失敗扱い
+//              にする（黙って無視しない）。
 // policy:      dogwood のポリシーファイル（.dw）のパス。トップレベルに書くと全ルール / 全
 //              consistency_checks の既定値になり、rules[] / consistency_checks[] 側に書くとそのルールだけ
 //              上書きする。root_dir（projectDir または worktree ルート）からの相対パス（絶対パスと ~ 展開も
@@ -100,12 +113,14 @@
 //              名前一覧。実際に実行されるのは checks フェーズで、マッチしたルールが参照した名前だけが動く。
 // consistency_checks: name/dir/run を持つ名前付きチェック定義集（match は持たない）。checks フェーズでしか
 //              実行されない。
-import { matchPatterns, type PatternPair } from './glob.ts'
+import { isKnownLang } from './code-scan.ts'
+import { matchScoped } from './feedback-rules.ts'
+import { asList, compileGlobs, matchPatterns, type PatternPair } from './glob.ts'
 import { type Lang, type Translate, tr } from './i18n.ts'
 import type { Io, ScriptResult } from './io.ts'
 import { parseYaml } from './load-yaml.ts'
 import { basename, dirname, expandUser, isAbsolute, join, normpath, relpath } from './path.ts'
-import { type Dict, isDict, pyRepr, truthy } from './pyutil.ts'
+import { type Dict, isDict, pyRegExp, pyRepr, truthy } from './pyutil.ts'
 import { splitRoot as splitRootOf } from './roots.ts'
 import {
   clearSummary,
@@ -145,6 +160,7 @@ export type GateRule = Setting & {
   dir?: string
   per_file_dir?: unknown
   run?: RunItem[]
+  content?: unknown
   run_checks?: string[]
   timeout?: number
 }
@@ -308,6 +324,46 @@ export function summarizeCmds(cmds: RunItem[]): string {
   }
   return parts.join(' ; ')
 }
+
+/** content: の 1 要素（検証済み）。 */
+type ContentCheck = { name: string; entry: Dict; exclude: RegExp[] }
+const CONTENT_SCOPES = ['all', 'comments', 'strings', 'code']
+
+/** rule.content を検証して ContentCheck の列にする。不正なら理由の文字列を返す。 */
+export function parseContentChecks(raw: unknown): ContentCheck[] | string {
+  if (raw === undefined || raw === null) return []
+  if (!Array.isArray(raw)) return 'content must be a list'
+  const out: ContentCheck[] = []
+  for (const [i, item] of raw.entries()) {
+    const at = `content[${i}]`
+    if (!isDict(item)) return `${at} must be a mapping`
+    for (const key of ['when', 'message'] as const) {
+      if (typeof item[key] !== 'string' || item[key] === '') return `${at}.${key} is required and must be a string`
+    }
+    if (item.scope !== undefined && !(typeof item.scope === 'string' && CONTENT_SCOPES.includes(item.scope)))
+      return `${at}.scope must be one of ${CONTENT_SCOPES.join(' / ')} (got ${pyRepr(item.scope)})`
+    if (item.lang !== undefined && !(typeof item.lang === 'string' && isKnownLang(item.lang))) return `${at}.lang is unknown (got ${pyRepr(item.lang)})`
+    if (item.name !== undefined && typeof item.name !== 'string') return `${at}.name must be a string`
+    for (const key of ['when', 'unless'] as const) {
+      if (item[key] === undefined) continue
+      if (typeof item[key] !== 'string') return `${at}.${key} must be a string`
+      try {
+        pyRegExp(item[key], 'm')
+      } catch (e) {
+        return `${at}.${key} is not a valid regex: ${e instanceof Error ? e.message : String(e)}`
+      }
+    }
+    const ex = item.exclude
+    if (ex !== undefined && !(typeof ex === 'string' || (Array.isArray(ex) && ex.every((x) => typeof x === 'string'))))
+      return `${at}.exclude must be a string or a list of strings`
+    out.push({ name: (item.name as string | undefined) || slug(item.when as string), entry: item, exclude: compileGlobs(asList(ex)) })
+  }
+  return out
+}
+
+/** 実行するもの（content と run）を 1 行の要約にする。 */
+const summarizeRule = (contents: ContentCheck[], cmds: RunItem[]): string =>
+  [...contents.map((c) => `content:${c.name}`), ...(cmds.length > 0 ? [summarizeCmds(cmds)] : [])].join(' ; ')
 
 /** 出力を末尾 limit 行に切り詰める。切ったときは先頭に省略表示を付ける。 */
 export function tailOutput(lang: Lang, out: string, limit = FAIL_TAIL_LINES): string {
@@ -1098,6 +1154,29 @@ export class Gate {
   }
 
   /**
+   * files（root 相対）に content の検査を当てる。違反は failures・logs に 1 違反 1 行で積み、違反のあったファイルの
+   * 集合を返す（プロセスは起こさない）。
+   */
+  private async runContentChecks(contents: ContentCheck[], files: string[], rootDir: string, logs: string[]): Promise<Set<string>> {
+    const bad = new Set<string>()
+    for (const rel of files) {
+      const abs = join(rootDir, rel)
+      const text = await this.io.readFile(abs)
+      if (text === undefined) continue
+      for (const c of contents) {
+        if (c.exclude.some((rx) => rx.test(rel))) continue
+        const r = matchScoped(text, abs, c.entry)
+        if (!r?.matched) continue
+        const msg = `${rel}${r.line === undefined ? '' : `:${r.line}`} ${String(c.entry.message)} (${r.detail})`
+        logs.push(msg)
+        this.failures.push(msg)
+        bad.add(rel)
+      }
+    }
+    return bad
+  }
+
+  /**
    * rels に対してマッチしたルールの run だけを実行する。consistency_checks には一切触れない。
    * 戻り値の checkNames はマッチしたルールが run_checks で参照した名前（出現順・重複排除）、checkRefFiles は
    * その名前ごとの参照元マッチファイル集合。
@@ -1123,7 +1202,9 @@ export class Gate {
     for (const { rule, matched, pairs } of triggered) {
       const cmds = rule.run || []
       const timeout = rule.timeout || DEFAULT_TIMEOUT
-      const policy = await this.makePolicyContext(cfg, rule, rootDir, policyState, logs)
+      const parsed = parseContentChecks(rule.content)
+      const contents = typeof parsed === 'string' ? [] : parsed
+      const policy = cmds.length > 0 ? await this.makePolicyContext(cfg, rule, rootDir, policyState, logs) : null
       const ruleFiles = new Set(matched)
       for (const name of rule.run_checks || []) {
         let set = checkRefFiles.get(name)
@@ -1133,6 +1214,33 @@ export class Gate {
         }
         for (const f of ruleFiles) set.add(f)
         if (!checkNames.includes(name)) checkNames.push(name)
+      }
+      if (typeof parsed === 'string') {
+        logs.push(this.t('gate.badContent', { reason: parsed }))
+        summary.push(`${summarizeRule([], cmds)}  ${this.t('gate.skipBadContent')}`)
+        failed = true
+        for (const f of ruleFiles) failFiles.add(f)
+        continue
+      }
+      /** 1 グループ分（content を先に、続けて run）を処理する。cwd が無くて run を飛ばしたときは違反の無いファイルに印を付けない。 */
+      const runGroup = async (label: string, cwd: string, files: string[], noCwdMsg: string): Promise<void> => {
+        const bad = await this.runContentChecks(contents, files, rootDir, logs)
+        let runFailed = false
+        let skipped = false
+        if (cmds.length > 0 && (await this.io.stat(cwd))?.kind !== 'dir') {
+          logs.push(noCwdMsg)
+          summary.push(`(${label}) ${summarizeRule(contents, cmds)}  ${this.t('gate.skipNoCwd')}`)
+          this.note('skip', label, summarizeCmds(cmds), this.t('gate.noteNoCwd'))
+          skipped = true
+        } else {
+          summary.push(`(${label}) ${summarizeRule(contents, cmds)}`)
+          if (cmds.length > 0) runFailed = await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(files), rootDir)
+        }
+        for (const f of files) {
+          if (runFailed || bad.has(f)) failFiles.add(f)
+          else if (!skipped) successFiles.add(f)
+        }
+        if (runFailed || bad.size > 0) failed = true
       }
       const rawPerFileDir = rule.per_file_dir
       if (truthy(rawPerFileDir)) {
@@ -1152,36 +1260,12 @@ export class Gate {
           const cwd = d ? join(rootDir, d) : rootDir
           const label = d || '.'
           const dirFiles = matched.filter((rp) => rootsByRel[rp] === d)
-          if ((await this.io.stat(cwd))?.kind !== 'dir') {
-            logs.push(this.t('gate.rootNoCwd', { label, cwd }))
-            summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t('gate.skipNoCwd')}`)
-            this.note('skip', label, summarizeCmds(cmds), this.t('gate.noteNoCwd'))
-            continue
-          }
-          summary.push(`(${label}) ${summarizeCmds(cmds)}`)
-          if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(dirFiles), rootDir)) {
-            failed = true
-            for (const f of dirFiles) failFiles.add(f)
-          } else {
-            for (const f of dirFiles) successFiles.add(f)
-          }
+          await runGroup(label, cwd, dirFiles, this.t('gate.rootNoCwd', { label, cwd }))
         }
       } else {
         const cwd = rule.dir ? join(rootDir, rule.dir) : rootDir
         const label = rule.dir ?? '.'
-        if ((await this.io.stat(cwd))?.kind !== 'dir') {
-          logs.push(this.t('gate.ruleNoCwd', { label, cwd }))
-          summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t('gate.skipNoCwd')}`)
-          this.note('skip', label, summarizeCmds(cmds), this.t('gate.noteNoCwd'))
-          continue
-        }
-        summary.push(`(${label}) ${summarizeCmds(cmds)}`)
-        if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(ruleFiles), rootDir)) {
-          failed = true
-          for (const f of ruleFiles) failFiles.add(f)
-        } else {
-          for (const f of ruleFiles) successFiles.add(f)
-        }
+        await runGroup(label, cwd, [...ruleFiles], this.t('gate.ruleNoCwd', { label, cwd }))
       }
     }
 

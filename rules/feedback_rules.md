@@ -78,6 +78,8 @@ enforce:
                              # これにマッチしたら検査対象外
     when: '正規表現'          # 任意。new_string / content / new_source に対して
     unless: '正規表現'        # 任意
+    scope: all               # 任意。when / unless を当てる範囲（post_edit と同じ。下記）
+    lang: ts                 # 任意。言語 id（post_edit と同じ）
     absent_sibling: 'name'   # 任意。同ディレクトリにこの名前のファイルが無ければ違反
                              # ({stem} はファイル名（拡張子抜き）に置換される)
     absent_glob: 'glob'      # 任意。文字列または配列。プロジェクトルート起点の glob で、
@@ -92,6 +94,13 @@ enforce:
     exclude_path: 'glob'     # 任意。文字列または配列。マッチしたら検査対象外
     when: '正規表現'          # 任意。編集後のファイル内容（ディスク上の全文）に対して（m フラグ）
     unless: '正規表現'        # 任意。これにマッチするなら違反ではない
+    scope: all               # 任意。when / unless を当てる範囲（pre_edit / post_edit のみ）:
+                             #   all（既定。全文）/ comments（コメント 1 つごと）/ strings（文字列リテラル 1 つごと。
+                             #   引用符を含む）/ code（コメントと文字列を同じ長さの空白にした全文）。
+                             #   comments / strings は、when がどれかのセグメントにマッチし、かつそのセグメントに
+                             #   unless がマッチしなければ違反
+    lang: ts                 # 任意。言語 id。省略時は拡張子（Dockerfile / Makefile はファイル名）から判定する。
+                             #   判定できないとき comments / strings は違反なし、code は全文のまま評価する
     check: 'shell cmd'       # 任意。$FILE に絶対パス、cwd はそのファイルのルート。非0終了で違反
                              # when と check の少なくとも一方が必要（どちらも無い要素は無視）。
                              # 両方あれば AND（when がマッチし、かつ check が非0）
@@ -104,6 +113,20 @@ enforce:
     require_sibling: 'name'  # 任意。同ディレクトリにこのファイルが無ければ違反
     message: '...'
 ```
+
+コメントの形式を検査する例（文字列リテラル中の `//` は対象外。`///` は免除）:
+
+```yaml
+enforce:
+  - event: post_edit
+    path: 'src/**/*.ts'
+    scope: comments
+    when: '^//(?! (TODO|NOTE|FIXME)\(\w+\): )'
+    unless: '^///'
+    message: 'コメントは // TODO(name): 形式で書く'
+```
+
+`scope` は字句レベルの切り分け（`src/code-scan.ts`）であり、構文解析ではない。
 
 glob は `*` が `/` を跨がない、`**` が跨ぐ、`{a,b}` 展開に対応する（`src/glob.ts`
 の `globToRegex` と同じ挙動）。

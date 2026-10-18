@@ -273,3 +273,66 @@ describe('pyRegExp: Python-only anchors and flags', () => {
     for (const p of ['x(?i)y', 'a*+', '(?#c)', '(?P>n)']) expect(() => pyRegExp(p)).toThrow()
   })
 })
+
+describe('normalizeEnforce: scope / lang', () => {
+  const norm = (lang: Lang, entries: Dict[]) => normalizeEnforce(makeIo({ projectDir: process.cwd(), lang }), entries)
+  const ok: Dict = { event: 'post_edit', path: 'a', when: 'x', scope: 'comments', lang: 'ts' }
+
+  test('valid scope / lang are kept', () => {
+    const r = norm('en', [ok, { event: 'pre_edit', path: 'a', when: 'x', scope: 'code' }, { event: 'post_edit', path: 'a', when: 'x', scope: 'all' }])
+    expect(r.enforce).toHaveLength(3)
+    expect(r.problems).toEqual([])
+  })
+
+  test('invalid scope, unknown lang and scope on pre_bash / stop_check are dropped with a reason', () => {
+    const r = norm('en', [
+      { ...ok, scope: 'comment' },
+      { ...ok, lang: 'cobol' },
+      { event: 'pre_bash', when: 'x', scope: 'code' },
+      { event: 'stop_check', changed: '*', scope: 'comments' },
+      { event: 'pre_bash', when: 'x', lang: 'ts' },
+      { ...ok, scope: 5 },
+      ok,
+    ])
+    expect(r.enforce).toEqual([ok])
+    expect(r.problems).toEqual([
+      'enforce[0].scope must be one of all / comments / strings / code (comment)',
+      'enforce[1].lang is not a known language id (cobol)',
+      'enforce[2]: scope cannot be used with pre_bash (pre_edit / post_edit only)',
+      'enforce[3]: scope cannot be used with stop_check (pre_edit / post_edit only)',
+      'enforce[4]: lang cannot be used with pre_bash (pre_edit / post_edit only)',
+      'enforce[5].scope must be one of all / comments / strings / code (5)',
+    ])
+  })
+
+  test('scope / lang edge values', () => {
+    const base: Dict = { event: 'post_edit', path: 'a', when: 'x' }
+    expect(norm('en', [{ ...base, scope: null }])).toEqual({ enforce: [{ ...base, scope: null }], problems: [] })
+    expect(norm('en', [{ ...base, scope: '' }]).enforce).toEqual([])
+    expect(norm('en', [{ ...base, lang: '' }]).enforce).toEqual([])
+    expect(norm('en', [{ ...base, lang: 1 }]).enforce).toEqual([])
+    expect(norm('en', [{ ...base, lang: 'TS' }]).enforce).toHaveLength(1)
+    const noEvent: Dict = { path: 'a', when: 'x', scope: 'bogus' }
+    expect(norm('en', [noEvent])).toEqual({ enforce: [noEvent], problems: [] })
+  })
+
+  test('Japanese messages exist', () => {
+    const r = norm('ja', [{ ...ok, scope: 'x' }])
+    expect(r.problems[0]).toContain('enforce[0].scope')
+  })
+
+  test('a rule with a bad scope entry keeps its other entries and records the problem', async () => {
+    const dir = tmpDir()
+    try {
+      fs.writeFileSync(
+        path.join(dir, 'r.md'),
+        ruleText('r', 6, "enforce:\n  - event: post_edit\n    path: 'a'\n    when: 'x'\n    scope: bogus\n  - event: pre_bash\n    when: 'rm'\n"),
+      )
+      const { rules, broken } = await scanRules(makeIo({ projectDir: tmpDir(), env: { CLAUDE_FEEDBACK_DIR: dir } }))
+      expect(rules[0]?.enforce).toHaveLength(1)
+      expect(broken.map((b) => b.reason).join('\n')).toContain('scope')
+    } finally {
+      rmTree(dir)
+    }
+  })
+})

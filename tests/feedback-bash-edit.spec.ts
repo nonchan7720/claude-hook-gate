@@ -332,3 +332,54 @@ describe('addedLines', () => {
     expect(addedLines(diff)).toEqual(['new', '++ starts with pluses', 'y'])
   })
 })
+
+describe('Bash edits: scope', () => {
+  let proj: string
+  let fb: string
+  beforeEach(() => {
+    proj = tmpDir('bash-edit-scope-proj-')
+    fb = tmpDir('bash-edit-scope-fb-')
+  })
+  afterEach(() => {
+    rmTree(proj)
+    rmTree(fb)
+  })
+
+  test('scope applies to files rewritten by Bash for post_edit and pre_edit', async () => {
+    const content = [
+      '---',
+      'name: scoped',
+      'description: t',
+      'type: feedback',
+      'count: 4',
+      'enforce:',
+      '  - event: post_edit',
+      "    path: 'src/**/*.ts'",
+      "    when: '^//(?! TODO)'",
+      '    scope: comments',
+      "    message: 'comment form'",
+      '---',
+      '',
+      'b',
+      '',
+    ].join('\n')
+    fs.writeFileSync(path.join(fb, 'scoped.md'), content)
+    const io = () => makeIo({ projectDir: proj, now: () => T0, env: { CLAUDE_FEEDBACK_DIR: fb } })
+    const p: Dict = { session_id: 's', tool_name: 'Bash', tool_input: { command: 'cat > src/a.ts' }, tool_use_id: 'tu1', cwd: proj }
+    fs.mkdirSync(path.join(proj, 'src'), { recursive: true })
+    git(proj, 'init', '-q')
+    await bashStarted(io(), p)
+    const abs = path.join(proj, 'src', 'a.ts')
+    fs.writeFileSync(abs, 'const s = "// x"\n// bad\n')
+    setMtime(abs, T0 + 500)
+    const r = await bashChanges(io(), p)
+    expect(JSON.parse(r.stdout).reason).toContain('comment matched: ^//(?! TODO) (line 2)')
+
+    // 文字列中の同じ文言だけなら違反にならない
+    const p2: Dict = { ...p, tool_use_id: 'tu2' }
+    await bashStarted(io(), p2)
+    fs.writeFileSync(abs, 'const s = "// x"\n')
+    setMtime(abs, T0 + 600)
+    expect((await bashChanges(io(), p2)).stdout).toBe('')
+  })
+})
