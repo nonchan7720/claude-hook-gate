@@ -124,6 +124,8 @@ gate:
   skipUnmatched: "[gate] skip: {{files}} (matches no rule)"
   badPerFileDir: "=== [gate] Invalid per_file_dir value: {{value}} (use true / \\"file\\" / \\"pattern_root\\"). Skipping this rule. ==="
   skipBadPerFileDir: "[skip: invalid per_file_dir]"
+  badContent: "=== [gate] Invalid content check: {{reason}}. Skipping this rule. ==="
+  skipBadContent: "[skip: invalid content]"
   rootNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this root. ==="
   ruleNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this rule. ==="
   checkNoCwd: "=== [gate] (check:{{name}}) cwd does not exist: {{cwd}}. Skipping this check. ==="
@@ -273,6 +275,8 @@ gate:
   skipUnmatched: "[gate] skip: {{files}} (どのルールにもマッチしません)"
   badPerFileDir: "=== [gate] per_file_dir の値が不正です: {{value}}（true / \\"file\\" / \\"pattern_root\\" のいずれかを指定してください）。このルールをスキップします。 ==="
   skipBadPerFileDir: "[skip: per_file_dir不正]"
+  badContent: "=== [gate] content の設定が不正です: {{reason}}。このルールをスキップします。 ==="
+  skipBadContent: "[skip: content不正]"
   rootNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルートをスキップします。 ==="
   ruleNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルールをスキップします。 ==="
   checkNoCwd: "=== [gate] (check:{{name}}) cwd が存在しません: {{cwd}}。このチェックをスキップします。 ==="
@@ -2431,6 +2435,46 @@ function summarizeCmds(cmds) {
   }
   return parts.join(" ; ");
 }
+var CONTENT_SCOPES = ["all", "comments", "strings", "code"];
+function parseContentChecks(raw) {
+  if (raw === undefined || raw === null)
+    return [];
+  if (!Array.isArray(raw))
+    return "content must be a list";
+  const out = [];
+  for (const [i, item] of raw.entries()) {
+    const at = `content[${i}]`;
+    if (!isDict(item))
+      return `${at} must be a mapping`;
+    for (const key of ["when", "message"]) {
+      if (typeof item[key] !== "string" || item[key] === "")
+        return `${at}.${key} is required and must be a string`;
+    }
+    if (item.scope !== undefined && !(typeof item.scope === "string" && CONTENT_SCOPES.includes(item.scope)))
+      return `${at}.scope must be one of ${CONTENT_SCOPES.join(" / ")} (got ${pyRepr(item.scope)})`;
+    if (item.lang !== undefined && !(typeof item.lang === "string" && isKnownLang(item.lang)))
+      return `${at}.lang is unknown (got ${pyRepr(item.lang)})`;
+    if (item.name !== undefined && typeof item.name !== "string")
+      return `${at}.name must be a string`;
+    for (const key of ["when", "unless"]) {
+      if (item[key] === undefined)
+        continue;
+      if (typeof item[key] !== "string")
+        return `${at}.${key} must be a string`;
+      try {
+        pyRegExp(item[key], "m");
+      } catch (e) {
+        return `${at}.${key} is not a valid regex: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+    const ex = item.exclude;
+    if (ex !== undefined && !(typeof ex === "string" || Array.isArray(ex) && ex.every((x) => typeof x === "string")))
+      return `${at}.exclude must be a string or a list of strings`;
+    out.push({ name: item.name || slug(item.when), entry: item, exclude: compileGlobs(asList(ex)) });
+  }
+  return out;
+}
+var summarizeRule = (contents, cmds) => [...contents.map((c) => `content:${c.name}`), ...cmds.length > 0 ? [summarizeCmds(cmds)] : []].join(" ; ");
 function tailOutput(lang, out, limit = FAIL_TAIL_LINES) {
   const lines = out.trimEnd().split(/\r?\n/);
   if (lines.length <= limit)
@@ -3092,6 +3136,28 @@ ${details}` : "");
     const more = unmatched.length > UNMATCHED_SHOWN ? this.t("gate.andMore", { n: unmatched.length - UNMATCHED_SHOWN }) : "";
     this.status.push(this.t("gate.skipUnmatched", { files: `${shown}${more}` }));
   }
+  async runContentChecks(contents, files, rootDir, logs) {
+    const bad = new Set;
+    for (const rel of files) {
+      const abs = join(rootDir, rel);
+      const text = await this.io.readFile(abs);
+      if (text === undefined)
+        continue;
+      for (const c of contents) {
+        if (c.exclude.some((rx) => rx.test(rel)))
+          continue;
+        const r = matchScoped(text, abs, c.entry);
+        if (!r?.matched)
+          continue;
+        const line = /\(line (\d+)\)/.exec(r.detail)?.[1];
+        const msg = `${rel}${line ? `:${line}` : ""} ${String(c.entry.message)} (${r.detail})`;
+        logs.push(msg);
+        this.failures.push(msg);
+        bad.add(rel);
+      }
+    }
+    return bad;
+  }
   async runRules(cfg, rels, logs, rootDir, policyState) {
     const rules = cfg?.rules || [];
     const triggered = [];
@@ -3112,7 +3178,9 @@ ${details}` : "");
     for (const { rule, matched, pairs } of triggered) {
       const cmds = rule.run || [];
       const timeout = rule.timeout || DEFAULT_TIMEOUT;
-      const policy = await this.makePolicyContext(cfg, rule, rootDir, policyState, logs);
+      const parsed = parseContentChecks(rule.content);
+      const contents = typeof parsed === "string" ? [] : parsed;
+      const policy = cmds.length > 0 ? await this.makePolicyContext(cfg, rule, rootDir, policyState, logs) : null;
       const ruleFiles = new Set(matched);
       for (const name of rule.run_checks || []) {
         let set = checkRefFiles.get(name);
@@ -3125,6 +3193,37 @@ ${details}` : "");
         if (!checkNames.includes(name))
           checkNames.push(name);
       }
+      if (typeof parsed === "string") {
+        logs.push(this.t("gate.badContent", { reason: parsed }));
+        summary.push(`${summarizeRule([], cmds)}  ${this.t("gate.skipBadContent")}`);
+        failed = true;
+        for (const f of ruleFiles)
+          failFiles.add(f);
+        continue;
+      }
+      const runGroup = async (label, cwd, files, noCwdMsg) => {
+        const bad = await this.runContentChecks(contents, files, rootDir, logs);
+        let runFailed = false;
+        let skipped = false;
+        if (cmds.length > 0 && (await this.io.stat(cwd))?.kind !== "dir") {
+          logs.push(noCwdMsg);
+          summary.push(`(${label}) ${summarizeRule(contents, cmds)}  ${this.t("gate.skipNoCwd")}`);
+          this.note("skip", label, summarizeCmds(cmds), this.t("gate.noteNoCwd"));
+          skipped = true;
+        } else {
+          summary.push(`(${label}) ${summarizeRule(contents, cmds)}`);
+          if (cmds.length > 0)
+            runFailed = await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(files), rootDir);
+        }
+        for (const f of files) {
+          if (runFailed || bad.has(f))
+            failFiles.add(f);
+          else if (!skipped)
+            successFiles.add(f);
+        }
+        if (runFailed || bad.size > 0)
+          failed = true;
+      };
       const rawPerFileDir = rule.per_file_dir;
       if (truthy(rawPerFileDir)) {
         const mode = normalizePerFileDirMode(rawPerFileDir);
@@ -3141,40 +3240,12 @@ ${details}` : "");
           const cwd = d ? join(rootDir, d) : rootDir;
           const label = d || ".";
           const dirFiles = matched.filter((rp) => rootsByRel[rp] === d);
-          if ((await this.io.stat(cwd))?.kind !== "dir") {
-            logs.push(this.t("gate.rootNoCwd", { label, cwd }));
-            summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t("gate.skipNoCwd")}`);
-            this.note("skip", label, summarizeCmds(cmds), this.t("gate.noteNoCwd"));
-            continue;
-          }
-          summary.push(`(${label}) ${summarizeCmds(cmds)}`);
-          if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(dirFiles), rootDir)) {
-            failed = true;
-            for (const f of dirFiles)
-              failFiles.add(f);
-          } else {
-            for (const f of dirFiles)
-              successFiles.add(f);
-          }
+          await runGroup(label, cwd, dirFiles, this.t("gate.rootNoCwd", { label, cwd }));
         }
       } else {
         const cwd = rule.dir ? join(rootDir, rule.dir) : rootDir;
         const label = rule.dir ?? ".";
-        if ((await this.io.stat(cwd))?.kind !== "dir") {
-          logs.push(this.t("gate.ruleNoCwd", { label, cwd }));
-          summary.push(`(${label}) ${summarizeCmds(cmds)}  ${this.t("gate.skipNoCwd")}`);
-          this.note("skip", label, summarizeCmds(cmds), this.t("gate.noteNoCwd"));
-          continue;
-        }
-        summary.push(`(${label}) ${summarizeCmds(cmds)}`);
-        if (await this.runCmds(label, cmds, cwd, timeout, logs, policy, filesEnv(ruleFiles), rootDir)) {
-          failed = true;
-          for (const f of ruleFiles)
-            failFiles.add(f);
-        } else {
-          for (const f of ruleFiles)
-            successFiles.add(f);
-        }
+        await runGroup(label, cwd, [...ruleFiles], this.t("gate.ruleNoCwd", { label, cwd }));
       }
     }
     this.noteUnmatchedFiles(rels, triggered);
