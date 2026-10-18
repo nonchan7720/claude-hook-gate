@@ -7,6 +7,7 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 - フィードバックルール（`~/.claude/feedback/*.md`）を各プロンプトに注入し、ツール呼び出し時と停止時に強制する。
 - プロジェクトごとの品質ゲート（lint・テストなど、`.claude/gate.yaml` で定義）を、ファイル編集後と停止時に実行する。
 - 確認待ちのときと停止時にデスクトップ通知を出す（macOS）。
+- この 2 種類のファイルを書くためのスキル `/feedback-gate:feedback`（フィードバックルールの作成・更新・定期的な棚卸し）と `/feedback-gate:gate`（プロジェクトの言語・タスクランナー・CI に沿った `.claude/gate.yaml` の作成）を同梱する。
 
 ## フック
 
@@ -118,6 +119,34 @@ flowchart LR
 `apply` が書き換えるのは、`bump` 対象ファイルの frontmatter 内の `count:` 行だけです。変更したファイルの一覧を表示し、それ以外は一切触りません。`enforce`（と `stale` / `expired`）は提案のみで、Claude はそれをユーザーに提示し、ファイルを書き換える前に確認します。
 
 自動引き上げ（`autoCount`）が有効なら、違反したセッションごとに `count` が 1 ずつ上がります。`bump` 提案は窓内の違反回数を根拠に 3 や 5 へ一気に引き上げるもので、`apply` は提案時の `count` がファイルと一致するときだけ書き換えるため、自動引き上げと二重に上がることはありません（提案は常に現在の `count` から出ます）。
+
+## スキル
+
+`skills/` に 2 つのスキルを同梱しています。プラグインと一緒に Claude Code が読み込み、`/feedback-gate:<name>` で呼び出せます（説明文から Claude が自分で使うこともあります）。それぞれ手順を書いた `SKILL.md` と、必要なときに読む参照ファイルからなり、フックの動作はスキルに依存しません。
+
+### `/feedback-gate:feedback`
+
+フィードバックルールのファイル（`~/.claude/feedback/*.md`、`<project>/.claude/feedback/*.md`）を作成・更新・棚卸しします。
+
+```
+/feedback-gate:feedback [create|update|review] [トピックまたはルール名]
+```
+
+- `create`: フィードバック・指摘・好みを受けたとき。保存してよいか確認し、グローバルかプロジェクトか（または `projects` / `when_exists` / `expires` で絞ったグローバルルールか）を選び、具体的な指摘を抽象的なルールに変換して本文の第 1 段落（フックが注入する部分）に書き、ファイル名を snake_case で付け、`count` を決め（1 は暫定、3 は確定）、フックが検知できるものにだけ `enforce` を付け（イベントの選択、正規表現の検証）、書いたファイルを読み戻して frontmatter を確認します。
+- `update`: 同じ指摘の再発（そのセッションでフックが上げていなければ `count` を 1 上げる）、誤検知したルール（削除せず `unless` / `exclude_path` で絞る）、`enforce` の無い確定ルール、文言の修正、適用範囲の変更。
+- `review`: 定期的な棚卸し（`skills/feedback/review.md`）。`/correct` を実行し、`.violations.jsonl` からルールごとの違反回数を集計し、全ルールを 1 つの表にして「維持・昇格・修正・絞り込み・統合・範囲変更・廃止（期限切れ、不要になった、`gate.yaml` や linter で代替された）」の提案を付けます。削除と統合は確認してからにします。
+
+書式のリファレンス（`skills/feedback/reference.md`）と、4 つの `enforce` イベントそれぞれの完成例（`skills/feedback/examples.md`）をスキルに同梱しています。スキルが編集するのはルールファイルだけで、フックの状態ファイルには触れません。
+
+### `/feedback-gate:gate`
+
+プロジェクトの `.claude/gate.yaml` を作成・更新します。
+
+```
+/feedback-gate:gate [init|update|review]
+```
+
+コマンドを推測せず、まずプロジェクトが実際に動かしているものを読みます。マニフェスト（言語とパッケージマネージャ）、タスクランナー（`Makefile`、`justfile`、`Taskfile.yml`、`mise` のタスク、`package.json` の scripts）、CI 設定（GitHub Actions、GitLab CI、CircleCI など）や pre-commit 系のフック、リポジトリの構成（単一パッケージ、ワークスペース、1 ディレクトリ 1 パッケージ）です。それをゲートに写します。ファイル単位の lint・フォーマット検査・型検査とパッケージのテストは `rules` に（ツールがファイルを受け取れるなら `$CLAUDE_GATE_FILES` を渡す）、プロジェクト全体のテストやビルドは `consistency_checks` に置いて `run_checks` から参照し、モノレポには `per_file_dir`、各コマンドに `name`、独立したものは `parallel`、計測した所要時間から `timeout`、全体を見るコマンドには `files: false` を付けます。CI だけで必要なもの（カバレッジのアップロード、デプロイ、サービスやシークレットが要るステップ）は外して報告に列挙します。引き渡す前に、各コマンドを現在のツリーで 1 回ずつ実行し（通常の権限確認を通ります）、スキーマのキー一覧と照合し、`.gitignore` に `.claude/.gate-status/` があることを確かめます。`review` は現在のファイルと CI のずれを編集せずに報告します。フィールドのリファレンス、調査のチェックリスト、ツールチェーン別のレシピ（TypeScript、ワークスペース、Python、Go、Rust、Ruby、JVM、Terraform、シェル、Makefile 駆動）は `skills/gate/` にあります。
 
 ## インストール
 
