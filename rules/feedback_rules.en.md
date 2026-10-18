@@ -78,6 +78,8 @@ enforce:
                              # the file is skipped when this matches
     when: 'regex'            # optional. Against new_string / content / new_source
     unless: 'regex'          # optional
+    scope: all               # optional. Where when / unless are applied (same as post_edit; see below)
+    lang: ts                 # optional. Language id (same as post_edit)
     absent_sibling: 'name'   # optional. A violation when the same directory has no file of this name
                              # ({stem} is replaced with the file name without extension)
     absent_glob: 'glob'      # optional. A string or an array. Globs from the project root; when
@@ -92,6 +94,15 @@ enforce:
     exclude_path: 'glob'     # optional. A string or an array. Skipped when it matches
     when: 'regex'            # optional. Against the file content after the edit (the whole file on disk; m flag)
     unless: 'regex'          # optional. Not a violation when this matches
+    scope: all               # optional. Where when / unless are applied (pre_edit / post_edit only):
+                             #   all (default; the whole text) / comments (one segment per comment) / strings
+                             #   (one per string literal, quotes included) / code (the whole text with comments
+                             #   and strings replaced by spaces of the same length).
+                             #   For comments / strings it is a violation when when matches some segment and
+                             #   unless does not match that same segment
+    lang: ts                 # optional. Language id. Derived from the extension when omitted (file name for
+                             #   Dockerfile / Makefile). When it cannot be derived, comments / strings find
+                             #   nothing and code evaluates the whole text as is
     check: 'shell cmd'       # optional. $FILE holds the absolute path, cwd is the root of that file. Non-zero exit is a violation
                              # at least one of when and check is required (an entry with neither is ignored).
                              # With both, AND (when matches and check exits non-zero)
@@ -104,6 +115,20 @@ enforce:
     require_sibling: 'name'  # optional. A violation when the same directory has no file of this name
     message: '...'
 ```
+
+An example that checks the comment format (a `//` inside a string literal is ignored; `///` is exempt):
+
+```yaml
+enforce:
+  - event: post_edit
+    path: 'src/**/*.ts'
+    scope: comments
+    when: '^//(?! (TODO|NOTE|FIXME)\(\w+\): )'
+    unless: '^///'
+    message: 'Write comments as // TODO(name): ...'
+```
+
+`scope` is a lexical split (`src/code-scan.ts`), not a parser.
 
 Globs: `*` does not cross `/`, `**` does, and `{a,b}` expansion is supported (same behaviour as
 `globToRegex` in `src/glob.ts`).

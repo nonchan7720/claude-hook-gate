@@ -17,6 +17,9 @@ rules:
   enforceItemNotMapping: "enforce[{{index}}] is not a mapping ({{type}})"
   badRegex: "enforce[{{index}}].{{key}} is not a usable regular expression: {{error}}"
   evalError: "enforce[{{index}}] failed to evaluate: {{error}}"
+  badScope: "enforce[{{index}}].scope must be one of {{allowed}} ({{value}})"
+  badLang: "enforce[{{index}}].lang is not a known language id ({{value}})"
+  scopeNotAllowed: "enforce[{{index}}]: {{key}} cannot be used with {{event}} (pre_edit / post_edit only)"
 
 guard:
   evaluating: "[feedback-guard] evaluating: {{rule}}"

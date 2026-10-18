@@ -153,3 +153,55 @@ describe('feedback-guard', () => {
     expect(entry.error).toBe('boom')
   })
 })
+
+describe('feedback-guard: pre_edit scope', () => {
+  let fbDir: string
+  let proj: string
+  beforeEach(() => {
+    fbDir = tmpDir()
+    proj = tmpDir()
+  })
+  afterEach(() => {
+    rmTree(fbDir)
+    rmTree(proj)
+  })
+
+  const writeRule = (enforce: string[]): void => {
+    const content = ['---', 'name: scoped_pre', 'description: test', 'type: feedback', 'count: 6', 'enforce:', ...enforce, '---', '', '本文', ''].join('\n')
+    fs.writeFileSync(path.join(fbDir, 'scoped_pre.md'), content, 'utf8')
+  }
+  const write = (file: string, content: string) => runGuard({ tool_name: 'Write', tool_input: { file_path: path.join(proj, file), content } }, fbDir, proj)
+  const reason = (stdout: string): string => (JSON.parse(stdout) as { hookSpecificOutput: Dict }).hookSpecificOutput.permissionDecisionReason as string
+  /** 最後に記録された違反の detail（deny の理由には detail が入らないのでログから読む）。 */
+  const lastDetail = (): string => {
+    const lines = fs.readFileSync(path.join(fbDir, '.violations.jsonl'), 'utf8').trim().split('\n')
+    return String((JSON.parse(lines[lines.length - 1] as string) as Dict).detail)
+  }
+
+  test('scope: comments denies a badly formatted comment but not the same text in a string', async () => {
+    writeRule([
+      '  - event: pre_edit',
+      "    path: 'src/**/*.ts'",
+      "    when: '^//(?! TODO\\(\\w+\\): )'",
+      "    unless: '^///'",
+      '    scope: comments',
+      "    message: 'TODO 形式'",
+    ])
+    expect((await write('src/a.ts', 'const s = "// nope"\n// TODO(me): ok\n/// doc\n')).stdout).toBe('')
+    const r = await write('src/b.ts', 'const a = 1\n// nope\n')
+    expect(reason(r.stdout)).toContain('TODO 形式')
+    expect(lastDetail()).toBe('comment matched: ^//(?! TODO\\(\\w+\\): ) (line 2)')
+  })
+
+  test('scope: code and lang override', async () => {
+    writeRule(['  - event: pre_edit', "    path: 'src/**/*'", '    lang: ts', "    when: '^\\s*console\\.log\\('", '    scope: code', "    message: 'm'"])
+    expect((await write('src/a.unknown', '// console.log(1)\n')).stdout).toBe('')
+    expect(reason((await write('src/b.unknown', 'console.log(1)\n')).stdout)).toContain('count: 6')
+    expect(lastDetail()).toBe('code matched: ^\\s*console\\.log\\(')
+  })
+
+  test('unknown extension without lang: comments finds nothing', async () => {
+    writeRule(['  - event: pre_edit', "    path: 'src/**/*'", "    when: 'bad'", '    scope: comments', "    message: 'm'"])
+    expect((await write('src/a.unknown', '// bad\n')).stdout).toBe('')
+  })
+})
