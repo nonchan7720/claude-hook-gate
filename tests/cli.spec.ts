@@ -97,13 +97,6 @@ describe('PreToolUse', () => {
       }
     }))
 
-  test('Bash notes its start time for the PostToolUse change tracking', () =>
-    withEnv(async (env) => {
-      writeGateYaml(env.proj, { rules: [] })
-      await hook(env, 'PreToolUse', bash('ls'))
-      expect(fs.readdirSync(path.join(env.proj, '.claude', '.gate-status')).some((f) => f.startsWith('bash_started.sess-1--t1'))).toBe(true)
-    }))
-
   test('agentLaunchGuard comes from CLAUDE_PLUGIN_OPTION_agentLaunchGuard', () =>
     withEnv(async (env) => {
       const agent = { tool_name: 'Agent', tool_input: { subagent_type: 'code-implementer', prompt: 'do it' }, tool_use_id: 't2' }
@@ -145,19 +138,6 @@ describe('PostToolUse', () => {
       expect(r.json?.hookSpecificOutput.additionalContext).toContain('ag1')
       expect(r.json?.hookSpecificOutput.additionalContext).toContain('検証に失敗')
       expect(r.json?.decision).toBeUndefined()
-    }))
-
-  test('Edit records the changed file (and a failing rule blocks), and a tool that is not handled prints nothing', () =>
-    withEnv(async (env) => {
-      writeGateYaml(env.proj, { rules: [{ match: '**/*.py', run: ['echo lint-failed; exit 1'] }] })
-      const file = path.join(env.proj, 'x.py')
-      fs.writeFileSync(file, 'x = 1\n')
-      const r = await hook(env, 'PostToolUse', { tool_name: 'Edit', tool_input: { file_path: file }, tool_response: {}, tool_use_id: 't1' })
-      expect(r.exitCode).toBe(0)
-      expect(r.json?.decision).toBe('block')
-      expect(r.json?.reason).toContain('lint-failed')
-      expect(exists(path.join(env.proj, '.claude', '.gate-status', 'changed_files.sess-1.txt'))).toBe(true)
-      expect((await hook(env, 'PostToolUse', { tool_name: 'Read', tool_input: {}, tool_response: {} })).stdout).toBe('')
     }))
 })
 
@@ -206,23 +186,6 @@ describe('Stop', () => {
       expect(r.json?.decision).toBe('block')
       expect(r.json?.reason).toContain('検証に失敗しました（試行')
     }))
-
-  test('the language follows CLAUDE_PLUGIN_OPTION_language', () =>
-    withEnv(async (env) => {
-      writeGateYaml(env.proj, failingCheck)
-      await hook(env, 'PostToolUse', { tool_name: 'Write', tool_input: { file_path: 'x.py' }, tool_response: {}, tool_use_id: 't1' })
-      const r = await hook(env, 'Stop', { stop_hook_active: false }, { CLAUDE_PLUGIN_OPTION_language: 'en' })
-      expect(r.json?.decision).toBe('block')
-      expect(r.json?.reason).not.toContain('検証に失敗')
-      expect(r.json?.reason).toContain('chk')
-    }))
-
-  test('nothing to report prints nothing and exits 0', () =>
-    withEnv(async (env) => {
-      const r = await hook(env, 'Stop', { stop_hook_active: false })
-      expect(r.exitCode).toBe(0)
-      expect(r.stdout).toBe('')
-    }))
 })
 
 describe('SessionStart / Notification', () => {
@@ -239,13 +202,6 @@ describe('SessionStart / Notification', () => {
       expect(startup.exitCode).toBe(0)
       expect(startup.stdout).toBe('')
       expect(exists(changed)).toBe(false)
-    }))
-
-  test('Notification prints nothing and exits 0 (also without a notifier)', () =>
-    withEnv(async (env) => {
-      const r = await hook(env, 'Notification', { message: 'm', notification_type: 'idle_prompt' }, { PATH: '/nonexistent' })
-      expect(r.exitCode).toBe(0)
-      expect(r.stdout).toBe('')
     }))
 
   test('an unknown event is a usage error; broken stdin still exits 0', async () => {

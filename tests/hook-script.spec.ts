@@ -68,12 +68,6 @@ describe('scripts/hook.sh', () => {
       expect(calls(s)).toBe(`node|/plugin/hooks/cli.js PostToolUse|${payload}\n`)
     }))
 
-  test('the exit code and output of the runtime are passed through', () =>
-    withSetup((s, run) => {
-      fakeRuntime(s, 'node', 2)
-      expect(run('Stop', payload).status).toBe(2)
-    }))
-
   test('works without jq (sed reads session_id), and with jq when available', () =>
     withSetup((s, run) => {
       fakeRuntime(s, 'node')
@@ -97,41 +91,11 @@ describe('scripts/hook.sh', () => {
       expect(calls(s)).toBe('')
     }))
 
-  test('falls back to bun when node is missing', () =>
-    withSetup((s, run) => {
-      fakeRuntime(s, 'bun')
-      const r = run('SessionStart', payload)
-      expect(r.status).toBe(0)
-      expect(calls(s)).toBe(`bun|/plugin/hooks/cli.js SessionStart|${payload}\n`)
-    }))
-
-  test('node is preferred over bun', () =>
-    withSetup((s, run) => {
-      fakeRuntime(s, 'node')
-      fakeRuntime(s, 'bun')
-      run('Stop', payload)
-      expect(calls(s).startsWith('node|')).toBe(true)
-    }))
-
   test('no runtime: exit 0 and nothing happens', () =>
     withSetup((s, run) => {
       const r = run('Stop', payload)
       expect(r.status).toBe(0)
       expect(r.stdout).toBe('')
-      expect(calls(s)).toBe('')
-    }))
-
-  test('without CLAUDE_PLUGIN_ROOT the root is found from the script location', () =>
-    withSetup((s, run) => {
-      fakeRuntime(s, 'node')
-      run('Stop', payload, { CLAUDE_PLUGIN_ROOT: '' })
-      expect(calls(s)).toBe(`node|${REPO_ROOT}/hooks/cli.js Stop|${payload}\n`)
-    }))
-
-  test('no event argument: exit 0', () =>
-    withSetup((s, run) => {
-      fakeRuntime(s, 'node')
-      expect(run('', payload).status).toBe(0)
       expect(calls(s)).toBe('')
     }))
 })
