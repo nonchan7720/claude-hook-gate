@@ -138,6 +138,16 @@ With the automatic increase (`autoCount`) on, `count` goes up by 1 per session i
 
 The first command adds this repository as the `claude-hook-gate` marketplace; the second installs the `feedback-gate` plugin from it. Then choose the scope.
 
+### Codex
+
+The same hooks are also packaged as a [Codex](https://developers.openai.com/codex) plugin in [`plugins/codex/`](plugins/codex/README.md) (catalog: `.agents/plugins/marketplace.json`). It reads the same feedback rules and the same `.claude/gate.yaml`, so a project used with both tools is checked the same way:
+
+```
+codex plugin marketplace add nonchan7720/claude-hook-gate
+```
+
+then install `feedback-gate` from `/plugins` and trust its hooks in `/hooks`. The checking logic is shared; what differs between the two hosts (Codex edits files with `apply_patch`, has `PermissionRequest` instead of `Notification`, and no `ask`) is isolated behind the `Host` interface of `src/host.ts` (`src/host-claude.ts`, `src/host-codex.ts`). See the [plugin README](plugins/codex/README.md) for the differences and the environment variables that replace the plugin settings.
+
 ## Requirements
 
 Nothing to install for the mod hooks: they are plain TypeScript, bundled into one JavaScript file that Claude Code runs itself (no Python, bash or jq).
@@ -230,20 +240,22 @@ What the plugin reads, runs, writes and decides, for reviewers and for anyone in
 
 Requires [Bun](https://bun.sh). The hook module runs inside Claude Code, which only resolves relative imports and `claude-code`; so the source in `src/` (plus the `yaml` and `i18next` packages, and the `locales/*.yaml` message files, imported as text) is bundled into `hooks/register.js`, with `yaml` and `i18next` split out, minified, into `hooks/vendor/*.js` that the bundle imports by relative path. This keeps every file well under the 256 KiB per-file limit of the Claude plugin directory, while the plugin's own code stays readable. `hooks/hooks.json` points at the bundle. All file and process access goes through the engine's `$` API (`$.fs`, `$.process`, `$.env`, `$.session`), wrapped by the `Io` interface in `src/io.ts`; the tests run the same code against Node's `fs` / `child_process`.
 
+The code is layered so that the checks do not depend on the host that runs them: the core (`src/hooks.ts` and the modules it calls) takes the classic command-hook JSON as its input and returns an `Outcome` (`src/outcome.ts`); the mod (`src/register.ts`) and the command-hook CLIs call it. A command-hook CLI is `cliMain(host)` from `src/host.ts` with a `Host` (`appName`, `events`, `options` from the environment, `normalize` host JSON → core event and payloads, `render` core `Outcome` → host output): `src/host-claude.ts` for Claude Code (`src/cli.ts` → `hooks/cli.js`) and `src/host-codex.ts` for Codex (`src/codex-cli.ts` → `plugins/codex/hooks/cli.js`). A tool that edits several files at once (Codex's `apply_patch`) is normalized to one payload per file; the core offers `preToolUseEdits` / `postToolUseEdits` for that.
+
 ```
 bun install          # install dev dependencies
 bun run lint         # Biome (lint + format check); `bun run format` fixes
 bun run typecheck    # tsc --noEmit
 bun run test         # bun test (tests/*.spec.ts)
-bun run build        # bundle src/register.ts -> hooks/register.js, src/cli.ts -> hooks/cli.js (+ hooks/vendor/*.js)
+bun run build        # bundle src/register.ts -> hooks/register.js, src/cli.ts -> hooks/cli.js (+ hooks/vendor/*.js), and the Codex plugin (plugins/codex/hooks/cli.js + copies of rules/ and scripts/)
 bun run test:plugin  # build, then run hooks/register.test.ts on the real engine
 bun run validate:plugin  # claude plugin validate . --strict
 ```
 
-The bundle (`hooks/register.js`, `hooks/cli.js` and `hooks/vendor/`) is generated and committed by CI on the pull request; contributors do not commit it (it is not in the repository until CI adds it). The "Build bundle" workflow builds it on every pull request (same-repo branches) and pushes a `chore: build bundle` commit to the branch, adding the file or updating it if it changed. Run `bun run build` to produce it locally (e.g. for `bun run test:plugin`) and leave it uncommitted. Do not edit it by hand. `scripts/build.ts` fails the build if the bundle imports anything but relative paths and `claude-code`, or if any output file (`hooks/cli.js` included) is 200 KiB or larger; `hooks/cli.js` is a Node program, so it may also import `node:` built-ins. It also writes invisible characters in the output as `\uXXXX` escapes, and fails if a parameter name of the `classic.PreToolUse` hook appears anywhere else in `hooks/register.js` (the plugin directory refuses a permission hook whose `next` it cannot trace). The CI workflow then runs `claude plugin validate . --strict` and `claude plugin test .` on the built bundle, using the Claude Code CLI from `devDependencies` (`@anthropic-ai/claude-code`, pinned by `bun.lock` and updated by Dependabot).
+The bundle (`hooks/register.js`, `hooks/cli.js` and `hooks/vendor/`, and for the Codex plugin `plugins/codex/hooks/cli.js`, `plugins/codex/hooks/vendor/` and the copies `plugins/codex/rules/`, `plugins/codex/scripts/dogwood/`, `plugins/codex/scripts/gate.schema.json`) is generated and committed by CI on the pull request; contributors do not commit it (it is not in the repository until CI adds it). The "Build bundle" workflow builds it on every pull request (same-repo branches) and pushes a `chore: build bundle` commit to the branch, adding the file or updating it if it changed. Run `bun run build` to produce it locally (e.g. for `bun run test:plugin`) and leave it uncommitted. Do not edit it by hand. `scripts/build.ts` fails the build if the bundle imports anything but relative paths and `claude-code`, or if any output file (`hooks/cli.js` included) is 200 KiB or larger; `hooks/cli.js` is a Node program, so it may also import `node:` built-ins. It also writes invisible characters in the output as `\uXXXX` escapes, and fails if a parameter name of the `classic.PreToolUse` hook appears anywhere else in `hooks/register.js` (the plugin directory refuses a permission hook whose `next` it cannot trace). The CI workflow then runs `claude plugin validate . --strict` and `claude plugin test .` on the built bundle, using the Claude Code CLI from `devDependencies` (`@anthropic-ai/claude-code`, pinned by `bun.lock` and updated by Dependabot).
 
 Dependencies have a 7-day freeze period: `bunfig.toml` sets `minimumReleaseAge` so `bun install` only resolves versions published at least 7 days ago, and Dependabot (`.github/dependabot.yml`) waits 7 days (`cooldown`) before proposing npm or GitHub Actions updates. Actions are pinned to commit SHAs.
 
 ### Releases
 
-Versions are managed by [release-please](https://github.com/googleapis/release-please). Write commit messages (and PR titles) as [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `chore:`, ...): on every push to `main` the "Release Please" workflow opens or updates a release PR that bumps the version in `package.json`, `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json` and updates `CHANGELOG.md`; merging it tags the release. Both workflows use the default `GITHUB_TOKEN` (no personal access token), so commits made by the bot and the release-please PR do not trigger CI on their own. If you have required status checks, re-run them or push an empty commit by hand.
+Versions are managed by [release-please](https://github.com/googleapis/release-please). Write commit messages (and PR titles) as [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `chore:`, ...): on every push to `main` the "Release Please" workflow opens or updates a release PR that bumps the version in `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `plugins/codex/.codex-plugin/plugin.json` and `plugins/codex/plugin.json` and updates `CHANGELOG.md`; merging it tags the release. Both workflows use the default `GITHUB_TOKEN` (no personal access token), so commits made by the bot and the release-please PR do not trigger CI on their own. If you have required status checks, re-run them or push an empty commit by hand.

@@ -33,6 +33,8 @@ export type NodeIoInit = {
   /** プラグイン設定 language（CLAUDE_PLUGIN_OPTION_language）。 */
   language?: string
   autoCount?: boolean
+  /** 通知の見出しに使うアプリ名（Io.appName）。 */
+  appName?: string
 }
 
 export function makeNodeIo(init: NodeIoInit): Io {
@@ -53,6 +55,7 @@ export function makeNodeIo(init: NodeIoInit): Io {
     projectDir: init.env.CLAUDE_PROJECT_DIR || cwd,
     cwd,
     pluginRoot: init.env.CLAUDE_PLUGIN_ROOT || process.cwd(),
+    ...(init.appName !== undefined ? { appName: init.appName } : {}),
     readFile: async (p) => {
       try {
         return fs.readFileSync(p, 'utf8')

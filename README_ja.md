@@ -138,6 +138,16 @@ flowchart LR
 
 1 行目でこのリポジトリを `claude-hook-gate` マーケットプレイスとして追加し、2 行目でそこから `feedback-gate` プラグインをインストールします。その後スコープを選択します。
 
+### Codex
+
+同じフックを [Codex](https://developers.openai.com/codex) のプラグインとしても [`plugins/codex/`](plugins/codex/README_ja.md) に置いています（カタログは `.agents/plugins/marketplace.json`）。同じフィードバックルールと同じ `.claude/gate.yaml` を読むので、両方のツールで使うプロジェクトは同じ検査を受けます。
+
+```
+codex plugin marketplace add nonchan7720/claude-hook-gate
+```
+
+続けて `/plugins` から `feedback-gate` をインストールし、`/hooks` でそのフックを信頼してください。検査のロジックは共有で、ホストごとの違い（Codex は `apply_patch` でファイルを編集する、`Notification` の代わりに `PermissionRequest` がある、`ask` が無い）は `src/host.ts` の `Host` インターフェース（`src/host-claude.ts`、`src/host-codex.ts`）の後ろに閉じ込めています。違いと、プラグイン設定の代わりになる環境変数は[プラグインの README](plugins/codex/README_ja.md) を参照。
+
 ## 前提
 
 mod のフックにはインストールするものはありません。フックは素の TypeScript で、1 つの JavaScript にバンドルして Claude Code が直接実行します（Python・bash・jq は不要）。
@@ -230,20 +240,22 @@ checks フェーズ（Stop / SubagentStop）で 1 件以上のコマンドが実
 
 [Bun](https://bun.sh) が必要です。フックのモジュールは Claude Code の中で動き、相対 import と `claude-code` しか解決できないため、`src/` のソース（と `yaml`・`i18next` パッケージ、文字列として取り込む `locales/*.yaml`）を `hooks/register.js` にバンドルします。`yaml` と `i18next` は minify して `hooks/vendor/*.js` に切り出し、バンドルから相対パスで import します。Claude のプラグインディレクトリの「1 ファイル 256 KiB 未満」という制限に余裕を持って収めつつ、プラグイン自身のコードは読める形で残すためです。`hooks/hooks.json` はこのバンドルを指します。ファイルやプロセスへのアクセスはすべてエンジンの `$` API（`$.fs`、`$.process`、`$.env`、`$.session`）を、`src/io.ts` の `Io` インターフェース越しに使います。テストは同じコードを Node の `fs` / `child_process` の上で動かします。
 
+コードは、検査が「それを動かすホスト」に依存しないように層を分けています。中核（`src/hooks.ts` とそこから呼ぶモジュール）は classic コマンド hook の JSON を入力に取り、`Outcome`（`src/outcome.ts`）を返します。mod（`src/register.ts`）と command hook の CLI はこれを呼びます。command hook の CLI は `src/host.ts` の `cliMain(host)` に `Host`（`appName`、`events`、環境変数からの `options`、ホストの JSON → 中核のイベントと payload の `normalize`、中核の `Outcome` → ホストの出力の `render`）を渡したもので、Claude Code 向けが `src/host-claude.ts`（`src/cli.ts` → `hooks/cli.js`）、Codex 向けが `src/host-codex.ts`（`src/codex-cli.ts` → `plugins/codex/hooks/cli.js`）です。1 回で複数ファイルを編集するツール（Codex の `apply_patch`）はファイルごとの payload に正規化し、中核はそのために `preToolUseEdits` / `postToolUseEdits` を用意しています。
+
 ```
 bun install          # 開発用の依存を入れる
 bun run lint         # Biome（lint とフォーマットの検査）。`bun run format` で自動修正
 bun run typecheck    # tsc --noEmit
 bun run test         # bun test（tests/*.spec.ts）
-bun run build        # src/register.ts を hooks/register.js に、src/cli.ts を hooks/cli.js にバンドル（+ hooks/vendor/*.js）
+bun run build        # src/register.ts を hooks/register.js に、src/cli.ts を hooks/cli.js にバンドル（+ hooks/vendor/*.js）。Codex プラグイン（plugins/codex/hooks/cli.js と rules/・scripts/ のコピー）も作る
 bun run test:plugin  # ビルドしてから、実エンジンで hooks/register.test.ts を実行
 bun run validate:plugin  # claude plugin validate . --strict
 ```
 
-バンドル（`hooks/register.js`、`hooks/cli.js`、`hooks/vendor/`）は、プルリクエスト上で CI が生成してコミットします。貢献者がコミットする必要はありません（CI が追加するまでリポジトリには入っていません）。「Build bundle」ワークフローが、プルリクエスト（同一リポジトリのブランチ）ごとにバンドルを作り、ファイルの追加または変更があれば `chore: build bundle` コミットをそのブランチへ push します。ローカルで必要なとき（`bun run test:plugin` など）は `bun run build` で作れますが、コミットしないでください。手で編集もしないでください。`scripts/build.ts` は、バンドルが相対パスと `claude-code` 以外を import していたとき、または出力ファイルのどれか（`hooks/cli.js` を含む）が 200 KiB 以上になったときにビルドを失敗させます（`hooks/cli.js` は Node のプログラムなので、`node:` の組み込みモジュールは import できます）。また、出力に含まれる見えない文字を `\uXXXX` のエスケープに書き換えます。`classic.PreToolUse` フックの引数名が `hooks/register.js` のほかの場所に出てくるときも失敗させます（プラグインディレクトリは、`next` に渡るイベントを追えない権限フックを受け付けないため）。CI ワークフローは、作ったバンドルに対して `claude plugin validate . --strict` と `claude plugin test .` を実行します。Claude Code の CLI は `devDependencies` の `@anthropic-ai/claude-code` を使います（`bun.lock` で版を固定し、Dependabot が更新します）。
+バンドル（`hooks/register.js`、`hooks/cli.js`、`hooks/vendor/`。Codex プラグインでは `plugins/codex/hooks/cli.js`、`plugins/codex/hooks/vendor/` と、コピーの `plugins/codex/rules/`、`plugins/codex/scripts/dogwood/`、`plugins/codex/scripts/gate.schema.json`）は、プルリクエスト上で CI が生成してコミットします。貢献者がコミットする必要はありません（CI が追加するまでリポジトリには入っていません）。「Build bundle」ワークフローが、プルリクエスト（同一リポジトリのブランチ）ごとにバンドルを作り、ファイルの追加または変更があれば `chore: build bundle` コミットをそのブランチへ push します。ローカルで必要なとき（`bun run test:plugin` など）は `bun run build` で作れますが、コミットしないでください。手で編集もしないでください。`scripts/build.ts` は、バンドルが相対パスと `claude-code` 以外を import していたとき、または出力ファイルのどれか（`hooks/cli.js` を含む）が 200 KiB 以上になったときにビルドを失敗させます（`hooks/cli.js` は Node のプログラムなので、`node:` の組み込みモジュールは import できます）。また、出力に含まれる見えない文字を `\uXXXX` のエスケープに書き換えます。`classic.PreToolUse` フックの引数名が `hooks/register.js` のほかの場所に出てくるときも失敗させます（プラグインディレクトリは、`next` に渡るイベントを追えない権限フックを受け付けないため）。CI ワークフローは、作ったバンドルに対して `claude plugin validate . --strict` と `claude plugin test .` を実行します。Claude Code の CLI は `devDependencies` の `@anthropic-ai/claude-code` を使います（`bun.lock` で版を固定し、Dependabot が更新します）。
 
 依存には 7 日間のフリーズ期間を設けています。`bunfig.toml` の `minimumReleaseAge` により、`bun install` は公開から 7 日以上経ったバージョンだけを解決します。Dependabot（`.github/dependabot.yml`）も `cooldown` で、npm と GitHub Actions の更新を公開から 7 日経つまで提案しません。Actions はコミット SHA で固定しています。
 
 ### リリース
 
-バージョンは [release-please](https://github.com/googleapis/release-please) で管理します。コミットメッセージ（と PR タイトル）は [Conventional Commits](https://www.conventionalcommits.org/ja/)（`feat:`、`fix:`、`refactor:`、`chore:` など）で書いてください。`main` への push ごとに「Release Please」ワークフローがリリース PR を作成・更新し、`package.json`、`.claude-plugin/plugin.json`、`.claude-plugin/marketplace.json` のバージョンを上げて `CHANGELOG.md` を更新します。それをマージするとリリースのタグが付きます。どちらのワークフローも既定の `GITHUB_TOKEN`（PAT は使いません）を使うため、bot が作ったコミットや release-please の PR では CI が自動では起動しません。必須ステータスチェックを設定している場合は、再実行するか空コミットを手で push してください。
+バージョンは [release-please](https://github.com/googleapis/release-please) で管理します。コミットメッセージ（と PR タイトル）は [Conventional Commits](https://www.conventionalcommits.org/ja/)（`feat:`、`fix:`、`refactor:`、`chore:` など）で書いてください。`main` への push ごとに「Release Please」ワークフローがリリース PR を作成・更新し、`package.json`、`.claude-plugin/plugin.json`、`.claude-plugin/marketplace.json`、`plugins/codex/.codex-plugin/plugin.json`、`plugins/codex/plugin.json` のバージョンを上げて `CHANGELOG.md` を更新します。それをマージするとリリースのタグが付きます。どちらのワークフローも既定の `GITHUB_TOKEN`（PAT は使いません）を使うため、bot が作ったコミットや release-please の PR では CI が自動では起動しません。必須ステータスチェックを設定している場合は、再実行するか空コミットを手で push してください。

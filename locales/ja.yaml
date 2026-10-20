@@ -39,6 +39,9 @@ subagentReport:
 autoCount:
   bumped: "[feedback-gate] 違反を検出したため {{rule}} の count を {{from}} → {{to}} に上げました（{{path}}）。同じ違反を繰り返すと強制力（warn → ask/block → deny）が上がります。"
 
+codex:
+  askAsDeny: "[feedback-gate] Codex の PreToolUse には ask が無いので、このルールは呼び出しを拒否しました。上の理由を読んで呼び出しを直してください。同じセッション・同じ対象への同じルールは、次の呼び出しからは warn になります。"
+
 launch:
   checklist: "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件"
   promptTo: "{{agentType}} に送るプロンプト:"

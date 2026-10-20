@@ -1,5 +1,5 @@
-// イベントごとの処理。mod（src/register.ts、classic.* から）と settings hook の CLI（src/cli.ts、hooks/hooks.json から）の
-// 両方がここを呼び、ここが各イベントの実装（src/feedback-guard.ts、src/stop-test-gate.ts など）を呼ぶ。
+// イベントごとの処理（中核）。mod（src/register.ts、classic.* から）と command hook の CLI（src/cli.ts / src/codex-cli.ts、
+// ホストごとの変換は src/host*.ts）の両方がここを呼び、ここが各イベントの実装（src/feedback-guard.ts、src/stop-test-gate.ts など）を呼ぶ。
 // 引数の payload は classic コマンド hook が stdin で受け取る JSON の形。各段は classic のスクリプトと同じ
 // { exitCode, stdout, stderr } を返し、それを classic の規約どおり Outcome にまとめて返す。
 import type { PluginOptions } from 'claude-code'
@@ -116,6 +116,34 @@ export function postToolUse(io: Io, sessionId: string, payload: Dict): Promise<H
   if (!/^(Write|Edit|MultiEdit)$/.test(tool)) return Promise.resolve(none)
   // gate の実行より先に、軽い feedback の post_edit 検査を済ませる。
   return run([(i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, 'rules', payload)])
+}
+
+/**
+ * PreToolUse（1 回で複数ファイルを編集するツール向け。Codex の apply_patch を src/host-codex.ts がファイルごとの Edit / Write の
+ * payload に分けて渡す）: ファイルごとに preToolUse を走らせ、1 つの判定にする。deny が 1 つでもあれば deny、無ければ ask。
+ * 理由は全件をつなぐ。warn（stderr）もつなぐ。
+ */
+export async function preToolUseEdits(io: Io, sessionId: string, options: PluginOptions, payloads: Dict[]): Promise<HookRun> {
+  const runs: HookRun[] = []
+  for (const p of payloads) runs.push(await preToolUse(io, sessionId, options, p))
+  const denies = runs.map((r) => r.outcome.deny).filter((r): r is string => r !== undefined)
+  const asks = runs.map((r) => r.outcome.ask).filter((r): r is string => r !== undefined)
+  const outcome: Outcome = {}
+  if (denies.length > 0) outcome.deny = [...denies, ...asks].join('\n')
+  else if (asks.length > 0) outcome.ask = asks.join('\n')
+  return { outcome, stderr: runs.map((r) => r.stderr).join('') }
+}
+
+/**
+ * PostToolUse（1 回で複数ファイルを編集するツール向け。Codex の apply_patch を src/host-codex.ts がファイルごとの Edit / Write の
+ * payload に分けて渡す）: 各ファイルの記録と post_edit の検査を済ませてから、gate の rules フェーズを 1 回だけ走らせる。
+ */
+export function postToolUseEdits(io: Io, sessionId: string, payloads: Dict[]): Promise<HookRun> {
+  const [first] = payloads
+  if (!first) return Promise.resolve(none)
+  const steps: Step[] = payloads.flatMap((p): Step[] => [(i) => recordChanges(i, p), (i) => feedbackPostEdit(i, p)])
+  steps.push((i) => stopTestGate(i, 'rules', first))
+  return runSteps(io, sessionId, 'PostToolUse', steps)
 }
 
 /** Notification: 確認待ちのデスクトップ通知。何も返さない。 */

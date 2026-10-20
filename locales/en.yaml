@@ -39,6 +39,9 @@ subagentReport:
 autoCount:
   bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
 
+codex:
+  askAsDeny: "[feedback-gate] Codex has no ask in PreToolUse, so this rule denied the call. Read the reason above and fix the call; the same rule on the same target is only warned about from the next call in this session."
+
 launch:
   checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"
   promptTo: "Prompt to send to {{agentType}}:"

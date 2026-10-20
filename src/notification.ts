@@ -74,16 +74,19 @@ export async function notification(io: Io, type: string, payload: Dict): Promise
 
   if (!(await which(io, 'terminal-notifier'))) return ok()
 
+  const appName = io.appName || 'Claude Code'
+  const group = appName.toLowerCase().replace(/\s+/g, '-')
+
   await io.run([
     'terminal-notifier',
     '-title',
-    'Claude Code',
+    appName,
     '-subtitle',
     `📁 ${project} · ${t(kind.label)}`,
     '-message',
     message,
     '-group',
-    `claude-code-${target}`,
+    `${group}-${target}`,
     '-execute',
     click,
   ])

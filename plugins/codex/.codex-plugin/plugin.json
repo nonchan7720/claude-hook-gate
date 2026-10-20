@@ -1,0 +1,12 @@
+{
+  "name": "feedback-gate",
+  "version": "0.8.0",
+  "description": "Codex hooks that inject feedback rules, enforce them on tool calls and at stop time, and run per-project quality gates defined in .claude/gate.yaml",
+  "author": {
+    "name": "nonchan7720"
+  },
+  "homepage": "https://github.com/nonchan7720/claude-hook-gate",
+  "repository": "https://github.com/nonchan7720/claude-hook-gate",
+  "license": "MIT",
+  "hooks": "./hooks/hooks.json"
+}

@@ -7,12 +7,19 @@
 // どちらもディレクトリ掲載の「1 ファイル 256 KiB 未満」に余裕を持って収めるため（全部を 1 ファイルにすると 400 KiB を超える）。
 // 出力は Claude Code の検証（claude plugin validate）に合わせて `export const register = ...` の形に整える
 // （bun は `var register = ...; export { register }` と書き出すが、検証は前者の形しか受け付けない）。
-import { rm } from 'node:fs/promises'
+import { cp, mkdir, rm } from 'node:fs/promises'
 import * as path from 'node:path'
 
 const root = path.resolve(import.meta.dir, '..')
 const hooksDir = path.join(root, 'hooks')
 const vendorDir = path.join(hooksDir, 'vendor')
+// Codex プラグイン（plugins/codex）。Claude Code 版と同じ構成（hooks/hooks.json → scripts/hook.sh → hooks/cli.js）で、
+// cli.js は src/codex-cli.ts から作り、依存は同じ hooks/vendor/*.js を plugins/codex/hooks/vendor/ にも書き出す。
+// 実行時に pluginRoot から読む同梱ファイル（rules/、scripts/dogwood/、scripts/gate.schema.json）もコピーする
+// （Codex はプラグインのディレクトリだけを取り込むので、プラグインの中で完結している必要がある）。
+const codexDir = path.join(root, 'plugins', 'codex')
+const codexHooksDir = path.join(codexDir, 'hooks')
+const codexVendorDir = path.join(codexHooksDir, 'vendor')
 
 // hooks/vendor/<name>.js に切り出す依存と、その中身（再 export するだけのエントリ）。
 const vendors: Record<string, string> = {
@@ -40,7 +47,9 @@ const scratch = path.join(root, 'node_modules', '.cache', 'vendor-entries')
 for (const [name, entry] of Object.entries(vendors)) {
   const entryPath = path.join(scratch, `${name}.ts`)
   await Bun.write(entryPath, entry)
-  outputs[path.join(vendorDir, `${name}.js`)] = await build({ entrypoints: [entryPath], minify: true })
+  const vendorCode = await build({ entrypoints: [entryPath], minify: true })
+  outputs[path.join(vendorDir, `${name}.js`)] = vendorCode
+  outputs[path.join(codexVendorDir, `${name}.js`)] = vendorCode
 }
 
 let code = await build({
@@ -102,6 +111,18 @@ const cliCode = useVendor(
 const cliFile = path.join(hooksDir, 'cli.js')
 outputs[cliFile] = cliCode
 
+// Codex プラグインの CLI（plugins/codex/hooks/cli.js）。cli.js と同じ Node プログラム（src/host.ts の cliMain）で、ホストが src/host-codex.ts。
+const codexCliCode = useVendor(
+  await build({
+    entrypoints: [path.join(root, 'src', 'codex-cli.ts')],
+    target: 'node',
+    external: ['claude-code', ...Object.keys(vendors)],
+    minify: false,
+  }),
+)
+const codexCliFile = path.join(codexHooksDir, 'cli.js')
+outputs[codexCliFile] = codexCliCode
+
 // 見えない文字（改行・タブ以外の制御文字、半角スペース以外の空白、書式文字）を \uXXXX に書き換える。
 // ディレクトリの検査は、文字列やコメントに生の見えない文字があると保留にする（yaml の "\x85" / "\xa0" など）。
 // minify 後のこれらは文字列リテラルの中にしか現れないので、エスケープしても意味は変わらない。書き換え後に構文を確かめる。
@@ -126,14 +147,25 @@ const forbidden = [/(^|[;}\s])import\s*[^'"(]*from\s*['"](?!\.{1,2}\/|claude-cod
 const forbiddenCli = [/(^|[;}\s])import\s*[^'"(]*from\s*['"](?!\.{1,2}\/|node:)/m, /(^|[;}\s])import\s*['"]/m, /\bimport\(/, /\brequire\(/]
 for (const [file, text] of Object.entries(outputs)) {
   const rel = path.relative(root, file)
-  const rules = file === cliFile ? forbiddenCli : forbidden
+  const rules = file === cliFile || file === codexCliFile ? forbiddenCli : forbidden
   for (const rx of rules) if (rx.test(text)) throw new Error(`${rel} contains a forbidden pattern: ${rx}`)
   const bytes = new TextEncoder().encode(text).length
   if (bytes >= maxBytes) throw new Error(`${rel} is ${(bytes / 1024).toFixed(0)} KiB; keep each file under ${maxBytes / 1024} KiB`)
 }
 
 await rm(vendorDir, { recursive: true, force: true })
+await rm(codexVendorDir, { recursive: true, force: true })
 for (const [file, text] of Object.entries(outputs)) {
   await Bun.write(file, text)
   console.log(`wrote ${path.relative(root, file)} (${(new TextEncoder().encode(text).length / 1024).toFixed(0)} KiB)`)
+}
+
+// Codex プラグインが実行時に読む同梱ファイルを、リポジトリのものからコピーする（元を編集したら bun run build で揃える。CI も同じ）。
+const bundledAssets = ['rules', path.join('scripts', 'dogwood'), path.join('scripts', 'gate.schema.json')]
+for (const rel of bundledAssets) {
+  const dest = path.join(codexDir, rel)
+  await rm(dest, { recursive: true, force: true })
+  await mkdir(path.dirname(dest), { recursive: true })
+  await cp(path.join(root, rel), dest, { recursive: true })
+  console.log(`copied ${rel} -> ${path.relative(root, dest)}`)
 }

@@ -51,6 +51,8 @@ export interface Io {
   readonly cwd: string
   /** プラグインの同梱ファイルのルート（scripts/dogwood/ などを探す起点）。 */
   readonly pluginRoot: string
+  /** デスクトップ通知の見出しに使うアプリ名。省略時は Claude Code（Codex プラグインは Codex）。 */
+  readonly appName?: string
   readFile(path: string): Promise<string | undefined>
   /** 親ディレクトリも作って書き込む。 */
   writeFile(path: string, text: string): Promise<void>
