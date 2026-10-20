@@ -10,21 +10,31 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 
 ## フック
 
-フックは `src/register.ts` で登録され（CI が `hooks/register.js` にバンドルし、それを Claude Code が読み込みます）、`src/` の TypeScript モジュールを呼びます。
+フックは `src/register.ts` で登録され（CI が `hooks/register.js` にバンドルし、それを Claude Code が読み込みます）、`src/` の TypeScript モジュールを呼びます。組織のガードが mod のフックを飛ばす環境のために、同じモジュールを `hooks/hooks.json` の command hook（`src/cli.ts` を `hooks/cli.js` にバンドル）でも動かします。[組織管理の環境向けの settings hook](#組織管理の環境向けの-settings-hook)を参照。
 
-| イベント | モジュール | 役割 |
-| --- | --- | --- |
-| SessionStart | `src/reset-gate.ts` | `startup` / `clear` のときだけ自セッションのゲート状態を消す。resume / compact では消さない。 |
-| UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | ルールファイル（`rulesFile` のファイルがあればそれ、無ければ同梱の `rules/feedback_rules.md`。言語が英語なら `rules/feedback_rules.en.md`）と確定済みフィードバックルール（`count >= 3`）をコンテキストに追加する。 |
-| PreToolUse（Bash / Edit / Write / MultiEdit） | `src/feedback-guard.ts` | `pre_bash` / `pre_edit` の enforce を評価し、`count` に応じて deny / ask / warn する。 |
-| PostToolUse（Write / Edit / MultiEdit） | `src/record-changes.ts` → `src/feedback-post-edit.ts` → `src/stop-test-gate.ts`（`rules`） | 変更ファイルを記録し、`post_edit` の enforce を編集後のファイル全体に対して評価（`count` に応じて block / warn）したあと、`.claude/gate.yaml` の該当ルールを実行する（`src/gate.ts` 経由）。 |
-| PreToolUse（Bash） | `src/bash-changes.ts`（`bashStarted`）。`feedback-guard` の前 | コマンドの開始時刻を控える（`bash_started.<session>--<tool_use_id>.json`）。`.claude/gate.yaml` があるプロジェクトでは `.claude/.gate-status/` に、無いプロジェクトでは `~/.claude/feedback/.bash_started/`（`.ask_state` と同じ feedback 側の状態置き場）に置く。後者は `post_edit` / `pre_edit` の enforce を持つ有効な feedback ルールがあるときだけで、`gate.yaml` の無いプロジェクトの作業ツリーには状態ファイルを作らない。 |
-| PostToolUse（Bash） | `src/bash-changes.ts` → `src/feedback-bash-edit.ts` → `src/stop-test-gate.ts`（`rules`） | コマンドが実際に書き換えたファイル（cwd の作業ツリーと、`.claude/worktrees/` 配下の worktree のうちコマンドにパス（`worktrees/<name>`）が出てくるものについて。それ以外の worktree は見ないので、別の Claude Code セッションがそこで編集中のファイルをこのコマンドの変更と取り違えない。git の変更・未追跡ファイルと、コマンド中に作られたコミットが触ったファイルのうち、mtime がコマンド開始以降のもの）を拾う。heredoc・`python`・`sed -i` などで書いても、Edit / Write に掛かる検査が抜けないようにするため。各ファイルを、Edit / Write の後と同じく `post_edit` の enforce でファイル全体に対して評価し、実行後に判定できる `pre_edit` の enforce（下記）も評価して、全ファイルの結果を 1 つの block / warn にまとめる。そのあと `.claude/gate.yaml` があるときだけ変更ファイルとして記録し、記録があれば該当ルールを実行する。feedback の検査は `gate.yaml` が無くても動く。git の履歴・作業ツリー操作（rebase / checkout / merge など）は検査も記録もしない。 |
-| PreToolUse（Agent / SendMessage）、任意 | `src/agent-launch-guard.ts` | `agentLaunchGuard` が `true` のときだけ有効。サブエージェントへ指示を送る前に、送信本文を見せて確認する。 |
-| Notification | `src/notification.ts`（`notify`） | 確認待ちのときにデスクトップ通知（`terminal-notifier` が必要、macOS）。 |
-| Stop | `src/all-stop.ts` | ゲートの `checks` フェーズ（直っていない rules の失敗を再実行し、予約された consistency checks を実行）、`src/feedback-stop-check.ts`、`stop` 通知を順に実行する。 |
-| SubagentStop | ゲートの `checks` フェーズ、`src/feedback-stop-check.ts`、続けて `src/subagent-report.ts`（`saveSubagentReport`） | サブエージェント向けの同じゲートと `stop_check` ルール。結果は呼び出し元のエージェントへ渡すために控えます（[サブエージェントの結果](#results-of-subagents)）。 |
-| PostToolUse（Agent） | `src/subagent-report.ts`（`subagentReport`） | 終わったサブエージェントの gate / `stop_check` の結果を、呼び出し元のエージェントの context に追加します。 |
+| イベント | モジュール | 役割 | command hook |
+| --- | --- | --- | --- |
+| SessionStart | `src/reset-gate.ts` | `startup` / `clear` のときだけ自セッションのゲート状態を消す。resume / compact では消さない。 | 同じ（下記） |
+| UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | ルールファイル（`rulesFile` のファイルがあればそれ、無ければ同梱の `rules/feedback_rules.md`。言語が英語なら `rules/feedback_rules.en.md`）と確定済みフィードバックルール（`count >= 3`）をコンテキストに追加する。 | 同じ（下記） |
+| PreToolUse（Bash / Edit / Write / MultiEdit） | `src/feedback-guard.ts` | `pre_bash` / `pre_edit` の enforce を評価し、`count` に応じて deny / ask / warn する。 | 同じ（下記） |
+| PostToolUse（Write / Edit / MultiEdit） | `src/record-changes.ts` → `src/feedback-post-edit.ts` → `src/stop-test-gate.ts`（`rules`） | 変更ファイルを記録し、`post_edit` の enforce を編集後のファイル全体に対して評価（`count` に応じて block / warn）したあと、`.claude/gate.yaml` の該当ルールを実行する（`src/gate.ts` 経由）。 | 同じ（下記） |
+| PreToolUse（Bash） | `src/bash-changes.ts`（`bashStarted`）。`feedback-guard` の前 | コマンドの開始時刻を控える（`bash_started.<session>--<tool_use_id>.json`）。`.claude/gate.yaml` があるプロジェクトでは `.claude/.gate-status/` に、無いプロジェクトでは `~/.claude/feedback/.bash_started/`（`.ask_state` と同じ feedback 側の状態置き場）に置く。後者は `post_edit` / `pre_edit` の enforce を持つ有効な feedback ルールがあるときだけで、`gate.yaml` の無いプロジェクトの作業ツリーには状態ファイルを作らない。 | 同じ（下記） |
+| PostToolUse（Bash） | `src/bash-changes.ts` → `src/feedback-bash-edit.ts` → `src/stop-test-gate.ts`（`rules`） | コマンドが実際に書き換えたファイル（cwd の作業ツリーと、`.claude/worktrees/` 配下の worktree のうちコマンドにパス（`worktrees/<name>`）が出てくるものについて。それ以外の worktree は見ないので、別の Claude Code セッションがそこで編集中のファイルをこのコマンドの変更と取り違えない。git の変更・未追跡ファイルと、コマンド中に作られたコミットが触ったファイルのうち、mtime がコマンド開始以降のもの）を拾う。heredoc・`python`・`sed -i` などで書いても、Edit / Write に掛かる検査が抜けないようにするため。各ファイルを、Edit / Write の後と同じく `post_edit` の enforce でファイル全体に対して評価し、実行後に判定できる `pre_edit` の enforce（下記）も評価して、全ファイルの結果を 1 つの block / warn にまとめる。そのあと `.claude/gate.yaml` があるときだけ変更ファイルとして記録し、記録があれば該当ルールを実行する。feedback の検査は `gate.yaml` が無くても動く。git の履歴・作業ツリー操作（rebase / checkout / merge など）は検査も記録もしない。 | 同じ（下記） |
+| PreToolUse（Agent / SendMessage）、任意 | `src/agent-launch-guard.ts` | `agentLaunchGuard` が `true` のときだけ有効。サブエージェントへ指示を送る前に、送信本文を見せて確認する。 | 同じ（下記） |
+| Notification | `src/notification.ts`（`notify`） | 確認待ちのときにデスクトップ通知（`terminal-notifier` が必要、macOS）。 | 同じ（下記） |
+| Stop | `src/all-stop.ts` | ゲートの `checks` フェーズ（直っていない rules の失敗を再実行し、予約された consistency checks を実行）、`src/feedback-stop-check.ts`、`stop` 通知を順に実行する。 | 同じ（下記） |
+| SubagentStop | ゲートの `checks` フェーズ、`src/feedback-stop-check.ts`、続けて `src/subagent-report.ts`（`saveSubagentReport`） | サブエージェント向けの同じゲートと `stop_check` ルール。結果は呼び出し元のエージェントへ渡すために控えます（[サブエージェントの結果](#results-of-subagents)）。 | 同じ（下記） |
+| PostToolUse（Agent） | `src/subagent-report.ts`（`subagentReport`） | 終わったサブエージェントの gate / `stop_check` の結果を、呼び出し元のエージェントの context に追加します。 | 同じ（下記） |
+
+### 組織管理の環境向けの settings hook
+
+Claude Code を組織が管理している環境（Team / Enterprise ログイン、または managed settings）では、組み込みのガード `cc-plugin-sec-default` が最初に走り、`classic.*` イベントをインストールしたプラグインすべてに対して飛ばします（`/plugin` に「Its hooks on classic.SessionStart, ... do not run here」と出ます）。そこでは上の mod のフックが一つも走りません。`hooks/hooks.json` の `command` hook（settings hook）はガードに飛ばされず、同じ classic イベントを、同じ stdin の JSON と同じ戻り値の規約（exit 2 で block、`permissionDecision`、`decision: block`、`additionalContext`）で受け取ります。そこで `hooks/hooks.json` に、SessionStart・UserPromptSubmit・PreToolUse（`Bash|Edit|Write|MultiEdit|Agent|SendMessage`）・PostToolUse（`Bash|Edit|Write|MultiEdit|Agent|Task`）・Notification・Stop・SubagentStop の command hook を登録しています。上の表の各行は、command hook 経由でも同じ挙動です。
+
+- **動き方。** 各 hook は `bash "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh" <Event>` で、`scripts/hook.sh` が `node`（無ければ `bun`）で `hooks/cli.js <Event>` を実行します。`hooks/cli.js` は `src/cli.ts` から作るもので、stdin の classic の JSON を読み、mod のフックと同じ `src/` の関数（`src/hooks.ts` で共有）を呼び、classic の command hook と同じ形で結果を出力します。PostToolUse・Stop・SubagentStop は gate のコマンドが長くなりうるので `timeout` を 600 秒にしています。
+- **`node` か `bun` が必要です。** どちらも `PATH` に無ければ、command hook は何もしません（exit 0）。その場合に動くのは mod のフックだけなので、ガードに飛ばされる環境では何も動きません。
+- **二重に動かさない。** `classic.*` の mod のフックは、走るたびにマーカーファイル `~/.claude/feedback/.classic_seen/<session>` を書きます（`CLAUDE_FEEDBACK_DIR` を尊重。`classic.Notification` では毎回書き直し、24 時間より古いものは掃除されます）。`scripts/hook.sh` はそのセッションのマーカーがあれば exit 0 で黙るので、mod のフックが走る環境では command hook は何もしません。ガードに飛ばされる環境ではマーカーが書かれず、command hook が処理します。（同じイベントの mod のフックと command hook は同時に始まるので、セッションの最初のイベントである SessionStart は両方が走りうる場合があります。リセットは何度走っても同じ結果になり、以降はマーカーがあります。）
+- **プラグイン設定。** `language`・`agentLaunchGuard`・`autoCount`・`rulesFile` は、環境変数 `CLAUDE_PLUGIN_OPTION_language`・`CLAUDE_PLUGIN_OPTION_agentLaunchGuard`（`true` / `false`）・`CLAUDE_PLUGIN_OPTION_autoCount`・`CLAUDE_PLUGIN_OPTION_rulesFile` として command hook に渡され、`hooks/cli.js` が読みます。
+- **違い。** 評価中にステータス行に出す表示（`$.ui.status`）は mod の機能で、command hook は出しません。プロンプトの上の帯（実行中の gate コマンド）は mod の `ui.render` が `.claude/.gate-status/running/` の同じファイルから描き、command hook もそのファイルを従来どおり書きます。描き直しは mod が次に描画するときです。
 
 ### Bash で書いたファイル
 
@@ -130,7 +140,9 @@ flowchart LR
 
 ## 前提
 
-インストールするものはありません。フックは素の TypeScript で、1 つの JavaScript にバンドルして Claude Code が直接実行します（Python・bash・jq は不要）。
+mod のフックにはインストールするものはありません。フックは素の TypeScript で、1 つの JavaScript にバンドルして Claude Code が直接実行します（Python・bash・jq は不要）。
+
+- `node`（または `bun`）が `PATH` に必要（任意）: settings hook（`hooks/hooks.json`）だけが必要とします。`hooks/cli.js` を実行し、`bash` を使います。無ければ何もしません。`jq` は必須ではありません（あれば使います）。
 
 - `terminal-notifier`（任意、macOS）: デスクトップ通知にだけ必要です。
 - `dogwood`（任意。AWS のツールで、ソースは <https://github.com/dogwood-policy/dogwood>）。`cargo install --git https://github.com/dogwood-policy/dogwood amzn-dogwood-cli` でビルド・インストールできます（crate 名は `amzn-dogwood-cli`、バイナリ名は `dogwood`）。`.claude/gate.yaml` の各コマンドを今実行するか後回しにするかの判定に使います。`DOGWOOD_BIN`、`PATH`、`~/.cargo/bin/dogwood`、`~/.local/share/mise/shims/dogwood` の順に探します。見つからない場合、同梱の既定ポリシーが適用されるコマンドは毎回実行され、`policy:` を指定したコマンドは実行されずに後回しになります。
@@ -205,13 +217,14 @@ checks フェーズ（Stop / SubagentStop）で 1 件以上のコマンドが実
   - macOS の通知用に `osascript`（前面ウィンドウの名前を読み、今見ているプロジェクトなら通知しないため）と `terminal-notifier`（通知を表示します。クリックすると `open -b <ターミナルアプリ>` か `code -r <プロジェクト>` でウィンドウを前面に出します）。
 - **書き込むファイル**:
   - `<project>/.claude/.gate-status/`: gate の状態、コマンドのログ、ロック（プロジェクトに `.claude/gate.yaml` があるときだけ）。
-  - `~/.claude/feedback/`: `.violations.jsonl`、`.errors.jsonl`、`.count_state/`、`.ask_state/`、`.bash_started/`。
+  - `~/.claude/feedback/`: `.violations.jsonl`、`.errors.jsonl`、`.count_state/`、`.ask_state/`、`.bash_started/`、`.classic_seen/`（セッションごとの空のマーカー）。
   - フィードバックルールのファイル（Claude が従う指示）の frontmatter にある `count:` の行。`autoCount` が有効なときにルール違反があると書き換えます（プラグインの設定で無効にできます）。`/correct apply` でも書き換えます。ファイルのそれ以外の部分は変えません。
   - 設定ファイル、`CLAUDE.md`、ビルドや起動のファイル、フックの設定は書きません。
 - **権限の判定**（PreToolUse）: 返すのは `deny` か `ask` だけで、`allow` は返しません。呼び出しを厳しくすることはあっても、あなた自身の権限確認を飛ばすことはありません。判定するのは、Bash / Edit / Write / MultiEdit でフィードバックルールに一致したとき（ルールの `count` / `severity` により `deny` か `ask`）と、`agentLaunchGuard` が有効なときの `Agent` / `SendMessage`（全文を見せて `ask`）だけです。それ以外はイベントをそのまま次へ渡します。権限モード、設定、エージェント、Remote Control は変えません。
 - **追加するコンテキスト**: UserPromptSubmit で、ルールファイルと確定したフィードバックルール（`count >= 3`）をコンテキストに加えます。PostToolUse・Stop・SubagentStop では、gate の結果とルール違反を Claude に返します（フィードバックかブロックの理由として）。PostToolUse(Agent) では、終わったサブエージェントの結果を呼び出し元のコンテキストに加えます。
+- **settings hook**: `hooks/hooks.json` はイベントごとに `command` hook を登録しており、`scripts/hook.sh` を経由して、イベントの JSON を stdin で渡した `node hooks/cli.js <Event>`（無ければ `bun`）を実行します。mod のフックと同じ検査を行い、同じもの（deny / ask、block、追加する context）を返すので、上の各点はこちらにも当てはまります。セッションの mod のマーカーがあるとき、または `node` も `bun` も無いときは、何もせずに終わります。プラグイン設定は環境変数 `CLAUDE_PLUGIN_OPTION_*` から読みます。
 - **コマンド**: セッション開始時に `/correct` を登録し、`command.run` のフックはこのコマンドにだけ応答します。
-- **同梱ファイル**: `hooks/register.js` は `src/` から `scripts/build.ts` で作るもので、minify していません。`hooks/vendor/yaml.js` と `hooks/vendor/i18next.js` は npm パッケージの [`yaml`](https://www.npmjs.com/package/yaml) と [`i18next`](https://www.npmjs.com/package/i18next)（`package.json` / `bun.lock` で固定した版）で、ファイルを小さくするためだけに minify しています。検査で報告される getter、`Object.defineProperty`、Promise の判定（`typeof x.then === "function"`）は、この 2 つのライブラリ側のコードです（yaml のドキュメントのクラス、i18next の非同期読み込み）。プラグイン自身のコードは `Proxy`、`eval`、`new Function` を使っていません。
+- **同梱ファイル**: `hooks/register.js` と `hooks/cli.js` は `src/` から `scripts/build.ts` で作るもので、minify していません。`hooks/vendor/yaml.js` と `hooks/vendor/i18next.js` は npm パッケージの [`yaml`](https://www.npmjs.com/package/yaml) と [`i18next`](https://www.npmjs.com/package/i18next)（`package.json` / `bun.lock` で固定した版）で、ファイルを小さくするためだけに minify しています。検査で報告される getter、`Object.defineProperty`、Promise の判定（`typeof x.then === "function"`）は、この 2 つのライブラリ側のコードです（yaml のドキュメントのクラス、i18next の非同期読み込み）。プラグイン自身のコードは `Proxy`、`eval`、`new Function` を使っていません。
 
 ## 開発
 
@@ -222,12 +235,12 @@ bun install          # 開発用の依存を入れる
 bun run lint         # Biome（lint とフォーマットの検査）。`bun run format` で自動修正
 bun run typecheck    # tsc --noEmit
 bun run test         # bun test（tests/*.spec.ts）
-bun run build        # src/register.ts を hooks/register.js（+ hooks/vendor/*.js）にバンドル
+bun run build        # src/register.ts を hooks/register.js に、src/cli.ts を hooks/cli.js にバンドル（+ hooks/vendor/*.js）
 bun run test:plugin  # ビルドしてから、実エンジンで hooks/register.test.ts を実行
 bun run validate:plugin  # claude plugin validate . --strict
 ```
 
-バンドル（`hooks/register.js` と `hooks/vendor/`）は、プルリクエスト上で CI が生成してコミットします。貢献者がコミットする必要はありません（CI が追加するまでリポジトリには入っていません）。「Build bundle」ワークフローが、プルリクエスト（同一リポジトリのブランチ）ごとにバンドルを作り、ファイルの追加または変更があれば `chore: build bundle` コミットをそのブランチへ push します。ローカルで必要なとき（`bun run test:plugin` など）は `bun run build` で作れますが、コミットしないでください。手で編集もしないでください。`scripts/build.ts` は、バンドルが相対パスと `claude-code` 以外を import していたとき、または出力ファイルのどれかが 200 KiB 以上になったときにビルドを失敗させます。また、出力に含まれる見えない文字を `\uXXXX` のエスケープに書き換えます。`classic.PreToolUse` フックの引数名が `hooks/register.js` のほかの場所に出てくるときも失敗させます（プラグインディレクトリは、`next` に渡るイベントを追えない権限フックを受け付けないため）。CI ワークフローは、作ったバンドルに対して `claude plugin validate . --strict` と `claude plugin test .` を実行します。Claude Code の CLI は `devDependencies` の `@anthropic-ai/claude-code` を使います（`bun.lock` で版を固定し、Dependabot が更新します）。
+バンドル（`hooks/register.js`、`hooks/cli.js`、`hooks/vendor/`）は、プルリクエスト上で CI が生成してコミットします。貢献者がコミットする必要はありません（CI が追加するまでリポジトリには入っていません）。「Build bundle」ワークフローが、プルリクエスト（同一リポジトリのブランチ）ごとにバンドルを作り、ファイルの追加または変更があれば `chore: build bundle` コミットをそのブランチへ push します。ローカルで必要なとき（`bun run test:plugin` など）は `bun run build` で作れますが、コミットしないでください。手で編集もしないでください。`scripts/build.ts` は、バンドルが相対パスと `claude-code` 以外を import していたとき、または出力ファイルのどれか（`hooks/cli.js` を含む）が 200 KiB 以上になったときにビルドを失敗させます（`hooks/cli.js` は Node のプログラムなので、`node:` の組み込みモジュールは import できます）。また、出力に含まれる見えない文字を `\uXXXX` のエスケープに書き換えます。`classic.PreToolUse` フックの引数名が `hooks/register.js` のほかの場所に出てくるときも失敗させます（プラグインディレクトリは、`next` に渡るイベントを追えない権限フックを受け付けないため）。CI ワークフローは、作ったバンドルに対して `claude plugin validate . --strict` と `claude plugin test .` を実行します。Claude Code の CLI は `devDependencies` の `@anthropic-ai/claude-code` を使います（`bun.lock` で版を固定し、Dependabot が更新します）。
 
 依存には 7 日間のフリーズ期間を設けています。`bunfig.toml` の `minimumReleaseAge` により、`bun install` は公開から 7 日以上経ったバージョンだけを解決します。Dependabot（`.github/dependabot.yml`）も `cooldown` で、npm と GitHub Actions の更新を公開から 7 日経つまで提案しません。Actions はコミット SHA で固定しています。
 

@@ -12,6 +12,7 @@
       "!**/.claude-plugin/types",
       "!bun.lock",
       "!hooks/register.js",
+      "!hooks/cli.js",
       "!hooks/vendor",
       "!.release-please-manifest.json",
       "!CHANGELOG.md"

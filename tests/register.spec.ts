@@ -645,3 +645,50 @@ describe('Stop / SubagentStop / Notification', () => {
       expect(r.block).toBeUndefined()
     }))
 })
+
+// 組織管理のガードが classic.* を飛ばす環境では、hooks.json の settings hook（scripts/hook.sh）が代わりに同じ処理を走らせる。
+// classic.* が走る環境で二重に動かさないよう、classic.* は先頭でセッション別のマーカーを書く。
+describe('classic marker for the settings hooks', () => {
+  const markerOf = (feedback: string) => path.join(feedback, '.classic_seen', 'sess-1')
+
+  test.each([
+    ['classic.SessionStart', { source: 'resume', session_id: 'sess-1' }],
+    ['classic.UserPromptSubmit', { prompt: 'hi' }],
+    ['classic.PreToolUse', { tool: 'Read', file_path: '/a' }],
+    ['classic.PostToolUse', { tool_name: 'Read', session_id: 'sess-1' }],
+    ['classic.Notification', { message: 'm' }],
+    ['classic.Stop', { session_id: 'sess-1' }],
+    ['classic.SubagentStop', { session_id: 'sess-1' }],
+  ])('%s writes <feedbackDir>/.classic_seen/<session>', (name, event) =>
+    withMod(async (m, _proj, feedback) => {
+      expect(exists(markerOf(feedback))).toBe(false)
+      await m.call(name, event)
+      expect(exists(markerOf(feedback))).toBe(true)
+    }),
+  )
+
+  test('only characters outside [A-Za-z0-9_-] are dropped from the session id', () =>
+    withMod(async (m, _proj, feedback) => {
+      m.$.session.id = async () => '../a b_c-1'
+      await m.call('classic.Stop', {})
+      expect(fs.readdirSync(path.join(feedback, '.classic_seen'))).toEqual(['ab_c-1'])
+    }))
+
+  test('the marker is written once, and classic.Notification rewrites it every time', () =>
+    withMod(async (m, _proj, feedback) => {
+      const marker = markerOf(feedback)
+      const old = new Date(1_000_000)
+      await m.call('classic.Stop', { session_id: 'sess-1' })
+      fs.utimesSync(marker, old, old)
+      await m.call('classic.Stop', { session_id: 'sess-1' })
+      expect(fs.statSync(marker).mtimeMs).toBe(old.getTime())
+      await m.call('classic.Notification', { message: 'm' })
+      expect(fs.statSync(marker).mtimeMs).toBeGreaterThan(Date.now() - 60_000)
+    }))
+
+  test('a mod hook that is not classic.* writes no marker', () =>
+    withMod(async (m, _proj, feedback) => {
+      await m.call('session.start', {})
+      expect(exists(path.join(feedback, '.classic_seen'))).toBe(false)
+    }))
+})

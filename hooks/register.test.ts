@@ -210,7 +210,8 @@ test('PostToolUse: gate.yaml が無ければ何も記録せず、対象外ツー
   const r = await $.classic.PostToolUse({ tool_name: 'Edit', tool_input: { file_path: '/a' }, tool_response: {}, tool_use_id: 't1' })
   expect(r.block).toBeUndefined()
   await $.classic.PostToolUse({ tool_name: 'Read', tool_input: {}, tool_response: {}, tool_use_id: 't1' })
-  expect(Object.keys(files)).toEqual([])
+  // 書くのは「classic が走った」印のマーカーだけ（scripts/hook.sh が見る）。
+  expect(Object.keys(files)).toEqual(['/h/.claude/feedback/.classic_seen/sess-1'])
   expect(runs).toEqual([])
 })
 
