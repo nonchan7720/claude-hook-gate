@@ -258,6 +258,34 @@ async function toolCallStarted($: Engine, options: PluginOptions, event: HookEve
   }
 }
 
+/** サブエージェントの turn.complete が終わった印（<feedbackDir>/.subagent_done/<session>--<agent>）。gate.yaml の無い PJ の作業ツリーを汚さない置き場所。 */
+const subagentDonePath = (io: Io, sessionId: string, agentId: string): string =>
+  join(feedbackDir(io), '.subagent_done', `${sessionId || 'unknown'}--${agentId}`)
+
+/** 印を待つ上限と間隔（ms）。実機では呼び出し元の tool.call が返ってから数十 ms で印が出る。バックグラウンドのサブエージェントは待たずに諦める。 */
+const SUBAGENT_DONE_WAIT_MS = 2000
+const SUBAGENT_DONE_POLL_MS = 50
+
+/** 印が出るまで待ち、出たら消す。出なければ上限で諦める（classic でもバックグラウンドのサブエージェントの控えは引き取られない）。 */
+async function awaitSubagentDone(io: Io, sessionId: string, agentId: string): Promise<void> {
+  if (agentId === '') return
+  const marker = subagentDonePath(io, sessionId, agentId)
+  const start = await io.now()
+  while (!(await io.exists(marker))) {
+    if ((await io.now()) - start >= SUBAGENT_DONE_WAIT_MS) return
+    // タイマーはエンジンの $.clock.every（io.every）で待つ。無いエンジンでは待たずに諦める。
+    if (!io.every) return
+    await new Promise<void>((resolve) => {
+      const cancel = io.every?.(SUBAGENT_DONE_POLL_MS, () => {
+        cancel?.()
+        resolve()
+      })
+      if (!cancel) resolve()
+    })
+  }
+  await io.removeFiles([marker])
+}
+
 /**
  * tool.call の後: classic.PostToolUse 相当の処理を、tool.call の入力と結果から組んだ payload で走らせる。
  * 拒否された・失敗した呼び出しは、classic でも PostToolUse が来ない（失敗は PostToolUseFailure）ので何もしない。
@@ -270,6 +298,9 @@ async function toolCallDone($: Engine, options: PluginOptions, event: HookEvent,
     // tool_response の形は classic と完全には同じと限らない。サブエージェントの結果は agentId を持つレコードを期待する。
     const result = ran.result
     const payload: Dict = { ...base, hook_event_name: 'PostToolUse', tool_response: isDict(result) ? result : { result } }
+    // 終わったサブエージェントの turn.complete は、呼び出し元のこの後処理と並行して走る（実機では控えが数十 ms 後に書かれる）。
+    // classic の SubagentStop → PostToolUse(Agent) の順に揃えるため、印（subagentDone）が出るまで少し待つ。
+    if (/^(Agent|Task)$/.test(tool)) await awaitSubagentDone(await createIo($, options), str(base.session_id), isDict(result) ? str(result.agentId) : '')
     const steps = postToolSteps(tool, payload)
     if (steps) await tellClaude($, await runSteps($, options, 'PostToolUse', steps))
   } catch {
@@ -308,7 +339,10 @@ async function turnComplete($: Engine, options: PluginOptions, event: HookEvent,
     const agentType = str(event.agentType)
     const payload: Dict = { ...base, hook_event_name: 'SubagentStop', agent_id: agentId, ...(agentType !== '' ? { agent_type: agentType } : {}) }
     const mine = await runSteps($, options, 'SubagentStop', subagentStopSteps(payload))
-    return mine.block === undefined ? undefined : tr((await createIo($, options)).lang)('nativeStop.subagentBlocked', { reason: firstLine(mine.block) })
+    // 呼び出し元の tool.call(Agent) の後処理が、この turn.complete の終わりを待てるように印を残す（subagentDone）。
+    const io = await createIo($, options)
+    await io.writeFile(subagentDonePath(io, str(base.session_id), agentId), '1\n').catch(() => undefined)
+    return mine.block === undefined ? undefined : tr(io.lang)('nativeStop.subagentBlocked', { reason: firstLine(mine.block) })
   }
   const active = memory.stopContinued
   memory.stopContinued = false

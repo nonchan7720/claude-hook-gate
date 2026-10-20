@@ -748,7 +748,7 @@ describe('native events', () => {
         expect(exists(path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1.txt'))).toBe(false)
       }))
 
-    test('tool.call hands a finished subagent report to the caller once', () =>
+    test('tool.call(Agent) waits for the subagent turn.complete and hands its report to the caller once', () =>
       withMod(async (m, proj) => {
         writeGateYaml(proj, {
           rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
@@ -762,12 +762,21 @@ describe('native events', () => {
           appendLog,
           env: { HOME: proj, CLAUDE_FEEDBACK_DIR: path.join(proj, 'fb'), DOGWOOD_BIN: MISSING_DOGWOOD_BIN },
         })
-        await m2.call('turn.complete', { agentId: 'ag1', agentType: 'worker', answer: 'done' })
+        // 実機ではサブエージェントの turn.complete は呼び出し元の tool.call(Agent) と並行して走り、控えは少し後に書かれる。
+        // tool.call 側は印（.subagent_done）が出るまで待ってから引き取る。
+        // テスト用エンジンの $.clock.every は時間を注入する作りなので、ここだけ本物のタイマーにする（待機の間に turn.complete を走らせる）。
+        m2.$.clock.every = (ms, fn) => {
+          const t = setTimeout(fn, ms)
+          return { cancel: () => clearTimeout(t) }
+        }
+        setTimeout(() => void m2.call('turn.complete', { agentId: 'ag1', agentType: 'worker', answer: 'done' }), 120)
         const done = await m2.call('tool.call', { tool: 'Agent', tool_use_id: 't9', prompt: 'p' }, async () => ({ result: { agentId: 'ag1' } }))
         expect(done).toEqual({ result: { agentId: 'ag1' } })
         expect(appendLog.length).toBe(1)
         expect(appendLog[0]).toContain('ag1')
         expect(appendLog[0]).toContain('検証に失敗')
+        expect(exists(path.join(proj, '.claude', '.gate-status', 'subagent_report.sess-1--ag1.json'))).toBe(false)
+        expect(exists(path.join(proj, 'fb', '.subagent_done', 'sess-1--ag1'))).toBe(false)
       }))
 
     test('turn.complete sends Claude back with the block reason, and counts the follow-up as stop_hook_active', () =>

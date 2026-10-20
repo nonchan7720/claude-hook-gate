@@ -44,7 +44,8 @@ classic との違い:
 - **二重に動かさない。** `classic.*` のフックは走るたびにその記録を残す（`$.state` のキー `feedback-gate.classicSeen`。mod のリロードをまたいで残る。加えてマーカーファイル `~/.claude/feedback/.classic_seen/<session>`。24 時間後に掃除される）。記録を見たネイティブのフックは `next(e)` で素通りする。`tool.call` では `next(e)` の後でもう一度記録を読む（`classic.PreToolUse` / `PostToolUse` はその内側で走るため）ので、最初の呼び出しでも PostToolUse の処理が二重に走らない。
 - **`turn.complete` は block できない。** classic の `Stop` は exit 2 / `decision: block` で Claude に作業を続けさせられました。メインのターンの block は、`$.prompt.submit` で新しいプロンプトとして投げ直し（ゲートの試行回数は `stop_hook_active` として引き継ぐ）、回答の下に 1 行を出します。投げ直せないときは toast に出します。**サブエージェントの**ターンは投げ直せません（`$.prompt.submit` は会話本体に送られる）。理由を 1 行で出すだけで、結果は呼び出し元の PostToolUse(Agent) の報告のために控えます。`continue: false`（`preventContinuation`）は再現しません。
 - **Notification** にはネイティブのイベントがありません。`classic.Notification` の mod フックと、`hooks.json` の command hook `scripts/notification.sh` の両方を登録しています。`classic.*` が飛ばされる環境では command hook が代わりに通知し、両方走る環境では command hook がセッションのマーカーファイルを見て黙ります（マーカーはどの `classic.*` フックも書き、`classic.Notification` のたびに更新されます）。
-- ネイティブイベントのフィールドは防御的に読んでいます（`tool.check` は `e.tool` / `e.input` / `e.agentId`、`turn.complete` は `e.answer` / `e.agentId` / `e.isAborted`）。
+- **サブエージェントの報告の順序。** サブエージェントの `turn.complete` は、呼び出し元の `Agent` / `Task` の `tool.call` と並行して走り、報告のファイルはツールの結果より数十 ms 後に書かれます（Claude Code 2.1.304 で確認）。そこでサブエージェントの `turn.complete` は印（`~/.claude/feedback/.subagent_done/<session>--<agent>`、24 時間後に掃除）も書き、呼び出し元の `tool.call` はその印が出るまで待ってから（50 ms ごと、最長 2 秒）報告を引き取ります。バックグラウンドのサブエージェントは待ち時間を超えるので引き取られません（classic と同じ）。
+- ネイティブイベントのフィールドは Claude Code 2.1.304 で確認しました（`tool.call` は `e.tool` / `e.tool_use_id` とツールの引数、`tool.check` は `e.tool` / `e.input` / `e.agentId`、`turn.complete` は `e.answer` / `e.agentId` / `e.isAborted`）。それでも防御的に読んでいます。
 
 ### Bash で書いたファイル
 

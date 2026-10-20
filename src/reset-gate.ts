@@ -82,8 +82,10 @@ export async function resetGate(io: Io, payload: Dict): Promise<ScriptResult> {
   }
   // classic.* が走った印のマーカー（<feedbackDir>/.classic_seen/<session>。src/register.ts と scripts/notification.sh が使う）も、
   // 24h 超は掃除する。classic.Notification のたびに書き直されるので、動いているセッションのものは消えない。
-  const seenDir = join(feedbackDir(io), '.classic_seen')
-  await io.removeFiles((await io.list(seenDir)).filter((e) => e.kind === 'file' && e.mtimeMs < now - DAY_MS).map((e) => join(seenDir, e.name)))
+  // サブエージェントの turn.complete の印（.subagent_done/<session>--<agent>）も同じ扱い（引き取られなかった分の残骸）。
+  for (const dir of [join(feedbackDir(io), '.classic_seen'), join(feedbackDir(io), '.subagent_done')]) {
+    await io.removeFiles((await io.list(dir)).filter((e) => e.kind === 'file' && e.mtimeMs < now - DAY_MS).map((e) => join(dir, e.name)))
+  }
 
   // 旧パスのログ置き場が空になったら片付ける。
   await io.removeDir(join(claudeDir, 'hooks', 'logs'))
