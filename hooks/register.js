@@ -4204,8 +4204,9 @@ async function resetGate(io, payload) {
         await io.removeTree(join(logRoot, e.name));
     }
   }
-  const seenDir = join(feedbackDir(io), ".classic_seen");
-  await io.removeFiles((await io.list(seenDir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS3).map((e) => join(seenDir, e.name)));
+  for (const dir of [join(feedbackDir(io), ".classic_seen"), join(feedbackDir(io), ".subagent_done")]) {
+    await io.removeFiles((await io.list(dir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS3).map((e) => join(dir, e.name)));
+  }
   await io.removeDir(join(claudeDir, "hooks", "logs"));
   await io.removeDir(join(claudeDir, "hooks"));
   return ok();
@@ -4445,6 +4446,30 @@ async function toolCallStarted($, options, event) {
     await runSteps($, options, "PreToolUse", [(io) => bashStarted(io, payload)]);
   } catch {}
 }
+var subagentDonePath = (io, sessionId, agentId) => join(feedbackDir(io), ".subagent_done", `${sessionId || "unknown"}--${agentId}`);
+var SUBAGENT_DONE_WAIT_MS = 2000;
+var SUBAGENT_DONE_POLL_MS = 50;
+async function awaitSubagentDone(io, sessionId, agentId) {
+  if (agentId === "")
+    return;
+  const marker = subagentDonePath(io, sessionId, agentId);
+  const start = await io.now();
+  while (!await io.exists(marker)) {
+    if (await io.now() - start >= SUBAGENT_DONE_WAIT_MS)
+      return;
+    if (!io.every)
+      return;
+    await new Promise((resolve) => {
+      const cancel = io.every?.(SUBAGENT_DONE_POLL_MS, () => {
+        cancel?.();
+        resolve();
+      });
+      if (!cancel)
+        resolve();
+    });
+  }
+  await io.removeFiles([marker]);
+}
 async function toolCallDone($, options, event, ran) {
   try {
     if (ran.deny !== undefined || ran.isError === true)
@@ -4453,6 +4478,8 @@ async function toolCallDone($, options, event, ran) {
     const base = preToolUsePayload(event, tool, await $.session.id(), await $.session.cwd());
     const result = ran.result;
     const payload = { ...base, hook_event_name: "PostToolUse", tool_response: isDict(result) ? result : { result } };
+    if (/^(Agent|Task)$/.test(tool))
+      await awaitSubagentDone(await createIo($, options), str(base.session_id), isDict(result) ? str(result.agentId) : "");
     const steps = postToolSteps(tool, payload);
     if (steps)
       await tellClaude($, await runSteps($, options, "PostToolUse", steps));
@@ -4477,7 +4504,12 @@ async function turnComplete($, options, event, memory) {
     const agentType = str(event.agentType);
     const payload = { ...base, hook_event_name: "SubagentStop", agent_id: agentId, ...agentType !== "" ? { agent_type: agentType } : {} };
     const mine = await runSteps($, options, "SubagentStop", subagentStopSteps(payload));
-    return mine.block === undefined ? undefined : tr((await createIo($, options)).lang)("nativeStop.subagentBlocked", { reason: firstLine(mine.block) });
+    const io = await createIo($, options);
+    await io.writeFile(subagentDonePath(io, str(base.session_id), agentId), `1
+`).catch(() => {
+      return;
+    });
+    return mine.block === undefined ? undefined : tr(io.lang)("nativeStop.subagentBlocked", { reason: firstLine(mine.block) });
   }
   const active = memory.stopContinued;
   memory.stopContinued = false;
