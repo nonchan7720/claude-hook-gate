@@ -1642,6 +1642,10 @@ function finishedSummary(entries, lang) {
 var summaryFile = (io, sessionId) => join(gateStatusDir(io), `summary.${sessionId}.txt`);
 var saveSummary = (io, sessionId, text) => io.writeFile(summaryFile(io, sessionId), text);
 var clearSummary = (io, sessionId) => io.removeFiles([summaryFile(io, sessionId)]);
+async function loadSummary(io, sessionId) {
+  const text = await io.readFile(summaryFile(io, sessionId));
+  return text === undefined || text === "" ? undefined : text;
+}
 
 // src/shared-run.ts
 var GRACE_MS = 5000;
@@ -3612,155 +3616,6 @@ async function feedbackPostEdit(io, payload) {
   }
 }
 
-// src/node-io.ts
-import { spawn } from "node:child_process";
-import * as fs from "node:fs";
-import { dirname as dirname2, join as join2 } from "node:path";
-var kindOf = (s) => s.isFile() ? "file" : s.isDirectory() ? "dir" : "other";
-function pickEnv(env) {
-  return {
-    HOME: env.HOME,
-    PATH: env.PATH,
-    CLAUDE_FEEDBACK_DIR: env.CLAUDE_FEEDBACK_DIR,
-    DOGWOOD_BIN: env.DOGWOOD_BIN,
-    TERM_PROGRAM: env.TERM_PROGRAM,
-    __CFBundleIdentifier: env.__CFBundleIdentifier,
-    FEEDBACK_GATE_LANG: env.FEEDBACK_GATE_LANG,
-    LC_ALL: env.LC_ALL,
-    LC_MESSAGES: env.LC_MESSAGES,
-    LANG: env.LANG
-  };
-}
-function makeNodeIo(init) {
-  const env = pickEnv(init.env);
-  const cwd = init.payloadCwd || process.cwd();
-  const stat = async (p) => {
-    try {
-      const s = fs.statSync(p);
-      return { kind: kindOf(s), size: s.size, mtimeMs: s.mtimeMs };
-    } catch {
-      return;
-    }
-  };
-  return {
-    env,
-    lang: resolveLang(env, init.language),
-    ...init.autoCount !== undefined ? { autoCount: init.autoCount } : {},
-    projectDir: init.env.CLAUDE_PROJECT_DIR || cwd,
-    cwd,
-    pluginRoot: init.env.CLAUDE_PLUGIN_ROOT || process.cwd(),
-    readFile: async (p) => {
-      try {
-        return fs.readFileSync(p, "utf8");
-      } catch {
-        return;
-      }
-    },
-    writeFile: async (p, text) => {
-      fs.mkdirSync(dirname2(p), { recursive: true });
-      fs.writeFileSync(p, text);
-    },
-    exists: async (p) => fs.existsSync(p),
-    stat,
-    list: async (p) => {
-      try {
-        return fs.readdirSync(p, { withFileTypes: true }).map((d) => {
-          const s = fs.lstatSync(join2(p, d.name));
-          return { name: d.name, kind: kindOf(s), mtimeMs: s.isFile() ? s.mtimeMs : 0 };
-        });
-      } catch {
-        return [];
-      }
-    },
-    isExecutable: async (p) => {
-      try {
-        fs.accessSync(p, fs.constants.X_OK);
-        return fs.statSync(p).isFile();
-      } catch {
-        return false;
-      }
-    },
-    removeFiles: async (paths) => {
-      for (const p of paths)
-        fs.rmSync(p, { force: true });
-    },
-    removeDir: async (p) => {
-      try {
-        fs.rmdirSync(p);
-      } catch {}
-    },
-    removeTree: async (p) => {
-      fs.rmSync(p, { recursive: true, force: true });
-    },
-    run: (argv, options) => runProcess(argv, options),
-    now: async () => Date.now(),
-    progress: () => {
-      return;
-    },
-    result: () => {
-      return;
-    },
-    redraw: () => {
-      return;
-    },
-    every: () => () => {
-      return;
-    }
-  };
-}
-function runProcess(argv, options = {}) {
-  return new Promise((resolve) => {
-    const [cmd, ...args] = argv;
-    if (!cmd)
-      return resolve({ exitCode: 1, stdout: "", stderr: "", timedOut: false, error: "empty argv" });
-    let child;
-    try {
-      const { CLAUDE_AGENT_ID: _inherited, ...inheritedEnv } = process.env;
-      child = spawn(cmd, args, {
-        cwd: options.cwd,
-        env: { ...inheritedEnv, ...options.env },
-        detached: true,
-        stdio: ["pipe", "pipe", "pipe"]
-      });
-    } catch (e) {
-      return resolve({ exitCode: 1, stdout: "", stderr: "", timedOut: false, error: String(e) });
-    }
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let settled = false;
-    const finish = (r) => {
-      if (settled)
-        return;
-      settled = true;
-      if (timer)
-        clearTimeout(timer);
-      resolve(r);
-    };
-    const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => {
-      timedOut = true;
-      try {
-        if (child.pid)
-          process.kill(-child.pid, "SIGKILL");
-      } catch {
-        child.kill("SIGKILL");
-      }
-    }, options.timeoutMs);
-    child.stdout?.on("data", (d) => {
-      stdout += d.toString("utf8");
-    });
-    child.stderr?.on("data", (d) => {
-      stderr += d.toString("utf8");
-    });
-    child.on("error", (e) => finish({ exitCode: 1, stdout, stderr, timedOut, error: e.message }));
-    child.on("close", (code) => finish({ exitCode: timedOut ? 1 : code ?? 1, stdout, stderr, timedOut }));
-    child.stdin?.on("error", () => {
-      return;
-    });
-    child.stdin?.end(options.stdin ?? "");
-  });
-}
-
 // src/outcome.ts
 var TEXT_CONTEXT_EVENTS = new Set(["UserPromptSubmit", "SessionStart"]);
 var parseJson = (text) => {
@@ -4022,10 +3877,245 @@ async function subagentReport(io, payload) {
 `);
 }
 
+// src/hooks.ts
+var str = (v) => typeof v === "string" ? v : "";
+var none = { outcome: {}, stderr: "" };
+var PROGRESS_DELAY_MS = 3000;
+async function runSteps(base, sessionId, event, steps, first = {}) {
+  let acc = first;
+  let stderr = "";
+  let shown = false;
+  let pending;
+  let cancelDelay;
+  const show = () => {
+    if (shown || pending === undefined)
+      return;
+    shown = true;
+    cancelDelay?.();
+    base.progress?.(pending);
+  };
+  const io = {
+    ...base,
+    progress: (text) => {
+      if (shown)
+        return base.progress?.(text);
+      pending = text;
+      if (text === undefined || cancelDelay)
+        return;
+      if (!base.every)
+        return show();
+      cancelDelay = base.every(PROGRESS_DELAY_MS, show);
+      if (shown)
+        cancelDelay();
+    }
+  };
+  try {
+    for (const step of steps) {
+      const ran = await step(io).catch(() => {
+        return;
+      });
+      if (!ran)
+        continue;
+      acc = merge(acc, toOutcome(event, ran));
+      if (ran.exitCode === 0)
+        stderr += ran.stderr;
+    }
+  } finally {
+    cancelDelay?.();
+    if (shown)
+      base.progress?.(await loadSummary(base, sessionId));
+  }
+  return { outcome: acc, stderr };
+}
+var sessionStart = (io, sessionId, payload) => runSteps(io, sessionId, "SessionStart", [(i) => resetGate(i, payload)]);
+async function userPromptSubmit(io, sessionId, options) {
+  const text = await loadRules(io, options.rulesFile);
+  return runSteps(io, sessionId, "UserPromptSubmit", [(i) => feedbackInject(i)], text === "" ? {} : { additionalContext: [text] });
+}
+var guardsTool = (options, tool) => options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool) || /^(Bash|Edit|Write|MultiEdit)$/.test(tool);
+function preToolUse(io, sessionId, options, payload) {
+  const tool = str(payload.tool_name);
+  if (!guardsTool(options, tool))
+    return Promise.resolve(none);
+  const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
+  const step = guardsAgents ? async (i) => agentLaunchGuard(payload, i.lang) : (i) => feedbackGuard(i, payload);
+  return runSteps(io, sessionId, "PreToolUse", tool === "Bash" ? [(i) => bashStarted(i, payload), step] : [step]);
+}
+function postToolUse(io, sessionId, payload) {
+  const tool = str(payload.tool_name);
+  const run = (steps) => runSteps(io, sessionId, "PostToolUse", steps);
+  if (/^(Agent|Task)$/.test(tool))
+    return run([(i) => subagentReport(i, payload)]);
+  if (tool === "Bash")
+    return run(bashChangeSteps(payload));
+  if (!/^(Write|Edit|MultiEdit)$/.test(tool))
+    return Promise.resolve(none);
+  return run([(i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, "rules", payload)]);
+}
+var notification2 = (io, sessionId, payload) => runSteps(io, sessionId, "Notification", [(i) => notification(i, "notify", payload)]);
+var stop = (io, sessionId, payload) => runSteps(io, sessionId, "Stop", [(i) => allStop(i, payload)]);
+function subagentStop(io, sessionId, payload) {
+  let gate;
+  let feedback;
+  return runSteps(io, sessionId, "SubagentStop", [
+    async (i) => gate = await stopTestGate(i, "checks", payload),
+    async (i) => feedback = await feedbackStopCheck(i, payload),
+    (i) => saveSubagentReport(i, payload, gate, feedback)
+  ]);
+}
+
+// src/node-io.ts
+import { spawn } from "node:child_process";
+import * as fs from "node:fs";
+import { dirname as dirname2, join as join2 } from "node:path";
+var kindOf = (s) => s.isFile() ? "file" : s.isDirectory() ? "dir" : "other";
+function pickEnv(env) {
+  return {
+    HOME: env.HOME,
+    PATH: env.PATH,
+    CLAUDE_FEEDBACK_DIR: env.CLAUDE_FEEDBACK_DIR,
+    DOGWOOD_BIN: env.DOGWOOD_BIN,
+    TERM_PROGRAM: env.TERM_PROGRAM,
+    __CFBundleIdentifier: env.__CFBundleIdentifier,
+    FEEDBACK_GATE_LANG: env.FEEDBACK_GATE_LANG,
+    LC_ALL: env.LC_ALL,
+    LC_MESSAGES: env.LC_MESSAGES,
+    LANG: env.LANG
+  };
+}
+function makeNodeIo(init) {
+  const env = pickEnv(init.env);
+  const cwd = init.payloadCwd || process.cwd();
+  const stat = async (p) => {
+    try {
+      const s = fs.statSync(p);
+      return { kind: kindOf(s), size: s.size, mtimeMs: s.mtimeMs };
+    } catch {
+      return;
+    }
+  };
+  return {
+    env,
+    lang: resolveLang(env, init.language),
+    ...init.autoCount !== undefined ? { autoCount: init.autoCount } : {},
+    projectDir: init.env.CLAUDE_PROJECT_DIR || cwd,
+    cwd,
+    pluginRoot: init.env.CLAUDE_PLUGIN_ROOT || process.cwd(),
+    readFile: async (p) => {
+      try {
+        return fs.readFileSync(p, "utf8");
+      } catch {
+        return;
+      }
+    },
+    writeFile: async (p, text) => {
+      fs.mkdirSync(dirname2(p), { recursive: true });
+      fs.writeFileSync(p, text);
+    },
+    exists: async (p) => fs.existsSync(p),
+    stat,
+    list: async (p) => {
+      try {
+        return fs.readdirSync(p, { withFileTypes: true }).map((d) => {
+          const s = fs.lstatSync(join2(p, d.name));
+          return { name: d.name, kind: kindOf(s), mtimeMs: s.isFile() ? s.mtimeMs : 0 };
+        });
+      } catch {
+        return [];
+      }
+    },
+    isExecutable: async (p) => {
+      try {
+        fs.accessSync(p, fs.constants.X_OK);
+        return fs.statSync(p).isFile();
+      } catch {
+        return false;
+      }
+    },
+    removeFiles: async (paths) => {
+      for (const p of paths)
+        fs.rmSync(p, { force: true });
+    },
+    removeDir: async (p) => {
+      try {
+        fs.rmdirSync(p);
+      } catch {}
+    },
+    removeTree: async (p) => {
+      fs.rmSync(p, { recursive: true, force: true });
+    },
+    run: (argv, options) => runProcess(argv, options),
+    now: async () => Date.now(),
+    progress: () => {
+      return;
+    },
+    result: () => {
+      return;
+    },
+    redraw: () => {
+      return;
+    },
+    every: () => () => {
+      return;
+    }
+  };
+}
+function runProcess(argv, options = {}) {
+  return new Promise((resolve) => {
+    const [cmd, ...args] = argv;
+    if (!cmd)
+      return resolve({ exitCode: 1, stdout: "", stderr: "", timedOut: false, error: "empty argv" });
+    let child;
+    try {
+      const { CLAUDE_AGENT_ID: _inherited, ...inheritedEnv } = process.env;
+      child = spawn(cmd, args, {
+        cwd: options.cwd,
+        env: { ...inheritedEnv, ...options.env },
+        detached: true,
+        stdio: ["pipe", "pipe", "pipe"]
+      });
+    } catch (e) {
+      return resolve({ exitCode: 1, stdout: "", stderr: "", timedOut: false, error: String(e) });
+    }
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let settled = false;
+    const finish = (r) => {
+      if (settled)
+        return;
+      settled = true;
+      if (timer)
+        clearTimeout(timer);
+      resolve(r);
+    };
+    const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => {
+      timedOut = true;
+      try {
+        if (child.pid)
+          process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL");
+      }
+    }, options.timeoutMs);
+    child.stdout?.on("data", (d) => {
+      stdout += d.toString("utf8");
+    });
+    child.stderr?.on("data", (d) => {
+      stderr += d.toString("utf8");
+    });
+    child.on("error", (e) => finish({ exitCode: 1, stdout, stderr, timedOut, error: e.message }));
+    child.on("close", (code) => finish({ exitCode: timedOut ? 1 : code ?? 1, stdout, stderr, timedOut }));
+    child.stdin?.on("error", () => {
+      return;
+    });
+    child.stdin?.end(options.stdin ?? "");
+  });
+}
+
 // src/cli.ts
 var EVENTS2 = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SubagentStop"];
-var str = (v) => typeof v === "string" ? v : "";
-var nothing = { exitCode: 0, stdout: "", stderr: "" };
+var str2 = (v) => typeof v === "string" ? v : "";
 function optionsFromEnv(env) {
   const opt = (key) => env[`CLAUDE_PLUGIN_OPTION_${key}`];
   return {
@@ -4035,64 +4125,21 @@ function optionsFromEnv(env) {
     rulesFile: opt("rulesFile")
   };
 }
-async function runSteps(io, event, steps, first = {}) {
-  let acc = first;
-  let stderr = "";
-  for (const step of steps) {
-    const ran = await step(io).catch(() => {
-      return;
-    });
-    if (!ran)
-      continue;
-    acc = merge(acc, toOutcome(event, ran));
-    if (ran.exitCode === 0)
-      stderr += ran.stderr;
-  }
-  return outcomeToClassic(event, acc, stderr);
-}
 async function runHook(event, payload, env) {
   const options = optionsFromEnv(env);
-  const io = makeNodeIo({ env, payloadCwd: str(payload.cwd), language: str(options.language), autoCount: options.autoCount !== false });
-  const tool = str(payload.tool_name);
-  switch (event) {
-    case "SessionStart":
-      return runSteps(io, event, [(i) => resetGate(i, payload)]);
-    case "UserPromptSubmit": {
-      const text = await loadRules(io, options.rulesFile);
-      return runSteps(io, event, [(i) => feedbackInject(i)], text === "" ? {} : { additionalContext: [text] });
-    }
-    case "PreToolUse": {
-      const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
-      if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool))
-        return nothing;
-      const step = guardsAgents ? async (i) => agentLaunchGuard(payload, i.lang) : (i) => feedbackGuard(i, payload);
-      return runSteps(io, event, tool === "Bash" ? [(i) => bashStarted(i, payload), step] : [step]);
-    }
-    case "PostToolUse":
-      if (/^(Agent|Task)$/.test(tool))
-        return runSteps(io, event, [(i) => subagentReport(i, payload)]);
-      if (tool === "Bash")
-        return runSteps(io, event, bashChangeSteps(payload));
-      if (!/^(Write|Edit|MultiEdit)$/.test(tool))
-        return nothing;
-      return runSteps(io, event, [(i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, "rules", payload)]);
-    case "Notification":
-      await notification(io, "notify", payload).catch(() => {
-        return;
-      });
-      return nothing;
-    case "Stop":
-      return runSteps(io, event, [(i) => allStop(i, payload)]);
-    case "SubagentStop": {
-      let gate;
-      let feedback;
-      return runSteps(io, event, [
-        async (i) => gate = await stopTestGate(i, "checks", payload),
-        async (i) => feedback = await feedbackStopCheck(i, payload),
-        (i) => saveSubagentReport(i, payload, gate, feedback)
-      ]);
-    }
-  }
+  const io = makeNodeIo({ env, payloadCwd: str2(payload.cwd), language: str2(options.language), autoCount: options.autoCount !== false });
+  const sessionId = str2(payload.session_id) || "unknown";
+  const run = {
+    SessionStart: () => sessionStart(io, sessionId, payload),
+    UserPromptSubmit: () => userPromptSubmit(io, sessionId, options),
+    PreToolUse: () => preToolUse(io, sessionId, options, payload),
+    PostToolUse: () => postToolUse(io, sessionId, payload),
+    Notification: () => notification2(io, sessionId, payload),
+    Stop: () => stop(io, sessionId, payload),
+    SubagentStop: () => subagentStop(io, sessionId, payload)
+  }[event];
+  const { outcome, stderr } = await run();
+  return outcomeToClassic(event, outcome, stderr);
 }
 async function main5() {
   const event = EVENTS2.find((e) => e === process.argv[2]);

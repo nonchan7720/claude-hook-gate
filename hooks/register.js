@@ -1,3 +1,224 @@
+// src/path.ts
+var isAbsolute = (p) => p.startsWith("/");
+function join(...parts) {
+  let out = "";
+  for (const part of parts) {
+    if (part.startsWith("/"))
+      out = part;
+    else if (out === "" || out.endsWith("/"))
+      out += part;
+    else
+      out += `/${part}`;
+  }
+  return out;
+}
+function normpath(p) {
+  if (p === "")
+    return ".";
+  const abs = p.startsWith("/");
+  const out = [];
+  for (const seg of p.split("/")) {
+    if (seg === "" || seg === ".")
+      continue;
+    if (seg === "..") {
+      const last = out[out.length - 1];
+      if (last !== undefined && last !== "..")
+        out.pop();
+      else if (!abs)
+        out.push("..");
+    } else {
+      out.push(seg);
+    }
+  }
+  const joined = out.join("/");
+  if (abs)
+    return `/${joined}`;
+  return joined === "" ? "." : joined;
+}
+function dirname(p) {
+  const i = p.lastIndexOf("/") + 1;
+  const head = p.slice(0, i);
+  if (head !== "" && head !== "/".repeat(head.length))
+    return head.replace(/\/+$/, "");
+  return head;
+}
+function basename(p) {
+  return p.slice(p.lastIndexOf("/") + 1);
+}
+function splitext(p) {
+  const base = basename(p);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || /^\.+$/.test(base.slice(0, dot)))
+    return [p, ""];
+  const cut = p.length - base.length + dot;
+  return [p.slice(0, cut), p.slice(cut)];
+}
+function relpath(path, start) {
+  const a = normpath(path).split("/").filter(Boolean);
+  const b = normpath(start).split("/").filter(Boolean);
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i])
+    i++;
+  const rel = [...b.slice(i).map(() => ".."), ...a.slice(i)];
+  return rel.length === 0 ? "." : rel.join("/");
+}
+function expandUser(p, home) {
+  if (!home)
+    return p;
+  if (p === "~")
+    return home;
+  if (p.startsWith("~/"))
+    return home.replace(/\/+$/, "") + p.slice(1);
+  return p;
+}
+
+// src/glob.ts
+function splitTopCommas(s) {
+  const parts = [];
+  let depth = 0;
+  let cur = "";
+  for (const c of s) {
+    if (c === "{") {
+      depth++;
+      cur += c;
+    } else if (c === "}") {
+      depth--;
+      cur += c;
+    } else if (c === "," && depth === 0) {
+      parts.push(cur);
+      cur = "";
+    } else {
+      cur += c;
+    }
+  }
+  parts.push(cur);
+  return parts;
+}
+function expandBraces(s) {
+  let depth = 0;
+  let start = -1;
+  for (let i = 0;i < s.length; i++) {
+    const c = s.charAt(i);
+    if (c === "{") {
+      if (depth === 0)
+        start = i;
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0) {
+        const pre = s.slice(0, start);
+        const inner = s.slice(start + 1, i);
+        const post = s.slice(i + 1);
+        const out = [];
+        for (const part of splitTopCommas(inner))
+          out.push(...expandBraces(pre + part + post));
+        return out;
+      }
+    }
+  }
+  return [s];
+}
+var escapeRegex = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+function globToRegex(pat) {
+  const n = pat.length;
+  let i = 0;
+  let out = "^";
+  while (i < n) {
+    const c = pat.charAt(i);
+    if (c === "*") {
+      let j = i;
+      while (j < n && pat.charAt(j) === "*")
+        j++;
+      if (j - i >= 2) {
+        if (j < n && pat.charAt(j) === "/") {
+          out += "(?:.*/)?";
+          i = j + 1;
+        } else {
+          out += ".*";
+          i = j;
+        }
+      } else {
+        out += "[^/]*";
+        i++;
+      }
+    } else if (c === "?") {
+      out += "[^/]";
+      i++;
+    } else if (c === "[") {
+      let j = i + 1;
+      if (j < n && "!^".includes(pat.charAt(j)))
+        j++;
+      if (j < n && pat.charAt(j) === "]")
+        j++;
+      while (j < n && pat.charAt(j) !== "]")
+        j++;
+      let cls = pat.slice(i, j + 1);
+      if (cls.startsWith("[!"))
+        cls = `[^${cls.slice(2)}`;
+      out += cls;
+      i = j + 1;
+    } else {
+      out += escapeRegex(c);
+      i++;
+    }
+  }
+  return `${out}$`;
+}
+function matchPatterns(pats) {
+  const pairs = [];
+  for (const pat of pats) {
+    for (const ex of expandBraces(pat))
+      pairs.push([ex, new RegExp(globToRegex(ex))]);
+  }
+  return pairs;
+}
+var compileGlobs = (patterns) => matchPatterns(patterns).map(([, rx]) => rx);
+function asList(v) {
+  if (typeof v === "string")
+    return [v];
+  if (Array.isArray(v))
+    return v;
+  return [];
+}
+var hasMagic = (seg) => /[*?[]/.test(seg);
+async function globExists(io, pattern) {
+  const abs = pattern.startsWith("/");
+  const segs = pattern.split("/").filter((s) => s !== "");
+  return walk(io, abs ? "/" : "", segs, 0);
+}
+async function walk(io, dir, segs, i) {
+  if (i >= segs.length)
+    return dir === "" ? true : io.exists(dir);
+  const seg = segs.at(i) ?? "";
+  const here = dir === "" ? "." : dir;
+  if (seg === "**") {
+    if (i === segs.length - 1)
+      return (await io.stat(here))?.kind === "dir";
+    if (await walk(io, dir, segs, i + 1))
+      return true;
+    for (const e of await io.list(here)) {
+      if (e.name.startsWith("."))
+        continue;
+      const sub = join(dir, e.name);
+      if ((await io.stat(sub))?.kind === "dir" && await walk(io, sub, segs, i))
+        return true;
+    }
+    return false;
+  }
+  if (!hasMagic(seg))
+    return walk(io, join(dir, seg), segs, i + 1);
+  const rx = new RegExp(globToRegex(seg));
+  for (const e of await io.list(here)) {
+    if (e.name.startsWith(".") && !seg.startsWith("."))
+      continue;
+    if (!rx.test(e.name))
+      continue;
+    if (await walk(io, join(dir, e.name), segs, i + 1))
+      return true;
+  }
+  return false;
+}
+
 // src/i18n.ts
 import i18next from "./vendor/i18next.js";
 import { parse } from "./vendor/yaml.js";
@@ -331,8 +552,21 @@ function resolveLang(env, configured) {
   return "en";
 }
 
-// src/io.ts
-var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
+// src/load-yaml.ts
+import { parse as parse2 } from "./vendor/yaml.js";
+var PY_TRUE = /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON)$/;
+var PY_FALSE = /^(?:no|No|NO|false|False|FALSE|off|Off|OFF)$/;
+var pyBool = (original) => ({
+  ...original,
+  test: /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON|no|No|NO|false|False|FALSE|off|Off|OFF)$/,
+  resolve: (str) => PY_TRUE.test(str) ? true : PY_FALSE.test(str) ? false : str
+});
+var parseYaml = (text) => parse2(text, {
+  schema: "yaml-1.1",
+  uniqueKeys: false,
+  logLevel: "error",
+  customTags: (tags) => tags.map((t) => typeof t === "object" && ("tag" in t) && t.tag === "tag:yaml.org,2002:bool" ? pyBool(t) : t)
+});
 
 // src/pyutil.ts
 function truthy(v) {
@@ -429,282 +663,6 @@ function jqStr(v) {
   return typeof v === "string" ? v : JSON.stringify(v);
 }
 var isDict = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-
-// src/agent-launch-guard.ts
-var ASK_AGENT_TYPES = ["code-implementer"];
-var ALLOW_RECIPIENTS = ["git-operator"];
-var ask = (reason) => ok(`${JSON.stringify({
-  hookSpecificOutput: {
-    hookEventName: "PreToolUse",
-    permissionDecision: "ask",
-    permissionDecisionReason: reason
-  }
-})}
-`);
-function agentLaunchGuard(payload, lang) {
-  const t = tr(lang);
-  const tool = jqStr(payload.tool_name);
-  const input = isDict(payload.tool_input) ? payload.tool_input : {};
-  if (tool === "Agent") {
-    const agentType = jqStr(input.subagent_type);
-    if (agentType === "")
-      return ok();
-    if (ASK_AGENT_TYPES.includes(agentType)) {
-      return ask(`${t("launch.promptTo", { agentType })}
-
-${jqStr(input.prompt)}
-
-${t("launch.checklist")}`);
-    }
-  } else if (tool === "SendMessage") {
-    const recipient = jqStr(input.to);
-    if (!ALLOW_RECIPIENTS.includes(recipient)) {
-      return ask(`${t("launch.messageTo", { recipient: recipient || t("launch.unknownRecipient") })}
-
-${jqStr(input.message)}
-
-${t("launch.checklist")}`);
-    }
-  }
-  return ok();
-}
-
-// src/path.ts
-var isAbsolute = (p) => p.startsWith("/");
-function join(...parts) {
-  let out = "";
-  for (const part of parts) {
-    if (part.startsWith("/"))
-      out = part;
-    else if (out === "" || out.endsWith("/"))
-      out += part;
-    else
-      out += `/${part}`;
-  }
-  return out;
-}
-function normpath(p) {
-  if (p === "")
-    return ".";
-  const abs = p.startsWith("/");
-  const out = [];
-  for (const seg of p.split("/")) {
-    if (seg === "" || seg === ".")
-      continue;
-    if (seg === "..") {
-      const last = out[out.length - 1];
-      if (last !== undefined && last !== "..")
-        out.pop();
-      else if (!abs)
-        out.push("..");
-    } else {
-      out.push(seg);
-    }
-  }
-  const joined = out.join("/");
-  if (abs)
-    return `/${joined}`;
-  return joined === "" ? "." : joined;
-}
-function dirname(p) {
-  const i = p.lastIndexOf("/") + 1;
-  const head = p.slice(0, i);
-  if (head !== "" && head !== "/".repeat(head.length))
-    return head.replace(/\/+$/, "");
-  return head;
-}
-function basename(p) {
-  return p.slice(p.lastIndexOf("/") + 1);
-}
-function splitext(p) {
-  const base = basename(p);
-  const dot = base.lastIndexOf(".");
-  if (dot <= 0 || /^\.+$/.test(base.slice(0, dot)))
-    return [p, ""];
-  const cut = p.length - base.length + dot;
-  return [p.slice(0, cut), p.slice(cut)];
-}
-function relpath(path, start) {
-  const a = normpath(path).split("/").filter(Boolean);
-  const b = normpath(start).split("/").filter(Boolean);
-  let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i])
-    i++;
-  const rel = [...b.slice(i).map(() => ".."), ...a.slice(i)];
-  return rel.length === 0 ? "." : rel.join("/");
-}
-function expandUser(p, home) {
-  if (!home)
-    return p;
-  if (p === "~")
-    return home;
-  if (p.startsWith("~/"))
-    return home.replace(/\/+$/, "") + p.slice(1);
-  return p;
-}
-
-// src/glob.ts
-function splitTopCommas(s) {
-  const parts = [];
-  let depth = 0;
-  let cur = "";
-  for (const c of s) {
-    if (c === "{") {
-      depth++;
-      cur += c;
-    } else if (c === "}") {
-      depth--;
-      cur += c;
-    } else if (c === "," && depth === 0) {
-      parts.push(cur);
-      cur = "";
-    } else {
-      cur += c;
-    }
-  }
-  parts.push(cur);
-  return parts;
-}
-function expandBraces(s) {
-  let depth = 0;
-  let start = -1;
-  for (let i = 0;i < s.length; i++) {
-    const c = s.charAt(i);
-    if (c === "{") {
-      if (depth === 0)
-        start = i;
-      depth++;
-    } else if (c === "}") {
-      depth--;
-      if (depth === 0) {
-        const pre = s.slice(0, start);
-        const inner = s.slice(start + 1, i);
-        const post = s.slice(i + 1);
-        const out = [];
-        for (const part of splitTopCommas(inner))
-          out.push(...expandBraces(pre + part + post));
-        return out;
-      }
-    }
-  }
-  return [s];
-}
-var escapeRegex = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-function globToRegex(pat) {
-  const n = pat.length;
-  let i = 0;
-  let out = "^";
-  while (i < n) {
-    const c = pat.charAt(i);
-    if (c === "*") {
-      let j = i;
-      while (j < n && pat.charAt(j) === "*")
-        j++;
-      if (j - i >= 2) {
-        if (j < n && pat.charAt(j) === "/") {
-          out += "(?:.*/)?";
-          i = j + 1;
-        } else {
-          out += ".*";
-          i = j;
-        }
-      } else {
-        out += "[^/]*";
-        i++;
-      }
-    } else if (c === "?") {
-      out += "[^/]";
-      i++;
-    } else if (c === "[") {
-      let j = i + 1;
-      if (j < n && "!^".includes(pat.charAt(j)))
-        j++;
-      if (j < n && pat.charAt(j) === "]")
-        j++;
-      while (j < n && pat.charAt(j) !== "]")
-        j++;
-      let cls = pat.slice(i, j + 1);
-      if (cls.startsWith("[!"))
-        cls = `[^${cls.slice(2)}`;
-      out += cls;
-      i = j + 1;
-    } else {
-      out += escapeRegex(c);
-      i++;
-    }
-  }
-  return `${out}$`;
-}
-function matchPatterns(pats) {
-  const pairs = [];
-  for (const pat of pats) {
-    for (const ex of expandBraces(pat))
-      pairs.push([ex, new RegExp(globToRegex(ex))]);
-  }
-  return pairs;
-}
-var compileGlobs = (patterns) => matchPatterns(patterns).map(([, rx]) => rx);
-function asList(v) {
-  if (typeof v === "string")
-    return [v];
-  if (Array.isArray(v))
-    return v;
-  return [];
-}
-var hasMagic = (seg) => /[*?[]/.test(seg);
-async function globExists(io, pattern) {
-  const abs = pattern.startsWith("/");
-  const segs = pattern.split("/").filter((s) => s !== "");
-  return walk(io, abs ? "/" : "", segs, 0);
-}
-async function walk(io, dir, segs, i) {
-  if (i >= segs.length)
-    return dir === "" ? true : io.exists(dir);
-  const seg = segs.at(i) ?? "";
-  const here = dir === "" ? "." : dir;
-  if (seg === "**") {
-    if (i === segs.length - 1)
-      return (await io.stat(here))?.kind === "dir";
-    if (await walk(io, dir, segs, i + 1))
-      return true;
-    for (const e of await io.list(here)) {
-      if (e.name.startsWith("."))
-        continue;
-      const sub = join(dir, e.name);
-      if ((await io.stat(sub))?.kind === "dir" && await walk(io, sub, segs, i))
-        return true;
-    }
-    return false;
-  }
-  if (!hasMagic(seg))
-    return walk(io, join(dir, seg), segs, i + 1);
-  const rx = new RegExp(globToRegex(seg));
-  for (const e of await io.list(here)) {
-    if (e.name.startsWith(".") && !seg.startsWith("."))
-      continue;
-    if (!rx.test(e.name))
-      continue;
-    if (await walk(io, join(dir, e.name), segs, i + 1))
-      return true;
-  }
-  return false;
-}
-
-// src/load-yaml.ts
-import { parse as parse2 } from "./vendor/yaml.js";
-var PY_TRUE = /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON)$/;
-var PY_FALSE = /^(?:no|No|NO|false|False|FALSE|off|Off|OFF)$/;
-var pyBool = (original) => ({
-  ...original,
-  test: /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON|no|No|NO|false|False|FALSE|off|Off|OFF)$/,
-  resolve: (str) => PY_TRUE.test(str) ? true : PY_FALSE.test(str) ? false : str
-});
-var parseYaml = (text) => parse2(text, {
-  schema: "yaml-1.1",
-  uniqueKeys: false,
-  logLevel: "error",
-  customTags: (tags) => tags.map((t) => typeof t === "object" && ("tag" in t) && t.tag === "tag:yaml.org,2002:bool" ? pyBool(t) : t)
-});
 
 // src/roots.ts
 function relativize(p, projectDir) {
@@ -1373,6 +1331,442 @@ async function evalStopCheck(io, rules, projectDir, changedFiles) {
   });
 }
 
+// src/correct.ts
+var HOUR_MS = 3600000;
+var DAY_MS2 = 86400000;
+var DEFAULT_WINDOW_MS = 30 * DAY_MS2;
+var DEFAULT_MIN = 2;
+function parseCorrectArgs(args) {
+  const out = { window: DEFAULT_WINDOW_MS, apply: false, min: DEFAULT_MIN };
+  const tokens = args.split(/\s+/).filter((t) => t !== "");
+  for (let i = 0;i < tokens.length; i++) {
+    const token = tokens[i] ?? "";
+    const eq = token.indexOf("=");
+    const key = eq >= 0 ? token.slice(0, eq) : token;
+    if (key === "apply" && eq < 0) {
+      out.apply = true;
+    } else if (key === "--window" || key === "--min") {
+      const inline = eq >= 0;
+      const value = inline ? token.slice(eq + 1) : tokens[i + 1] ?? "";
+      const parsed = key === "--window" ? parseWindow(value) : parseMin(value);
+      if (parsed === undefined)
+        continue;
+      if (key === "--window")
+        out.window = parsed;
+      else
+        out.min = parsed;
+      if (!inline)
+        i++;
+    }
+  }
+  return out;
+}
+function parseWindow(v) {
+  const m = /^(\d+)([dh])$/.exec(v);
+  if (!m)
+    return;
+  const n = Number(m[1]);
+  return n > 0 ? n * (m[2] === "d" ? DAY_MS2 : HOUR_MS) : undefined;
+}
+function parseMin(v) {
+  if (!/^\d+$/.test(v))
+    return;
+  const n = Number(v);
+  return n > 0 ? n : undefined;
+}
+function windowLabel(ms) {
+  return ms % DAY_MS2 === 0 ? `${ms / DAY_MS2}d` : `${Math.round(ms / HOUR_MS)}h`;
+}
+async function readViolations(io) {
+  const text = await io.readFile(violationsLogPath(io));
+  if (text === undefined)
+    return [];
+  const entries = [];
+  for (const line of text.split(`
+`)) {
+    if (line.trim() === "")
+      continue;
+    let data;
+    try {
+      data = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof data !== "object" || data === null || Array.isArray(data))
+      continue;
+    const d = data;
+    if (typeof d.rule !== "string" || d.rule === "")
+      continue;
+    entries.push({
+      ts: typeof d.ts === "string" ? d.ts : "",
+      rule: d.rule,
+      count: typeof d.count === "number" ? d.count : 0,
+      severity: typeof d.severity === "string" ? d.severity : "",
+      event: typeof d.event === "string" ? d.event : "",
+      detail: typeof d.detail === "string" ? d.detail : ""
+    });
+  }
+  return entries;
+}
+var bump = (rec, key) => {
+  if (key !== "")
+    rec[key] = (rec[key] ?? 0) + 1;
+};
+function aggregateViolations(entries, now, windowMs) {
+  const stats = new Map;
+  const details = new Map;
+  const since = now - windowMs;
+  for (const e of entries) {
+    let s = stats.get(e.rule);
+    if (!s) {
+      s = { total: 0, inWindow: 0, bySeverity: {}, byEvent: {} };
+      stats.set(e.rule, s);
+    }
+    s.total++;
+    const t = Date.parse(e.ts);
+    if (e.ts !== "" && (s.lastTs === undefined || t > Date.parse(s.lastTs)))
+      s.lastTs = e.ts;
+    if (Number.isNaN(t) || t < since)
+      continue;
+    s.inWindow++;
+    bump(s.bySeverity, e.severity);
+    bump(s.byEvent, e.event);
+    if (e.detail !== "") {
+      const d = details.get(e.rule) ?? new Map;
+      d.set(e.detail, (d.get(e.detail) ?? 0) + 1);
+      details.set(e.rule, d);
+    }
+  }
+  for (const [rule, d] of details) {
+    let top;
+    let best = 0;
+    for (const [detail, n] of d) {
+      if (n > best) {
+        best = n;
+        top = detail;
+      }
+    }
+    const s = stats.get(rule);
+    if (s && top !== undefined)
+      s.topDetail = top;
+  }
+  return stats;
+}
+var enforceTemplate = (lang) => tr(lang)("correct.enforceTemplate");
+var oneLine = (s, max = 60) => {
+  const flat = s.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+};
+var countsText = (rec) => Object.entries(rec).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(", ");
+function inactiveReason(rule, now, lang) {
+  const t = tr(lang);
+  if (rule.expires !== undefined && now > rule.expires)
+    return t("correct.expired", { date: new Date(rule.expires).toISOString().slice(0, 10) });
+  const parts = [];
+  if (rule.projects.length > 0)
+    parts.push("projects");
+  if (rule.whenExists.length > 0)
+    parts.push("when_exists");
+  return t("correct.notMatching", { what: parts.join(" / ") || t("correct.conditions") });
+}
+function buildProposals(rules, inactive, stats, opts, broken = []) {
+  const bumps = [];
+  const enforces = [];
+  const stales = [];
+  const expireds = [];
+  const label = windowLabel(opts.window);
+  const t = tr(opts.lang);
+  for (const rule of rules) {
+    const s = stats.get(rule.name);
+    const n = s?.inWindow ?? 0;
+    if (n >= opts.min && s) {
+      const top = s.topDetail ? t("correct.topDetail", { detail: oneLine(s.topDetail) }) : "";
+      if (rule.count < 3) {
+        bumps.push({
+          kind: "bump",
+          rule: rule.name,
+          path: rule.path,
+          from: rule.count,
+          to: 3,
+          n,
+          reason: t("correct.bumpToConfirmed", { window: label, n, counts: countsText(s.bySeverity), top })
+        });
+      } else if (rule.count < 5) {
+        const strong = (s.bySeverity.ask ?? 0) + (s.bySeverity.block ?? 0);
+        if (strong >= opts.min) {
+          bumps.push({
+            kind: "bump",
+            rule: rule.name,
+            path: rule.path,
+            from: rule.count,
+            to: 5,
+            n,
+            reason: t("correct.bumpToDeny", { window: label, strong, counts: countsText(s.bySeverity), top })
+          });
+        }
+      }
+    }
+    if (rule.count >= 3 && rule.enforce.length === 0) {
+      enforces.push({
+        kind: "enforce",
+        rule: rule.name,
+        path: rule.path,
+        reason: t("correct.noEnforce", { count: rule.count }),
+        template: enforceTemplate(opts.lang)
+      });
+    }
+    if (rule.count >= 3 && rule.enforce.length > 0 && n === 0 && (s?.total ?? 0) === 0) {
+      stales.push({
+        kind: "stale",
+        rule: rule.name,
+        path: rule.path,
+        reason: t("correct.stale")
+      });
+    }
+  }
+  for (const rule of inactive) {
+    expireds.push({
+      kind: "expired",
+      rule: rule.name,
+      path: rule.path,
+      reason: t("correct.expiredAction", { reason: inactiveReason(rule, opts.now, opts.lang) })
+    });
+  }
+  const brokens = broken.map((b) => ({
+    kind: "broken",
+    rule: basename(b.path).replace(/\.md$/, ""),
+    path: b.path,
+    reason: t("correct.broken", { reason: b.reason })
+  }));
+  bumps.sort((a, b) => b.to - a.to || b.n - a.n);
+  return [...brokens, ...bumps.map(({ n: _n, ...p }) => p), ...enforces, ...stales, ...expireds];
+}
+function formatReport(proposals, stats, opts, rulesCount, applied) {
+  const t = tr(opts.lang);
+  let violations = 0;
+  for (const s of stats.values())
+    violations += s.inWindow;
+  const lines = [t("correct.reportHeader", { window: windowLabel(opts.window), rules: rulesCount, violations })];
+  if (proposals.length === 0) {
+    lines.push(t("correct.noProposals"));
+  } else {
+    for (const p of proposals) {
+      const head = p.kind === "bump" ? `${p.rule}: count ${p.from} → ${p.to}` : p.rule;
+      lines.push(`- [${p.kind}] ${head}`, `    ${p.reason}`, `    ${p.path}`);
+    }
+  }
+  if (opts.apply) {
+    lines.push(t(!applied || applied.length === 0 ? "correct.applyNone" : "correct.applyDone"));
+    for (const a of applied ?? [])
+      lines.push(`  - ${a.path} (count ${a.from} → ${a.to})`);
+  } else {
+    lines.push(t("correct.applyHint"));
+  }
+  return lines.join(`
+`);
+}
+async function applyCountBumps(io, proposals) {
+  const applied = [];
+  for (const p of proposals) {
+    if (p.kind !== "bump")
+      continue;
+    const content = await io.readFile(p.path);
+    if (content === undefined || readCountLine(content) !== p.from)
+      continue;
+    const next = replaceCountLine(content, p.to);
+    if (next === undefined)
+      continue;
+    await writeFileAtomic(io, p.path, next);
+    applied.push({ path: p.path, from: p.from, to: p.to });
+  }
+  return applied;
+}
+function buildContext(proposals, applied, lang) {
+  if (proposals.length === 0)
+    return [];
+  const t = tr(lang);
+  const lines = [t("correct.context")];
+  if (applied.length > 0)
+    lines.push(t("correct.contextApplied", { list: applied.map((a) => `${a.path} (${a.from} → ${a.to})`).join(", ") }));
+  return [lines.join(`
+`)];
+}
+async function listInactive(io, active) {
+  const dirs = [...new Set([feedbackDir(io), projectFeedbackDir(io)])];
+  const activeNames = new Set(active.map((r) => r.name));
+  const seen = new Set;
+  const out = [];
+  for (const dir of dirs) {
+    for (const rule of await listRules(io, dir)) {
+      if (seen.has(rule.path))
+        continue;
+      seen.add(rule.path);
+      if (activeNames.has(rule.name))
+        continue;
+      if (!await isRuleActive(io, rule))
+        out.push(rule);
+    }
+  }
+  return out;
+}
+async function correctCommand(io, args) {
+  try {
+    const parsed = parseCorrectArgs(args);
+    const now = await io.now();
+    const { rules, broken } = await scanRules(io);
+    for (const b of broken)
+      await logError(io, "rules", b.reason, b.path);
+    const inactive = await listInactive(io, rules);
+    const stats = aggregateViolations(await readViolations(io), now, parsed.window);
+    const opts = { window: parsed.window, min: parsed.min, now, lang: io.lang };
+    const proposals = buildProposals(rules, inactive, stats, opts, broken);
+    const applied = parsed.apply ? await applyCountBumps(io, proposals) : undefined;
+    return {
+      text: formatReport(proposals, stats, { window: parsed.window, apply: parsed.apply, lang: io.lang }, rules.length, applied),
+      context: buildContext(proposals, applied ?? [], io.lang)
+    };
+  } catch (e) {
+    await logError(io, "correct", e instanceof Error ? e.message : String(e));
+    return { text: `[correct] internal error: ${e instanceof Error ? e.message : String(e)}`, context: [] };
+  }
+}
+
+// src/engine-io.ts
+var errorText2 = (e) => e instanceof Error ? e.message : String(e);
+async function readEnv($) {
+  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG] = await Promise.all([
+    $.env.get("HOME"),
+    $.env.get("PATH"),
+    $.env.get("CLAUDE_FEEDBACK_DIR"),
+    $.env.get("DOGWOOD_BIN"),
+    $.env.get("TERM_PROGRAM"),
+    $.env.get("__CFBundleIdentifier"),
+    $.env.get("FEEDBACK_GATE_LANG"),
+    $.env.get("LC_ALL"),
+    $.env.get("LC_MESSAGES"),
+    $.env.get("LANG")
+  ]);
+  return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG };
+}
+async function createIo($, options = {}) {
+  const [env, projectDir, cwd] = await Promise.all([readEnv($), $.session.root(), $.session.cwd()]);
+  const lang = resolveLang(env, options.language);
+  const stat = async (path) => {
+    try {
+      const s = await $.fs.stat(path);
+      return { kind: s.kind, size: s.size, mtimeMs: s.mtimeMs };
+    } catch {
+      return;
+    }
+  };
+  const run = async (argv, options = {}) => {
+    try {
+      const r = await $.process.run(argv, {
+        ...options.cwd !== undefined ? { cwd: options.cwd } : {},
+        ...options.env !== undefined ? { env: options.env } : {},
+        ...options.stdin !== undefined ? { stdin: options.stdin } : {},
+        ...options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}
+      });
+      return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, timedOut: false };
+    } catch (e) {
+      return { exitCode: 1, stdout: "", stderr: "", timedOut: false, error: errorText2(e) };
+    }
+  };
+  const existing = async (paths) => {
+    const found = [];
+    for (const p of paths)
+      if (await $.fs.exists(p).catch(() => false))
+        found.push(p);
+    return found;
+  };
+  return {
+    env,
+    lang,
+    autoCount: options.autoCount !== false,
+    projectDir,
+    cwd,
+    pluginRoot: $.plugin.root,
+    readFile: (path) => $.fs.read(path).then(String, () => {
+      return;
+    }),
+    writeFile: (path, text) => $.fs.write(path, text),
+    exists: (path) => $.fs.exists(path).catch(() => false),
+    stat,
+    list: async (path) => {
+      try {
+        return (await $.fs.list(path)).map((e) => ({ name: e.name, kind: e.kind, mtimeMs: e.mtimeMs }));
+      } catch {
+        return [];
+      }
+    },
+    isExecutable: async (path) => (await stat(path))?.kind === "file",
+    removeFiles: async (paths) => {
+      const found = await existing(paths);
+      if (found.length > 0)
+        await run(["rm", "-f", "--", ...found]);
+    },
+    removeDir: async (path) => {
+      if ((await stat(path))?.kind === "dir")
+        await run(["rmdir", "--", path]);
+    },
+    removeTree: async (path) => {
+      if (await $.fs.exists(path).catch(() => false))
+        await run(["rm", "-rf", "--", path]);
+    },
+    run,
+    now: () => $.clock.now(),
+    progress: (text) => $.ui.status(text),
+    result: (text) => $.ui.status(text),
+    redraw: () => $.ui.invalidate("ui.render"),
+    every: (ms, fn) => {
+      const timer = $.clock.every(ms, fn);
+      return () => timer.cancel();
+    }
+  };
+}
+
+// src/io.ts
+var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
+
+// src/agent-launch-guard.ts
+var ASK_AGENT_TYPES = ["code-implementer"];
+var ALLOW_RECIPIENTS = ["git-operator"];
+var ask = (reason) => ok(`${JSON.stringify({
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "ask",
+    permissionDecisionReason: reason
+  }
+})}
+`);
+function agentLaunchGuard(payload, lang) {
+  const t = tr(lang);
+  const tool = jqStr(payload.tool_name);
+  const input = isDict(payload.tool_input) ? payload.tool_input : {};
+  if (tool === "Agent") {
+    const agentType = jqStr(input.subagent_type);
+    if (agentType === "")
+      return ok();
+    if (ASK_AGENT_TYPES.includes(agentType)) {
+      return ask(`${t("launch.promptTo", { agentType })}
+
+${jqStr(input.prompt)}
+
+${t("launch.checklist")}`);
+    }
+  } else if (tool === "SendMessage") {
+    const recipient = jqStr(input.to);
+    if (!ALLOW_RECIPIENTS.includes(recipient)) {
+      return ask(`${t("launch.messageTo", { recipient: recipient || t("launch.unknownRecipient") })}
+
+${jqStr(input.message)}
+
+${t("launch.checklist")}`);
+    }
+  }
+  return ok();
+}
+
 // src/feedback-stop-check.ts
 var MAX_ATTEMPTS = 3;
 var attemptsPath = (projectDir, sessionId, agentId) => join(projectDir, ".claude", ".gate-status", `feedback_gate_attempts.${agentId ? `${sessionId}--${agentId}` : sessionId}.txt`);
@@ -1959,7 +2353,7 @@ function computePerFileRoots(mode, patternPairs, matched) {
   return roots;
 }
 var slug = (cmd) => cmd.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[_.]+|[_.]+$/g, "").slice(0, 80) || "cmd";
-function oneLine(cmd) {
+function oneLine2(cmd) {
   const lines = String(cmd).split(/\r?\n/).map((l) => l.trim()).filter((l) => l !== "");
   let text = lines[0] ?? "";
   if (lines.length > 1)
@@ -2188,7 +2582,7 @@ class Gate {
     }
   }
   note(kind, label, cmd, detail = "") {
-    this.status.push(`[gate] ${kind}: ${label} $ ${oneLine(cmd)}${detail ? ` ${detail}` : ""}`);
+    this.status.push(`[gate] ${kind}: ${label} $ ${oneLine2(cmd)}${detail ? ` ${detail}` : ""}`);
   }
   statusBlock(fallback = "") {
     return this.status.length > 0 ? this.status.join(`
@@ -2504,7 +2898,7 @@ ${this.t("gate.sharedResult", { logpath: r.outcome.logpath })}
     this.ranThisRun.add(Gate.deferKey({ root: scope.root, cwd, cmd }));
     await this.undeferCmd(scope.root, cwd, cmd);
     const { out, ok, timedOut, logpath } = ran;
-    this.executedLabels.push(name || oneLine(cmd));
+    this.executedLabels.push(name || oneLine2(cmd));
     this.note(ok ? "ok" : "fail", label, cmd, `(${((await this.io.now() - started) / 1000).toFixed(1)}s)`);
     const detail = [chunk.lines[0]];
     if (out) {
@@ -3572,400 +3966,6 @@ function bashChangeSteps(payload) {
   ];
 }
 
-// src/correct.ts
-var HOUR_MS = 3600000;
-var DAY_MS2 = 86400000;
-var DEFAULT_WINDOW_MS = 30 * DAY_MS2;
-var DEFAULT_MIN = 2;
-function parseCorrectArgs(args) {
-  const out = { window: DEFAULT_WINDOW_MS, apply: false, min: DEFAULT_MIN };
-  const tokens = args.split(/\s+/).filter((t) => t !== "");
-  for (let i = 0;i < tokens.length; i++) {
-    const token = tokens[i] ?? "";
-    const eq = token.indexOf("=");
-    const key = eq >= 0 ? token.slice(0, eq) : token;
-    if (key === "apply" && eq < 0) {
-      out.apply = true;
-    } else if (key === "--window" || key === "--min") {
-      const inline = eq >= 0;
-      const value = inline ? token.slice(eq + 1) : tokens[i + 1] ?? "";
-      const parsed = key === "--window" ? parseWindow(value) : parseMin(value);
-      if (parsed === undefined)
-        continue;
-      if (key === "--window")
-        out.window = parsed;
-      else
-        out.min = parsed;
-      if (!inline)
-        i++;
-    }
-  }
-  return out;
-}
-function parseWindow(v) {
-  const m = /^(\d+)([dh])$/.exec(v);
-  if (!m)
-    return;
-  const n = Number(m[1]);
-  return n > 0 ? n * (m[2] === "d" ? DAY_MS2 : HOUR_MS) : undefined;
-}
-function parseMin(v) {
-  if (!/^\d+$/.test(v))
-    return;
-  const n = Number(v);
-  return n > 0 ? n : undefined;
-}
-function windowLabel(ms) {
-  return ms % DAY_MS2 === 0 ? `${ms / DAY_MS2}d` : `${Math.round(ms / HOUR_MS)}h`;
-}
-async function readViolations(io) {
-  const text = await io.readFile(violationsLogPath(io));
-  if (text === undefined)
-    return [];
-  const entries = [];
-  for (const line of text.split(`
-`)) {
-    if (line.trim() === "")
-      continue;
-    let data;
-    try {
-      data = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (typeof data !== "object" || data === null || Array.isArray(data))
-      continue;
-    const d = data;
-    if (typeof d.rule !== "string" || d.rule === "")
-      continue;
-    entries.push({
-      ts: typeof d.ts === "string" ? d.ts : "",
-      rule: d.rule,
-      count: typeof d.count === "number" ? d.count : 0,
-      severity: typeof d.severity === "string" ? d.severity : "",
-      event: typeof d.event === "string" ? d.event : "",
-      detail: typeof d.detail === "string" ? d.detail : ""
-    });
-  }
-  return entries;
-}
-var bump = (rec, key) => {
-  if (key !== "")
-    rec[key] = (rec[key] ?? 0) + 1;
-};
-function aggregateViolations(entries, now, windowMs) {
-  const stats = new Map;
-  const details = new Map;
-  const since = now - windowMs;
-  for (const e of entries) {
-    let s = stats.get(e.rule);
-    if (!s) {
-      s = { total: 0, inWindow: 0, bySeverity: {}, byEvent: {} };
-      stats.set(e.rule, s);
-    }
-    s.total++;
-    const t = Date.parse(e.ts);
-    if (e.ts !== "" && (s.lastTs === undefined || t > Date.parse(s.lastTs)))
-      s.lastTs = e.ts;
-    if (Number.isNaN(t) || t < since)
-      continue;
-    s.inWindow++;
-    bump(s.bySeverity, e.severity);
-    bump(s.byEvent, e.event);
-    if (e.detail !== "") {
-      const d = details.get(e.rule) ?? new Map;
-      d.set(e.detail, (d.get(e.detail) ?? 0) + 1);
-      details.set(e.rule, d);
-    }
-  }
-  for (const [rule, d] of details) {
-    let top;
-    let best = 0;
-    for (const [detail, n] of d) {
-      if (n > best) {
-        best = n;
-        top = detail;
-      }
-    }
-    const s = stats.get(rule);
-    if (s && top !== undefined)
-      s.topDetail = top;
-  }
-  return stats;
-}
-var enforceTemplate = (lang) => tr(lang)("correct.enforceTemplate");
-var oneLine2 = (s, max = 60) => {
-  const flat = s.replace(/\s+/g, " ").trim();
-  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
-};
-var countsText = (rec) => Object.entries(rec).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(", ");
-function inactiveReason(rule, now, lang) {
-  const t = tr(lang);
-  if (rule.expires !== undefined && now > rule.expires)
-    return t("correct.expired", { date: new Date(rule.expires).toISOString().slice(0, 10) });
-  const parts = [];
-  if (rule.projects.length > 0)
-    parts.push("projects");
-  if (rule.whenExists.length > 0)
-    parts.push("when_exists");
-  return t("correct.notMatching", { what: parts.join(" / ") || t("correct.conditions") });
-}
-function buildProposals(rules, inactive, stats, opts, broken = []) {
-  const bumps = [];
-  const enforces = [];
-  const stales = [];
-  const expireds = [];
-  const label = windowLabel(opts.window);
-  const t = tr(opts.lang);
-  for (const rule of rules) {
-    const s = stats.get(rule.name);
-    const n = s?.inWindow ?? 0;
-    if (n >= opts.min && s) {
-      const top = s.topDetail ? t("correct.topDetail", { detail: oneLine2(s.topDetail) }) : "";
-      if (rule.count < 3) {
-        bumps.push({
-          kind: "bump",
-          rule: rule.name,
-          path: rule.path,
-          from: rule.count,
-          to: 3,
-          n,
-          reason: t("correct.bumpToConfirmed", { window: label, n, counts: countsText(s.bySeverity), top })
-        });
-      } else if (rule.count < 5) {
-        const strong = (s.bySeverity.ask ?? 0) + (s.bySeverity.block ?? 0);
-        if (strong >= opts.min) {
-          bumps.push({
-            kind: "bump",
-            rule: rule.name,
-            path: rule.path,
-            from: rule.count,
-            to: 5,
-            n,
-            reason: t("correct.bumpToDeny", { window: label, strong, counts: countsText(s.bySeverity), top })
-          });
-        }
-      }
-    }
-    if (rule.count >= 3 && rule.enforce.length === 0) {
-      enforces.push({
-        kind: "enforce",
-        rule: rule.name,
-        path: rule.path,
-        reason: t("correct.noEnforce", { count: rule.count }),
-        template: enforceTemplate(opts.lang)
-      });
-    }
-    if (rule.count >= 3 && rule.enforce.length > 0 && n === 0 && (s?.total ?? 0) === 0) {
-      stales.push({
-        kind: "stale",
-        rule: rule.name,
-        path: rule.path,
-        reason: t("correct.stale")
-      });
-    }
-  }
-  for (const rule of inactive) {
-    expireds.push({
-      kind: "expired",
-      rule: rule.name,
-      path: rule.path,
-      reason: t("correct.expiredAction", { reason: inactiveReason(rule, opts.now, opts.lang) })
-    });
-  }
-  const brokens = broken.map((b) => ({
-    kind: "broken",
-    rule: basename(b.path).replace(/\.md$/, ""),
-    path: b.path,
-    reason: t("correct.broken", { reason: b.reason })
-  }));
-  bumps.sort((a, b) => b.to - a.to || b.n - a.n);
-  return [...brokens, ...bumps.map(({ n: _n, ...p }) => p), ...enforces, ...stales, ...expireds];
-}
-function formatReport(proposals, stats, opts, rulesCount, applied) {
-  const t = tr(opts.lang);
-  let violations = 0;
-  for (const s of stats.values())
-    violations += s.inWindow;
-  const lines = [t("correct.reportHeader", { window: windowLabel(opts.window), rules: rulesCount, violations })];
-  if (proposals.length === 0) {
-    lines.push(t("correct.noProposals"));
-  } else {
-    for (const p of proposals) {
-      const head = p.kind === "bump" ? `${p.rule}: count ${p.from} → ${p.to}` : p.rule;
-      lines.push(`- [${p.kind}] ${head}`, `    ${p.reason}`, `    ${p.path}`);
-    }
-  }
-  if (opts.apply) {
-    lines.push(t(!applied || applied.length === 0 ? "correct.applyNone" : "correct.applyDone"));
-    for (const a of applied ?? [])
-      lines.push(`  - ${a.path} (count ${a.from} → ${a.to})`);
-  } else {
-    lines.push(t("correct.applyHint"));
-  }
-  return lines.join(`
-`);
-}
-async function applyCountBumps(io, proposals) {
-  const applied = [];
-  for (const p of proposals) {
-    if (p.kind !== "bump")
-      continue;
-    const content = await io.readFile(p.path);
-    if (content === undefined || readCountLine(content) !== p.from)
-      continue;
-    const next = replaceCountLine(content, p.to);
-    if (next === undefined)
-      continue;
-    await writeFileAtomic(io, p.path, next);
-    applied.push({ path: p.path, from: p.from, to: p.to });
-  }
-  return applied;
-}
-function buildContext(proposals, applied, lang) {
-  if (proposals.length === 0)
-    return [];
-  const t = tr(lang);
-  const lines = [t("correct.context")];
-  if (applied.length > 0)
-    lines.push(t("correct.contextApplied", { list: applied.map((a) => `${a.path} (${a.from} → ${a.to})`).join(", ") }));
-  return [lines.join(`
-`)];
-}
-async function listInactive(io, active) {
-  const dirs = [...new Set([feedbackDir(io), projectFeedbackDir(io)])];
-  const activeNames = new Set(active.map((r) => r.name));
-  const seen = new Set;
-  const out = [];
-  for (const dir of dirs) {
-    for (const rule of await listRules(io, dir)) {
-      if (seen.has(rule.path))
-        continue;
-      seen.add(rule.path);
-      if (activeNames.has(rule.name))
-        continue;
-      if (!await isRuleActive(io, rule))
-        out.push(rule);
-    }
-  }
-  return out;
-}
-async function correctCommand(io, args) {
-  try {
-    const parsed = parseCorrectArgs(args);
-    const now = await io.now();
-    const { rules, broken } = await scanRules(io);
-    for (const b of broken)
-      await logError(io, "rules", b.reason, b.path);
-    const inactive = await listInactive(io, rules);
-    const stats = aggregateViolations(await readViolations(io), now, parsed.window);
-    const opts = { window: parsed.window, min: parsed.min, now, lang: io.lang };
-    const proposals = buildProposals(rules, inactive, stats, opts, broken);
-    const applied = parsed.apply ? await applyCountBumps(io, proposals) : undefined;
-    return {
-      text: formatReport(proposals, stats, { window: parsed.window, apply: parsed.apply, lang: io.lang }, rules.length, applied),
-      context: buildContext(proposals, applied ?? [], io.lang)
-    };
-  } catch (e) {
-    await logError(io, "correct", e instanceof Error ? e.message : String(e));
-    return { text: `[correct] internal error: ${e instanceof Error ? e.message : String(e)}`, context: [] };
-  }
-}
-
-// src/engine-io.ts
-var errorText2 = (e) => e instanceof Error ? e.message : String(e);
-async function readEnv($) {
-  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG] = await Promise.all([
-    $.env.get("HOME"),
-    $.env.get("PATH"),
-    $.env.get("CLAUDE_FEEDBACK_DIR"),
-    $.env.get("DOGWOOD_BIN"),
-    $.env.get("TERM_PROGRAM"),
-    $.env.get("__CFBundleIdentifier"),
-    $.env.get("FEEDBACK_GATE_LANG"),
-    $.env.get("LC_ALL"),
-    $.env.get("LC_MESSAGES"),
-    $.env.get("LANG")
-  ]);
-  return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG };
-}
-async function createIo($, options = {}) {
-  const [env, projectDir, cwd] = await Promise.all([readEnv($), $.session.root(), $.session.cwd()]);
-  const lang = resolveLang(env, options.language);
-  const stat = async (path) => {
-    try {
-      const s = await $.fs.stat(path);
-      return { kind: s.kind, size: s.size, mtimeMs: s.mtimeMs };
-    } catch {
-      return;
-    }
-  };
-  const run = async (argv, options = {}) => {
-    try {
-      const r = await $.process.run(argv, {
-        ...options.cwd !== undefined ? { cwd: options.cwd } : {},
-        ...options.env !== undefined ? { env: options.env } : {},
-        ...options.stdin !== undefined ? { stdin: options.stdin } : {},
-        ...options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}
-      });
-      return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr, timedOut: false };
-    } catch (e) {
-      return { exitCode: 1, stdout: "", stderr: "", timedOut: false, error: errorText2(e) };
-    }
-  };
-  const existing = async (paths) => {
-    const found = [];
-    for (const p of paths)
-      if (await $.fs.exists(p).catch(() => false))
-        found.push(p);
-    return found;
-  };
-  return {
-    env,
-    lang,
-    autoCount: options.autoCount !== false,
-    projectDir,
-    cwd,
-    pluginRoot: $.plugin.root,
-    readFile: (path) => $.fs.read(path).then(String, () => {
-      return;
-    }),
-    writeFile: (path, text) => $.fs.write(path, text),
-    exists: (path) => $.fs.exists(path).catch(() => false),
-    stat,
-    list: async (path) => {
-      try {
-        return (await $.fs.list(path)).map((e) => ({ name: e.name, kind: e.kind, mtimeMs: e.mtimeMs }));
-      } catch {
-        return [];
-      }
-    },
-    isExecutable: async (path) => (await stat(path))?.kind === "file",
-    removeFiles: async (paths) => {
-      const found = await existing(paths);
-      if (found.length > 0)
-        await run(["rm", "-f", "--", ...found]);
-    },
-    removeDir: async (path) => {
-      if ((await stat(path))?.kind === "dir")
-        await run(["rmdir", "--", path]);
-    },
-    removeTree: async (path) => {
-      if (await $.fs.exists(path).catch(() => false))
-        await run(["rm", "-rf", "--", path]);
-    },
-    run,
-    now: () => $.clock.now(),
-    progress: (text) => $.ui.status(text),
-    result: (text) => $.ui.status(text),
-    redraw: () => $.ui.invalidate("ui.render"),
-    every: (ms, fn) => {
-      const timer = $.clock.every(ms, fn);
-      return () => timer.cancel();
-    }
-  };
-}
-
 // src/feedback-inject.ts
 async function formatFull(io, rule) {
   const lines = [tr(io.lang)("inject.ruleTitle", { name: rule.name, count: rule.count }), rule.description];
@@ -4284,13 +4284,13 @@ async function subagentReport(io, payload) {
 `);
 }
 
-// src/register.ts
-var PROGRESS_DELAY_MS = 3000;
+// src/hooks.ts
 var str = (v) => typeof v === "string" ? v : "";
-async function runSteps($, options, event, steps) {
-  let acc = {};
-  const base = await createIo($, options);
-  const sessionId = await $.session.id();
+var none = { outcome: {}, stderr: "" };
+var PROGRESS_DELAY_MS = 3000;
+async function runSteps(base, sessionId, event, steps, first = {}) {
+  let acc = first;
+  let stderr = "";
   let shown = false;
   let pending;
   let cancelDelay;
@@ -4321,16 +4321,58 @@ async function runSteps($, options, event, steps) {
       const ran = await step(io).catch(() => {
         return;
       });
-      if (ran)
-        acc = merge(acc, toOutcome(event, ran));
+      if (!ran)
+        continue;
+      acc = merge(acc, toOutcome(event, ran));
+      if (ran.exitCode === 0)
+        stderr += ran.stderr;
     }
   } finally {
     cancelDelay?.();
     if (shown)
       base.progress?.(await loadSummary(base, sessionId));
   }
-  return acc;
+  return { outcome: acc, stderr };
 }
+var sessionStart = (io, sessionId, payload) => runSteps(io, sessionId, "SessionStart", [(i) => resetGate(i, payload)]);
+async function userPromptSubmit(io, sessionId, options) {
+  const text = await loadRules(io, options.rulesFile);
+  return runSteps(io, sessionId, "UserPromptSubmit", [(i) => feedbackInject(i)], text === "" ? {} : { additionalContext: [text] });
+}
+var guardsTool = (options, tool) => options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool) || /^(Bash|Edit|Write|MultiEdit)$/.test(tool);
+function preToolUse(io, sessionId, options, payload) {
+  const tool = str(payload.tool_name);
+  if (!guardsTool(options, tool))
+    return Promise.resolve(none);
+  const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
+  const step = guardsAgents ? async (i) => agentLaunchGuard(payload, i.lang) : (i) => feedbackGuard(i, payload);
+  return runSteps(io, sessionId, "PreToolUse", tool === "Bash" ? [(i) => bashStarted(i, payload), step] : [step]);
+}
+function postToolUse(io, sessionId, payload) {
+  const tool = str(payload.tool_name);
+  const run = (steps) => runSteps(io, sessionId, "PostToolUse", steps);
+  if (/^(Agent|Task)$/.test(tool))
+    return run([(i) => subagentReport(i, payload)]);
+  if (tool === "Bash")
+    return run(bashChangeSteps(payload));
+  if (!/^(Write|Edit|MultiEdit)$/.test(tool))
+    return Promise.resolve(none);
+  return run([(i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, "rules", payload)]);
+}
+var notification2 = (io, sessionId, payload) => runSteps(io, sessionId, "Notification", [(i) => notification(i, "notify", payload)]);
+var stop = (io, sessionId, payload) => runSteps(io, sessionId, "Stop", [(i) => allStop(i, payload)]);
+function subagentStop(io, sessionId, payload) {
+  let gate;
+  let feedback;
+  return runSteps(io, sessionId, "SubagentStop", [
+    async (i) => gate = await stopTestGate(i, "checks", payload),
+    async (i) => feedback = await feedbackStopCheck(i, payload),
+    (i) => saveSubagentReport(i, payload, gate, feedback)
+  ]);
+}
+
+// src/register.ts
+var str2 = (v) => typeof v === "string" ? v : "";
 async function withNext(next, e, mine) {
   const rest = await next(e);
   return merge(mine, rest);
@@ -4346,6 +4388,9 @@ async function markClassic($, options, refresh = false) {
       await io.writeFile(marker, `1
 `);
   } catch {}
+}
+async function engineContext($, options) {
+  return { io: await createIo($, options), sessionId: await $.session.id() };
 }
 function preToolUsePayload(event, tool, sessionId, cwd) {
   const { tool: _tool, tool_use_id, agentId, ...toolInput } = event;
@@ -4376,28 +4421,22 @@ export const register = (on, options) => {
   on("command.run", { command: "correct" }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? "")));
   on("classic.SessionStart", async ($, e, next) => {
     await markClassic($, options);
-    const mine = await runSteps($, options, "SessionStart", [(io) => resetGate(io, e)]);
-    return withNext(next, e, mine);
+    const { io, sessionId } = await engineContext($, options);
+    return withNext(next, e, (await sessionStart(io, sessionId, e)).outcome);
   });
   on("classic.UserPromptSubmit", async ($, e, next) => {
     await markClassic($, options);
-    const mine = {};
-    const text = await createIo($, options).then((io) => loadRules(io, options.rulesFile));
-    if (text !== "")
-      mine.additionalContext = [text];
-    const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io)]);
-    return withNext(next, e, merge(mine, inject));
+    const { io, sessionId } = await engineContext($, options);
+    return withNext(next, e, (await userPromptSubmit(io, sessionId, options)).outcome);
   });
   on("classic.PreToolUse", async ($guard, guardEvent, guardNext) => {
     await markClassic($guard, options);
-    const tool = str(guardEvent.tool);
-    const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
-    if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool))
+    const tool = str2(guardEvent.tool);
+    if (!guardsTool(options, tool))
       return guardNext(guardEvent);
-    const payload = preToolUsePayload(guardEvent, tool, await $guard.session.id(), await $guard.session.cwd());
-    const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
-    const steps = tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
-    const mine = await runSteps($guard, options, "PreToolUse", steps);
+    const { io, sessionId } = await engineContext($guard, options);
+    const payload = preToolUsePayload(guardEvent, tool, sessionId, await $guard.session.cwd());
+    const mine = (await preToolUse(io, sessionId, options, payload)).outcome;
     if (mine.deny !== undefined)
       return { deny: mine.deny };
     if (mine.ask !== undefined)
@@ -4406,43 +4445,24 @@ export const register = (on, options) => {
   });
   on("classic.PostToolUse", async ($, e, next) => {
     await markClassic($, options);
-    if (/^(Agent|Task)$/.test(str(e.tool_name))) {
-      const mine = await runSteps($, options, "PostToolUse", [(io) => subagentReport(io, e)]);
-      return withNext(next, e, mine);
-    }
-    if (str(e.tool_name) === "Bash") {
-      const mine = await runSteps($, options, "PostToolUse", bashChangeSteps(e));
-      return withNext(next, e, mine);
-    }
-    if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name)))
-      return next(e);
-    const mine = await runSteps($, options, "PostToolUse", [
-      (io) => recordChanges(io, e),
-      (io) => feedbackPostEdit(io, e),
-      (io) => stopTestGate(io, "rules", e)
-    ]);
-    return withNext(next, e, mine);
+    const { io, sessionId } = await engineContext($, options);
+    return withNext(next, e, (await postToolUse(io, sessionId, e)).outcome);
   });
   on("classic.Notification", async ($, e, next) => {
     await markClassic($, options, true);
-    await runSteps($, options, "Notification", [(io) => notification(io, "notify", e)]);
+    const { io, sessionId } = await engineContext($, options);
+    await notification2(io, sessionId, e);
     return next(e);
   });
   on("classic.Stop", async ($, e, next) => {
     await markClassic($, options);
-    const mine = await runSteps($, options, "Stop", [(io) => allStop(io, e)]);
-    return withNext(next, e, mine);
+    const { io, sessionId } = await engineContext($, options);
+    return withNext(next, e, (await stop(io, sessionId, e)).outcome);
   });
   on("classic.SubagentStop", async ($, e, next) => {
     await markClassic($, options);
-    let gate;
-    let feedback;
-    const mine = await runSteps($, options, "SubagentStop", [
-      async (io) => gate = await stopTestGate(io, "checks", e),
-      async (io) => feedback = await feedbackStopCheck(io, e),
-      (io) => saveSubagentReport(io, e, gate, feedback)
-    ]);
-    return withNext(next, e, mine);
+    const { io, sessionId } = await engineContext($, options);
+    return withNext(next, e, (await subagentStop(io, sessionId, e)).outcome);
   });
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (e.props.hasSurvey)
