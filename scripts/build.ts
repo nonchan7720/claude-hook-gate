@@ -49,9 +49,13 @@ let code = await build({
   minify: false,
 })
 // 外に出した依存の import を hooks/vendor/ への相対パスに差し替える。
-for (const name of Object.keys(vendors)) {
-  code = code.replace(new RegExp(`(\\bfrom\\s*)(['"])${name}\\2`, 'g'), `$1$2./vendor/${name}.js$2`)
+const useVendor = (text: string): string => {
+  for (const name of Object.keys(vendors)) {
+    text = text.replace(new RegExp(`(\\bfrom\\s*)(['"])${name}\\2`, 'g'), `$1$2./vendor/${name}.js$2`)
+  }
+  return text
 }
+code = useVendor(code)
 code = code.replace(/^var register = /m, 'export const register = ').replace(/\nexport \{\n {2}register\n\};\n?$/, '\n')
 if (!/^export const register = /m.test(code)) throw new Error('register export not found in bundle')
 // ディレクトリの検査は、権限を判定するフック（classic.PreToolUse）の引数と同じ名前が、そのフックの外を含めて
@@ -90,6 +94,14 @@ if (!/^export const register = /m.test(code)) throw new Error('register export n
 }
 outputs[path.join(hooksDir, 'register.js')] = code
 
+// settings hook の CLI（hooks/cli.js）。`node hooks/cli.js <Event>` で動く普通の Node プログラムで、mod の実行環境の制約
+// （node: の import 禁止など）は受けない。yaml / i18next は register.js と同じ hooks/vendor/*.js を相対 import で共有する。
+const cliCode = useVendor(
+  await build({ entrypoints: [path.join(root, 'src', 'cli.ts')], target: 'node', external: ['claude-code', ...Object.keys(vendors)], minify: false }),
+)
+const cliFile = path.join(hooksDir, 'cli.js')
+outputs[cliFile] = cliCode
+
 // 見えない文字（改行・タブ以外の制御文字、半角スペース以外の空白、書式文字）を \uXXXX に書き換える。
 // ディレクトリの検査は、文字列やコメントに生の見えない文字があると保留にする（yaml の "\x85" / "\xa0" など）。
 // minify 後のこれらは文字列リテラルの中にしか現れないので、エスケープしても意味は変わらない。書き換え後に構文を確かめる。
@@ -110,9 +122,12 @@ for (const [file, text] of Object.entries(outputs)) {
 
 // 実行環境が解決できない import が残っていないことを確かめる（claude-code と相対パス以外は不可）。
 const forbidden = [/(^|[;}\s])import\s*[^'"(]*from\s*['"](?!\.{1,2}\/|claude-code['"])/m, /(^|[;}\s])import\s*['"]/m, /\bimport\(/, /['"]node:/, /\brequire\(/]
+// cli.js は Node で動くので node: の組み込みモジュールは import してよい（それ以外の外部の import や動的な読み込みは不可）。
+const forbiddenCli = [/(^|[;}\s])import\s*[^'"(]*from\s*['"](?!\.{1,2}\/|node:)/m, /(^|[;}\s])import\s*['"]/m, /\bimport\(/, /\brequire\(/]
 for (const [file, text] of Object.entries(outputs)) {
   const rel = path.relative(root, file)
-  for (const rx of forbidden) if (rx.test(text)) throw new Error(`${rel} contains a forbidden pattern: ${rx}`)
+  const rules = file === cliFile ? forbiddenCli : forbidden
+  for (const rx of rules) if (rx.test(text)) throw new Error(`${rel} contains a forbidden pattern: ${rx}`)
   const bytes = new TextEncoder().encode(text).length
   if (bytes >= maxBytes) throw new Error(`${rel} is ${(bytes / 1024).toFixed(0)} KiB; keep each file under ${maxBytes / 1024} KiB`)
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { merge, toOutcome } from '../src/outcome.ts'
+import { merge, type Outcome, outcomeToClassic, toOutcome } from '../src/outcome.ts'
 
 const ran = (exitCode: number, stdout = '', stderr = '') => ({ exitCode, stdout, stderr })
 
@@ -39,5 +39,56 @@ describe('merge', () => {
       additionalContext: ['a', 'b'],
     })
     expect(merge({}, {})).toEqual({})
+  })
+})
+
+describe('outcomeToClassic', () => {
+  const json = (event: string, o: Outcome) => JSON.parse(outcomeToClassic(event, o).stdout)
+
+  test('PreToolUse: deny / ask become permissionDecision, deny first, allow is never returned', () => {
+    expect(json('PreToolUse', { deny: 'no' })).toEqual({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'no' },
+    })
+    expect(json('PreToolUse', { ask: 'sure?' }).hookSpecificOutput.permissionDecision).toBe('ask')
+    expect(json('PreToolUse', { ask: 'a', deny: 'd' }).hookSpecificOutput.permissionDecision).toBe('deny')
+    expect(outcomeToClassic('PreToolUse', { allow: true }).stdout).toBe('')
+  })
+
+  test('PostToolUse: block becomes decision block, context goes to hookSpecificOutput', () => {
+    expect(json('PostToolUse', { block: 'fix', additionalContext: ['a', 'b'] })).toEqual({
+      decision: 'block',
+      reason: 'fix',
+      hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: 'a\n\nb' },
+    })
+  })
+
+  test('UserPromptSubmit / SessionStart: additionalContext, and decision block for a block', () => {
+    expect(json('UserPromptSubmit', { additionalContext: ['x'] })).toEqual({
+      hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: 'x' },
+    })
+    expect(json('UserPromptSubmit', { block: 'no' }).decision).toBe('block')
+    expect(json('SessionStart', { additionalContext: ['x'] }).hookSpecificOutput.hookEventName).toBe('SessionStart')
+  })
+
+  test('Stop / SubagentStop: decision block and reason only; continue false keeps its stopReason', () => {
+    expect(json('Stop', { block: 'r', additionalContext: ['ignored'] })).toEqual({ decision: 'block', reason: 'r' })
+    expect(json('SubagentStop', { preventContinuation: true, stopReason: 's' })).toEqual({ continue: false, stopReason: 's' })
+  })
+
+  test('nothing to say prints nothing; stderr is passed through', () => {
+    expect(outcomeToClassic('Stop', {})).toEqual({ exitCode: 0, stdout: '', stderr: '' })
+    expect(outcomeToClassic('Stop', {}, 'warn\n').stderr).toBe('warn\n')
+  })
+
+  test('the Outcome survives a round trip through toOutcome', () => {
+    const cases: Array<[string, Outcome]> = [
+      ['PreToolUse', { deny: 'd' }],
+      ['PreToolUse', { ask: 'a' }],
+      ['PostToolUse', { block: 'b', additionalContext: ['c'] }],
+      ['UserPromptSubmit', { additionalContext: ['c'] }],
+      ['Stop', { block: 'b' }],
+      ['SubagentStop', { block: 'b', preventContinuation: true, stopReason: 's' }],
+    ]
+    for (const [event, o] of cases) expect(toOutcome(event, outcomeToClassic(event, o))).toEqual(o)
   })
 })

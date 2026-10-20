@@ -70,3 +70,31 @@ export const merge = (first: Outcome, second: Outcome): Outcome => {
 }
 
 export const decided = (o: Outcome) => o.block !== undefined || o.deny !== undefined || o.ask !== undefined || o.allow === true
+
+// Outcome を classic コマンド hook の出力（終了コード 0 + stdout の JSON）へ戻す。settings hook の CLI（src/cli.ts）が使う。
+// toOutcome の逆変換で、exit 2 の block / deny は JSON の判定（decision: block / permissionDecision: deny）で同じ効果になる
+// （exit 2 は stderr を理由にするだけで、stdout の JSON は無視される規約なので、情報は reason に移す）。
+// stderr は warn など正常終了時の出力で、そのまま stderr へ出す。
+export const outcomeToClassic = (event: string, outcome: Outcome, stderr = ''): ScriptResult => {
+  const json: Dict = {}
+  const specific: Dict = {}
+  const context = (outcome.additionalContext ?? []).filter((c) => c.trim() !== '').join('\n\n')
+  if (event === 'PreToolUse') {
+    // 返す判定は deny / ask だけ（allow は返さず、ユーザーの判断に委ねる）。deny が先。
+    const decision = outcome.deny !== undefined ? 'deny' : outcome.ask !== undefined ? 'ask' : undefined
+    if (decision !== undefined) {
+      specific.permissionDecision = decision
+      specific.permissionDecisionReason = outcome.deny ?? outcome.ask ?? ''
+    }
+  } else if (outcome.block !== undefined) {
+    json.decision = 'block'
+    json.reason = outcome.block
+  }
+  if (context !== '' && event !== 'Stop' && event !== 'SubagentStop' && event !== 'Notification') specific.additionalContext = context
+  if (Object.keys(specific).length > 0) json.hookSpecificOutput = { hookEventName: event, ...specific }
+  if (outcome.preventContinuation) {
+    json.continue = false
+    if (outcome.stopReason !== undefined) json.stopReason = outcome.stopReason
+  }
+  return { exitCode: 0, stdout: Object.keys(json).length > 0 ? `${JSON.stringify(json)}\n` : '', stderr }
+}

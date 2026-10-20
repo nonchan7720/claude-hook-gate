@@ -25,7 +25,6 @@ const setup = (
   const runs: string[][] = []
   const statuses: (string | undefined)[] = []
   const invalidations: string[] = []
-  const submitted: Array<{ text: string; context?: string[] }> = []
   // 既定の言語は日本語（期待値は日本語で書かれている）。LANG を差し替えるか options.language で切り替える。
   mock.env(on, { HOME: '/h', LANG: 'ja_JP.UTF-8', ...env })
   on('session.id', () => ({ value: 'sess-1' }))
@@ -61,15 +60,6 @@ const setup = (
     const r = run(e.argv)
     return { value: { ...r, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  // ネイティブ側が Claude へ返す口（エンジン役）。
-  on('prompt.submit', (_$: unknown, e: { text: string; context?: string[] }) => {
-    submitted.push(e)
-    return { text: e.text, value: undefined }
-  })
-  on('turn.complete', () => ({ text: 'engine' }))
-  on('session.end', () => ({ sessionId: 'sess-1' }))
-  on('session.append', () => ({ value: undefined }))
-  on('tool.check', () => ({ decision: 'allow' }))
   for (const ev of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'Notification', 'Stop', 'SubagentStop']) on(`classic.${ev}`, () => ({}))
   on('ui.status', (_$: unknown, e: { text: string | undefined }) => {
     statuses.push(e.text)
@@ -82,7 +72,7 @@ const setup = (
   // 実タイマーを走らせない。
   on('clock.every', () => ({ value: undefined }))
   on('tool.call', () => ({ result: 'ran' as never }))
-  return { runs, files, statuses, invalidations, submitted }
+  return { runs, files, statuses, invalidations }
 }
 
 const rule = (name: string, count: number, enforce: string) => `---\nname: ${name}\ndescription: d\ntype: feedback\ncount: ${count}\n${enforce}---\n\nbody\n`
@@ -220,7 +210,7 @@ test('PostToolUse: gate.yaml が無ければ何も記録せず、対象外ツー
   const r = await $.classic.PostToolUse({ tool_name: 'Edit', tool_input: { file_path: '/a' }, tool_response: {}, tool_use_id: 't1' })
   expect(r.block).toBeUndefined()
   await $.classic.PostToolUse({ tool_name: 'Read', tool_input: {}, tool_response: {}, tool_use_id: 't1' })
-  // 書くのは「classic が走った」印のマーカーだけ（scripts/notification.sh が見る）。
+  // 書くのは「classic が走った」印のマーカーだけ（scripts/hook.sh が見る）。
   expect(Object.keys(files)).toEqual(['/h/.claude/feedback/.classic_seen/sess-1'])
   expect(runs).toEqual([])
 })
@@ -472,87 +462,4 @@ test('PostToolUse(Agent): 終わったサブエージェントの SubagentStop �
   expect(String(r.additionalContext)).toContain('サブエージェント t (a)')
   expect(String(r.additionalContext)).toContain('chk')
   expect(Object.keys(files).some((f) => f.includes('subagent_report.'))).toBe(false)
-})
-
-// classic.* が組織管理のガードに飛ばされる環境では、同じ処理をネイティブイベントが担う。
-// （エンジン上のテストは classic.PreToolUse / PostToolUse を tool.call の前後で必ず走らせるので、tool.call の後処理は tests/ 側で確かめる。）
-const denyNoRm = rule('no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    message: forbidden\n    severity: deny\n")
-const askNoRm = denyNoRm.replace('severity: deny', 'severity: ask').replace('no_rm', 'ask_rm')
-
-test('ネイティブ prompt.submit: classic が走っていなければ rules と確定した feedback を context に足す', async ($, on) => {
-  const { submitted } = setup(on, { '/h/.claude/feedback/confirmed.md': rule('confirmed', 3, '') })
-  await $.prompt.submit({ text: 'hi' })
-  const sent = submitted.at(-1)
-  expect(sent?.text).toBe('hi')
-  expect(sent?.context?.[0]).toBe('BUNDLED')
-  expect(sent?.context?.[1]).toContain('■ confirmed (これまで 3 回指摘されています)')
-})
-
-test('ネイティブ prompt.submit: classic.UserPromptSubmit が走った後は素通り', async ($, on) => {
-  const { submitted } = setup(on)
-  await $.classic.UserPromptSubmit({ prompt: 'hi' })
-  await $.prompt.submit({ text: 'hi' })
-  expect(submitted.at(-1)?.context).toBeUndefined()
-})
-
-test('ネイティブ tool.check: ルール違反の deny / ask を返し、classic が走った後は素通り', async ($, on) => {
-  setup(on, { '/h/.claude/feedback/no_rm.md': denyNoRm })
-  const denied = await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf x' } })
-  expect(denied.decision).toBe('deny')
-  expect(denied.reason).toContain('no_rm (count: 6): forbidden')
-  expect((await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })).decision).toBe('allow')
-  await $.classic.SessionStart({ source: 'resume', session_id: 'sess-1' })
-  expect((await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf x' } })).decision).toBe('allow')
-})
-
-test('ネイティブ tool.check: ask は allow を ask に引き上げる', async ($, on) => {
-  setup(on, { '/h/.claude/feedback/ask_rm.md': askNoRm })
-  const r = await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf x' } })
-  expect(r.decision).toBe('ask')
-  expect(r.reason).toContain('ask_rm')
-})
-
-test('ネイティブ turn.complete: Stop の block は理由をプロンプトとして投げ直す', async ($, on) => {
-  const files: Files = {
-    '/proj/.claude/gate.yaml': JSON.stringify({
-      policy: false,
-      rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
-      consistency_checks: [{ name: 'chk', run: ['echo broken'] }],
-    }),
-    '/proj/.claude/.gate-status/changed_files.sess-1.txt': 'x.py\n',
-    '/proj/.claude/.gate-status/gate_pending_checks.sess-1.json': JSON.stringify({ '/proj': { chk: ['x.py'] } }),
-  }
-  const { submitted } = setup(on, files, {}, (argv) => (argv[0] === 'sh' ? { exitCode: 1, stdout: 'broken\n' } : { exitCode: 0, stdout: '' }))
-  const r = await $.turn.complete({ answer: 'done', durationMs: 1 })
-  expect(String(r.text)).toContain('作業を続けさせます')
-  // 投げ直しは待たずに始めるので、届くのを待つ。
-  await new Promise((resolve) => setTimeout(resolve, 50))
-  expect(submitted.at(-1)?.text).toContain('検証に失敗しました（試行 1/')
-})
-
-test('ネイティブ turn.complete: classic.Stop が走った後は素通り', async ($, on) => {
-  const files: Files = {
-    '/proj/.claude/gate.yaml': JSON.stringify({
-      policy: false,
-      rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
-      consistency_checks: [{ name: 'chk', run: ['echo broken'] }],
-    }),
-    '/proj/.claude/.gate-status/changed_files.sess-1.txt': 'x.py\n',
-    '/proj/.claude/.gate-status/gate_pending_checks.sess-1.json': JSON.stringify({ '/proj': { chk: ['x.py'] } }),
-  }
-  const { submitted } = setup(on, files, {}, (argv) => (argv[0] === 'sh' ? { exitCode: 1, stdout: 'broken\n' } : { exitCode: 0, stdout: '' }))
-  await $.classic.Notification({ message: 'm', notification_type: 'idle_prompt' })
-  const r = await $.turn.complete({ answer: 'done', durationMs: 1 })
-  expect(r.text).toBe('engine')
-  expect(submitted).toEqual([])
-})
-
-test('ネイティブ session.end: reason が clear のとき自セッションの状態を消し、resume では残す', async ($, on) => {
-  const changed = '/proj/.claude/.gate-status/changed_files.sess-1.txt'
-  const files: Files = { [changed]: 'x.py\n' }
-  setup(on, files)
-  await $.session.end({ reason: 'resume' })
-  expect(files[changed]).toBe('x.py\n')
-  await $.session.end({ reason: 'clear' })
-  expect(files[changed]).toBeUndefined()
 })

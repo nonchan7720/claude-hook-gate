@@ -1,8 +1,5 @@
 # Messages printed by the hooks (English). Has the same keys as ja.yaml (tests/i18n.spec.ts checks the key sets match).
 # {{name}} is i18next interpolation.
-nativeStop:
-  continued: "feedback-gate: sent Claude back to fix issues before it stops"
-  subagentBlocked: "feedback-gate: the check at the end of the subagent found issues (it cannot be sent back): {{reason}}"
 notify:
   waiting: "Waiting for you"
   waitingFallback: "Claude is waiting for your input"

@@ -15,9 +15,6 @@ const invalidateLog: string[] = []
 const runLog: string[][] = []
 const timerLog: number[] = []
 const commandLog: Array<{ name: string; description: string }> = []
-const submitLog: Array<{ text: string }> = []
-const appendLog: string[] = []
-const toastLog: string[] = []
 // true の間、遅延表示の待ち時間（$.clock.every）は既に経過したものとして扱う。
 let elapsed = false
 // 完了通知は最初に osascript で前面ウィンドウを調べるので、その実行回数を通知を試みた回数として数える
@@ -36,9 +33,6 @@ async function withMod<T>(
   runLog.length = 0
   timerLog.length = 0
   commandLog.length = 0
-  submitLog.length = 0
-  appendLog.length = 0
-  toastLog.length = 0
   elapsed = false
   try {
     const m = loadMod(register, {
@@ -49,9 +43,6 @@ async function withMod<T>(
       runLog,
       timerLog,
       commandLog,
-      submitLog,
-      appendLog,
-      toastLog,
       elapsed: () => elapsed,
       stubCommands: ['osascript', 'terminal-notifier'],
       env: { HOME: home, CLAUDE_FEEDBACK_DIR: feedback, DOGWOOD_BIN: MISSING_DOGWOOD_BIN, ...env },
@@ -655,275 +646,49 @@ describe('Stop / SubagentStop / Notification', () => {
     }))
 })
 
-// classic.* が組織管理のガード（sec-default）に飛ばされる環境では、同じ処理をネイティブイベントが担う。
-// classic.* が一度でも走った環境では、ネイティブ側は next(e) で素通りする。
-describe('native events', () => {
-  const denyRule = "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    message: 'forbidden'\n    severity: deny\n"
-  const pass = async () => ({})
-  const sawClassic = (m: ReturnType<typeof loadMod>) => m.call('classic.SessionStart', { source: 'resume', session_id: 'sess-1' })
+// 組織管理のガードが classic.* を飛ばす環境では、hooks.json の settings hook（scripts/hook.sh）が代わりに同じ処理を走らせる。
+// classic.* が走る環境で二重に動かさないよう、classic.* は先頭でセッション別のマーカーを書く。
+describe('classic marker for the settings hooks', () => {
+  const markerOf = (feedback: string) => path.join(feedback, '.classic_seen', 'sess-1')
 
-  describe('classic did not run (the guard skipped classic.*)', () => {
-    test('prompt.submit adds the rules and the confirmed feedback to the context', () =>
-      withMod(async (m, _proj, feedback) => {
-        writeRule(feedback, 'confirmed', 3)
-        let passed: Out = {}
-        await m.call('prompt.submit', { text: 'hi', context: ['earlier'] }, async (e) => {
-          passed = e as Out
-          return {}
-        })
-        const context = passed.context as string[]
-        expect(context[0]).toBe('earlier')
-        expect(context.length).toBe(3)
-        expect(context[1]).toContain('feedback')
-        expect(context[2]).toContain('■ confirmed (これまで 3 回指摘されています)')
-        expect(passed.text).toBe('hi')
-      }))
+  test.each([
+    ['classic.SessionStart', { source: 'resume', session_id: 'sess-1' }],
+    ['classic.UserPromptSubmit', { prompt: 'hi' }],
+    ['classic.PreToolUse', { tool: 'Read', file_path: '/a' }],
+    ['classic.PostToolUse', { tool_name: 'Read', session_id: 'sess-1' }],
+    ['classic.Notification', { message: 'm' }],
+    ['classic.Stop', { session_id: 'sess-1' }],
+    ['classic.SubagentStop', { session_id: 'sess-1' }],
+  ])('%s writes <feedbackDir>/.classic_seen/<session>', (name, event) =>
+    withMod(async (m, _proj, feedback) => {
+      expect(exists(markerOf(feedback))).toBe(false)
+      await m.call(name, event)
+      expect(exists(markerOf(feedback))).toBe(true)
+    }),
+  )
 
-    test('tool.check denies a violating Bash call without calling the next hook', () =>
-      withMod(async (m, _proj, feedback) => {
-        writeRule(feedback, 'no_rm', 6, denyRule)
-        let reached = false
-        const r = (await m.call('tool.check', { tool: 'Bash', input: { command: 'rm -rf x' } }, async () => {
-          reached = true
-          return { decision: 'allow' }
-        })) as Out
-        expect(r.decision).toBe('deny')
-        expect(String(r.reason)).toContain('no_rm (count: 6): forbidden')
-        expect(reached).toBe(false)
-      }))
+  test('only characters outside [A-Za-z0-9_-] are dropped from the session id', () =>
+    withMod(async (m, _proj, feedback) => {
+      m.$.session.id = async () => '../a b_c-1'
+      await m.call('classic.Stop', {})
+      expect(fs.readdirSync(path.join(feedback, '.classic_seen'))).toEqual(['ab_c-1'])
+    }))
 
-    test('tool.check turns an allow into ask, keeps a deny, and passes a clean call on', () =>
-      withMod(async (m, _proj, feedback) => {
-        writeRule(feedback, 'confirm_rm', 4, denyRule.replace('severity: deny', 'severity: ask'))
-        const ask = (await m.call('tool.check', { tool: 'Bash', input: { command: 'rm -rf x' } }, async () => ({ decision: 'allow' }))) as Out
-        expect(ask.decision).toBe('ask')
-        expect(String(ask.reason)).toContain('confirm_rm')
-        const denied = (await m.call('tool.check', { tool: 'Bash', input: { command: 'rm -rf y' } }, async () => ({
-          decision: 'deny',
-          reason: 'rules',
-        }))) as Out
-        expect(denied).toEqual({ decision: 'deny', reason: 'rules' })
-        const clean = (await m.call('tool.check', { tool: 'Bash', input: { command: 'ls' } }, async () => ({ decision: 'allow' }))) as Out
-        expect(clean).toEqual({ decision: 'allow' })
-        const other = (await m.call('tool.check', { tool: 'Read', input: { file_path: '/a' } }, async () => ({ decision: 'allow' }))) as Out
-        expect(other).toEqual({ decision: 'allow' })
-      }))
+  test('the marker is written once, and classic.Notification rewrites it every time', () =>
+    withMod(async (m, _proj, feedback) => {
+      const marker = markerOf(feedback)
+      const old = new Date(1_000_000)
+      await m.call('classic.Stop', { session_id: 'sess-1' })
+      fs.utimesSync(marker, old, old)
+      await m.call('classic.Stop', { session_id: 'sess-1' })
+      expect(fs.statSync(marker).mtimeMs).toBe(old.getTime())
+      await m.call('classic.Notification', { message: 'm' })
+      expect(fs.statSync(marker).mtimeMs).toBeGreaterThan(Date.now() - 60_000)
+    }))
 
-    test('tool.check asks before an agent launch when agentLaunchGuard is on, with the agent id on the payload', () =>
-      withMod(
-        async (m) => {
-          const r = (await m.call('tool.check', { tool: 'Agent', agentId: 'a1', input: { subagent_type: 'code-implementer', prompt: 'do it' } }, async () => ({
-            decision: 'allow',
-          }))) as Out
-          expect(r.decision).toBe('ask')
-          expect(String(r.reason)).toContain('code-implementer に送るプロンプト:\n\ndo it')
-        },
-        { agentLaunchGuard: true },
-      ))
-
-    test('tool.call notes the Bash start, then records an edit and tells Claude about a post_edit block', () =>
-      withMod(async (m, proj, feedback) => {
-        writeGateYaml(proj, { rules: [{ match: '**/*.py', run: ['echo lint-failed; exit 1'] }] })
-        writeRule(feedback, 'no_todo', 4, "enforce:\n  - event: post_edit\n    path: '**/*.py'\n    when: 'TODO'\n    message: 'TODO を残さない'\n")
-        const file = path.join(proj, 'x.py')
-        fs.writeFileSync(file, 'x = 1  # TODO\n')
-        const ran = await m.call('tool.call', { tool: 'Edit', tool_use_id: 't1', file_path: file, old_string: 'a', new_string: 'b' }, async () => ({
-          result: {},
-        }))
-        expect(ran).toEqual({ result: {} })
-        expect(fs.readFileSync(path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1.txt'), 'utf8')).toBe(`${file}\n`)
-        expect(appendLog.length).toBe(1)
-        expect(appendLog[0]).toContain('no_todo')
-        await m.call('tool.call', { tool: 'Bash', tool_use_id: 't2', command: 'ls' }, async () => {
-          expect(fs.readdirSync(path.join(proj, '.claude', '.gate-status')).some((f) => f.startsWith('bash_started.sess-1--t2'))).toBe(true)
-          return { result: {} }
-        })
-      }))
-
-    test('tool.call does nothing after a denied or failed call', () =>
-      withMod(async (m, proj) => {
-        writeGateYaml(proj, { rules: [{ match: '**/*.py', run: ['true'] }] })
-        await m.call('tool.call', { tool: 'Edit', file_path: 'x.py' }, async () => ({ deny: 'no' }))
-        await m.call('tool.call', { tool: 'Edit', file_path: 'y.py' }, async () => ({ isError: true, result: 'boom' }))
-        expect(exists(path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1.txt'))).toBe(false)
-      }))
-
-    test('tool.call(Agent) waits for the subagent turn.complete and hands its report to the caller once', () =>
-      withMod(async (m, proj) => {
-        writeGateYaml(proj, {
-          rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
-          consistency_checks: [{ name: 'chk', run: ['echo broken; exit 1'] }],
-        })
-        await m.call('classic.PostToolUse', { session_id: 'sess-1', agent_id: 'ag1', tool_name: 'Write', tool_input: { file_path: 'x.py' } }, pass)
-        // classic が走った印は、ここから先を素通りにしてしまうので、別のエンジンで確かめる。
-        const m2 = loadMod(register, {
-          projectDir: proj,
-          options: {},
-          appendLog,
-          env: { HOME: proj, CLAUDE_FEEDBACK_DIR: path.join(proj, 'fb'), DOGWOOD_BIN: MISSING_DOGWOOD_BIN },
-        })
-        // 実機ではサブエージェントの turn.complete は呼び出し元の tool.call(Agent) と並行して走り、控えは少し後に書かれる。
-        // tool.call 側は印（.subagent_done）が出るまで待ってから引き取る。
-        // テスト用エンジンの $.clock.every は時間を注入する作りなので、ここだけ本物のタイマーにする（待機の間に turn.complete を走らせる）。
-        m2.$.clock.every = (ms, fn) => {
-          const t = setTimeout(fn, ms)
-          return { cancel: () => clearTimeout(t) }
-        }
-        setTimeout(() => void m2.call('turn.complete', { agentId: 'ag1', agentType: 'worker', answer: 'done' }), 120)
-        const done = await m2.call('tool.call', { tool: 'Agent', tool_use_id: 't9', prompt: 'p' }, async () => ({ result: { agentId: 'ag1' } }))
-        expect(done).toEqual({ result: { agentId: 'ag1' } })
-        expect(appendLog.length).toBe(1)
-        expect(appendLog[0]).toContain('ag1')
-        expect(appendLog[0]).toContain('検証に失敗')
-        expect(exists(path.join(proj, '.claude', '.gate-status', 'subagent_report.sess-1--ag1.json'))).toBe(false)
-        expect(exists(path.join(proj, 'fb', '.subagent_done', 'sess-1--ag1'))).toBe(false)
-      }))
-
-    test('turn.complete sends Claude back with the block reason, and counts the follow-up as stop_hook_active', () =>
-      withMod(async (m, proj) => {
-        writeGateYaml(proj, {
-          rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
-          consistency_checks: [{ name: 'chk', run: ['echo broken; exit 1'] }],
-        })
-        await m.call('tool.call', { tool: 'Write', file_path: 'x.py' }, async () => ({ result: {} }))
-        const first = (await m.call('turn.complete', { answer: 'done', durationMs: 1 })) as Out
-        expect(submitLog.length).toBe(1)
-        expect(submitLog[0]?.text).toContain('検証に失敗しました（試行 1/')
-        expect(String(first.text)).toContain('作業を続けさせます')
-        const second = (await m.call('turn.complete', { answer: 'again' })) as Out
-        expect(submitLog.length).toBe(2)
-        expect(submitLog[1]?.text).toContain('検証に失敗しました（試行 2/')
-        expect(String(second.text)).toContain('作業を続けさせます')
-      }))
-
-    test('turn.complete passes on when nothing blocks, and for an aborted turn', () =>
-      withMod(async (m, proj) => {
-        writeGateYaml(proj, { rules: [] })
-        let reached = 0
-        const next = async () => {
-          reached++
-          return {}
-        }
-        expect(await m.call('turn.complete', { answer: 'ok' }, next)).toEqual({})
-        expect(await m.call('turn.complete', { answer: 'x', isAborted: true }, next)).toEqual({})
-        expect(reached).toBe(2)
-        expect(submitLog).toEqual([])
-      }))
-
-    test('a subagent turn cannot be sent back: the reason is shown and nothing is submitted', () =>
-      withMod(async (m, proj) => {
-        writeGateYaml(proj, {
-          rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
-          consistency_checks: [{ name: 'chk', run: ['echo broken; exit 1'] }],
-        })
-        await m.call('tool.call', { tool: 'Write', agentId: 'ag1', file_path: 'x.py' }, async () => ({ result: {} }))
-        const r = (await m.call('turn.complete', { agentId: 'ag1', answer: 'done' })) as Out
-        expect(String(r.text)).toContain('サブエージェント')
-        expect(String(r.text)).toContain('check:chk')
-        expect(submitLog).toEqual([])
-      }))
-
-    test('turn.complete falls back to a toast when the prompt cannot be submitted', () =>
-      withMod(async (m, proj) => {
-        writeGateYaml(proj, {
-          rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
-          consistency_checks: [{ name: 'chk', run: ['echo broken; exit 1'] }],
-        })
-        await m.call('tool.call', { tool: 'Write', file_path: 'x.py' }, async () => ({ result: {} }))
-        m.$.prompt.submit = async () => {
-          throw new Error('busy')
-        }
-        await m.call('turn.complete', { answer: 'done' })
-        await new Promise((r) => setTimeout(r, 0))
-        expect(toastLog.length).toBe(1)
-        expect(toastLog[0]).toContain('check:chk')
-      }))
-
-    test('session.end with reason clear drops this session state; resume keeps it; session.start only sweeps old state', () =>
-      withMod(async (m, proj) => {
-        writeChangedFiles(proj, 'sess-1', 'a.py')
-        const changed = path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1.txt')
-        await m.call('session.start', { cwd: proj })
-        expect(exists(changed)).toBe(true)
-        await m.call('session.end', { reason: 'resume' })
-        expect(exists(changed)).toBe(true)
-        await m.call('session.end', { reason: 'clear' })
-        expect(exists(changed)).toBe(false)
-      }))
-  })
-
-  describe('classic ran', () => {
-    test('every native hook passes through once any classic.* hook has run', () =>
-      withMod(async (m, proj, feedback) => {
-        writeGateYaml(proj, { rules: [{ match: '**/*.py', run: ['echo lint-failed; exit 1'] }] })
-        writeRule(feedback, 'no_rm', 6, denyRule)
-        await sawClassic(m)
-        const seen: unknown[] = []
-        const next = async (e: unknown) => {
-          seen.push(e)
-          return { decision: 'allow' }
-        }
-        const prompt = { text: 'hi' }
-        expect(await m.call('prompt.submit', prompt, next as never)).toEqual({ decision: 'allow' })
-        const check = { tool: 'Bash', input: { command: 'rm -rf x' } }
-        expect(await m.call('tool.check', check, next as never)).toEqual({ decision: 'allow' })
-        const call = { tool: 'Edit', tool_use_id: 't1', file_path: 'x.py' }
-        await m.call('tool.call', call, next as never)
-        await m.call('turn.complete', { answer: 'a' }, next as never)
-        await m.call('session.end', { reason: 'clear' }, next as never)
-        expect(seen).toEqual([prompt, check, call, { answer: 'a' }, { reason: 'clear' }])
-        expect(appendLog).toEqual([])
-        expect(submitLog).toEqual([])
-        expect(exists(path.join(proj, '.claude', '.gate-status', 'changed_files.sess-1.txt'))).toBe(false)
-      }))
-
-    test('classic.PreToolUse firing inside next(e) of tool.call stops the native post step of that very call', () =>
-      withMod(async (m, proj, feedback) => {
-        writeRule(feedback, 'no_todo', 4, "enforce:\n  - event: post_edit\n    path: '**/*.py'\n    when: 'TODO'\n    message: 'TODO を残さない'\n")
-        const file = path.join(proj, 'x.py')
-        fs.writeFileSync(file, 'x = 1  # TODO\n')
-        // 最初の呼び出し: 印がまだ無い状態で入り、next の先で classic.PreToolUse が発火する（settings hook はチェーンの最後）。
-        await m.call('tool.call', { tool: 'Edit', tool_use_id: 't1', file_path: file }, async () => {
-          await m.call('classic.PreToolUse', { tool: 'Edit', tool_use_id: 't1', file_path: file })
-          return { result: {} }
-        })
-        expect(appendLog).toEqual([])
-      }))
-
-    test('tool.check does not evaluate the rule twice once classic.PreToolUse has run', () =>
-      withMod(async (m, _proj, feedback) => {
-        writeRule(feedback, 'no_rm', 6, denyRule)
-        await m.call('classic.PreToolUse', { tool: 'Bash', command: 'rm -rf x', tool_use_id: 't1' })
-        const log = () => fs.readFileSync(path.join(feedback, '.violations.jsonl'), 'utf8').split('\n').filter(Boolean).length
-        const before = log()
-        expect(await m.call('tool.check', { tool: 'Bash', input: { command: 'rm -rf x' } }, async () => ({ decision: 'allow' }))).toEqual({ decision: 'allow' })
-        expect(log()).toBe(before)
-      }))
-  })
-
-  describe('classic marker for the Notification command hook', () => {
-    test('a classic.* hook writes <feedbackDir>/.classic_seen/<session>', () =>
-      withMod(async (m, _proj, feedback) => {
-        const marker = path.join(feedback, '.classic_seen', 'sess-1')
-        expect(exists(marker)).toBe(false)
-        await m.call('classic.Notification', { message: 'm' })
-        expect(exists(marker)).toBe(true)
-      }))
-
-    test('native hooks write no marker', () =>
-      withMod(async (m, _proj, feedback) => {
-        await m.call('prompt.submit', { text: 'hi' })
-        await m.call('turn.complete', { answer: 'a' })
-        expect(exists(path.join(feedback, '.classic_seen'))).toBe(false)
-      }))
-
-    test('classic.Notification refreshes the marker', () =>
-      withMod(async (m, _proj, feedback) => {
-        const marker = path.join(feedback, '.classic_seen', 'sess-1')
-        await sawClassic(m)
-        fs.utimesSync(marker, new Date(1_000_000), new Date(1_000_000))
-        await m.call('classic.Notification', { message: 'm' })
-        expect(fs.statSync(marker).mtimeMs).toBeGreaterThan(Date.now() - 60_000)
-      }))
-  })
+  test('a mod hook that is not classic.* writes no marker', () =>
+    withMod(async (m, _proj, feedback) => {
+      await m.call('session.start', {})
+      expect(exists(path.join(feedback, '.classic_seen'))).toBe(false)
+    }))
 })
