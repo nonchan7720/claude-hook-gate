@@ -5,6 +5,9 @@ import { parse } from "./vendor/yaml.js";
 // locales/en.yaml
 var en_default = `# Messages printed by the hooks (English). Has the same keys as ja.yaml (tests/i18n.spec.ts checks the key sets match).
 # {{name}} is i18next interpolation.
+nativeStop:
+  continued: "feedback-gate: sent Claude back to fix issues before it stops"
+  subagentBlocked: "feedback-gate: the check at the end of the subagent found issues (it cannot be sent back): {{reason}}"
 notify:
   waiting: "Waiting for you"
   waitingFallback: "Claude is waiting for your input"
@@ -151,6 +154,9 @@ gate:
 // locales/ja.yaml
 var ja_default = `# hook が出すメッセージ（日本語）。en.yaml と同じキーを持つ（tests/i18n.spec.ts がキーの一致を検査する）。
 # {{name}} は i18next の補間。
+nativeStop:
+  continued: "feedback-gate: 止める前に直す点があったため、Claude に作業を続けさせます"
+  subagentBlocked: "feedback-gate: サブエージェントの終了時の検証で指摘がありました（続けさせることはできません）: {{reason}}"
 notify:
   waiting: "確認待ち"
   waitingFallback: "確認を待っています"
@@ -4198,6 +4204,8 @@ async function resetGate(io, payload) {
         await io.removeTree(join(logRoot, e.name));
     }
   }
+  const seenDir = join(feedbackDir(io), ".classic_seen");
+  await io.removeFiles((await io.list(seenDir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS3).map((e) => join(seenDir, e.name)));
   await io.removeDir(join(claudeDir, "hooks", "logs"));
   await io.removeDir(join(claudeDir, "hooks"));
   return ok();
@@ -4347,7 +4355,142 @@ function preToolUsePayload(event, tool, sessionId, cwd) {
     payload.agent_id = agentId;
   return payload;
 }
+var CLASSIC_SEEN = { plugin: "feedback-gate", key: "classicSeen" };
+async function classicSeen($, memory) {
+  if (memory.classicSeen)
+    return true;
+  try {
+    const seen = (await $.state.get(CLASSIC_SEEN)).value;
+    memory.classicSeen = typeof seen === "string" && seen !== "" && seen === await $.session.id();
+  } catch {}
+  return memory.classicSeen;
+}
+async function markClassic($, options, memory, refresh = false) {
+  if (!await classicSeen($, memory)) {
+    memory.classicSeen = true;
+    try {
+      await $.state.set(CLASSIC_SEEN, await $.session.id());
+    } catch {}
+  }
+  try {
+    const sessionId = (await $.session.id()).replace(/[^A-Za-z0-9_-]/g, "");
+    if (sessionId === "")
+      return;
+    const io = await createIo($, options);
+    const marker = join(feedbackDir(io), ".classic_seen", sessionId);
+    if (refresh || !await io.exists(marker))
+      await io.writeFile(marker, `1
+`);
+  } catch {}
+}
+var guardsTool = (options, tool) => options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool) || /^(Bash|Edit|Write|MultiEdit)$/.test(tool);
+function preGuardSteps(options, tool, payload, trackStart) {
+  const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
+  const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
+  return trackStart && tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
+}
+function postToolSteps(tool, payload) {
+  if (/^(Agent|Task)$/.test(tool))
+    return [(io) => subagentReport(io, payload)];
+  if (tool === "Bash")
+    return bashChangeSteps(payload);
+  if (!/^(Write|Edit|MultiEdit)$/.test(tool))
+    return;
+  return [(io) => recordChanges(io, payload), (io) => feedbackPostEdit(io, payload), (io) => stopTestGate(io, "rules", payload)];
+}
+function subagentStopSteps(payload) {
+  let gate;
+  let feedback;
+  return [
+    async (io) => gate = await stopTestGate(io, "checks", payload),
+    async (io) => feedback = await feedbackStopCheck(io, payload),
+    (io) => saveSubagentReport(io, payload, gate, feedback)
+  ];
+}
+async function promptOutcome($, options) {
+  const mine = {};
+  const text = await createIo($, options).then((io) => loadRules(io, options.rulesFile));
+  if (text !== "")
+    mine.additionalContext = [text];
+  const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io)]);
+  return merge(mine, inject);
+}
+var firstLine = (text) => (text.split(`
+`).find((l) => l.trim() !== "") ?? "").trim().slice(0, 200);
+async function tellClaude($, outcome) {
+  const notes = [...outcome.block ? [outcome.block] : [], ...outcome.additionalContext ?? []].filter((n) => n.trim() !== "");
+  if (notes.length === 0)
+    return;
+  try {
+    await $.session.append({ message: { type: "user", content: [{ type: "text", text: notes.join(`
+
+`) }] } });
+  } catch {
+    try {
+      $.ui.toast(firstLine(notes[0] ?? ""));
+    } catch {}
+  }
+}
+async function checkOutcome($, options, event) {
+  const tool = str(event.tool);
+  if (!guardsTool(options, tool))
+    return {};
+  const input = isDict(event.input) ? event.input : {};
+  const payload = preToolUsePayload({ ...input, tool, agentId: event.agentId }, tool, await $.session.id(), await $.session.cwd());
+  return runSteps($, options, "PreToolUse", preGuardSteps(options, tool, payload, false));
+}
+async function toolCallStarted($, options, event) {
+  try {
+    const payload = preToolUsePayload(event, "Bash", await $.session.id(), await $.session.cwd());
+    await runSteps($, options, "PreToolUse", [(io) => bashStarted(io, payload)]);
+  } catch {}
+}
+async function toolCallDone($, options, event, ran) {
+  try {
+    if (ran.deny !== undefined || ran.isError === true)
+      return;
+    const tool = str(event.tool);
+    const base = preToolUsePayload(event, tool, await $.session.id(), await $.session.cwd());
+    const result = ran.result;
+    const payload = { ...base, hook_event_name: "PostToolUse", tool_response: isDict(result) ? result : { result } };
+    const steps = postToolSteps(tool, payload);
+    if (steps)
+      await tellClaude($, await runSteps($, options, "PostToolUse", steps));
+  } catch {}
+}
+function continueWork($, reason) {
+  const fallback = () => {
+    try {
+      $.ui.toast(firstLine(reason));
+    } catch {}
+  };
+  try {
+    $.prompt.submit({ text: reason }).catch(fallback);
+  } catch {
+    fallback();
+  }
+}
+async function turnComplete($, options, event, memory) {
+  const agentId = str(event.agentId);
+  const base = { session_id: await $.session.id(), cwd: await $.session.cwd(), last_assistant_message: str(event.answer) };
+  if (agentId !== "") {
+    const agentType = str(event.agentType);
+    const payload = { ...base, hook_event_name: "SubagentStop", agent_id: agentId, ...agentType !== "" ? { agent_type: agentType } : {} };
+    const mine = await runSteps($, options, "SubagentStop", subagentStopSteps(payload));
+    return mine.block === undefined ? undefined : tr((await createIo($, options)).lang)("nativeStop.subagentBlocked", { reason: firstLine(mine.block) });
+  }
+  const active = memory.stopContinued;
+  memory.stopContinued = false;
+  const payload = { ...base, hook_event_name: "Stop", stop_hook_active: active };
+  const mine = await runSteps($, options, "Stop", [(io) => allStop(io, payload)]);
+  if (mine.block === undefined)
+    return;
+  memory.stopContinued = true;
+  continueWork($, mine.block);
+  return tr((await createIo($, options)).lang)("nativeStop.continued");
+}
 export const register = (on, options) => {
+  const memory = { classicSeen: false, stopContinued: false };
   on("session.start", async ($, e, next) => {
     try {
       const io = await createIo($, options);
@@ -4357,71 +4500,102 @@ export const register = (on, options) => {
         argumentHint: "[--window 30d] [--min 2] [apply]"
       });
     } catch {}
+    if (!await classicSeen($, memory)) {
+      const payload = { session_id: await $.session.id(), cwd: str(e.cwd) };
+      await runSteps($, options, "SessionStart", [(io) => resetGate(io, payload)]);
+    }
+    return next(e);
+  });
+  on("session.end", async ($, e, next) => {
+    if (e.reason === "clear" && !await classicSeen($, memory)) {
+      const payload = { session_id: await $.session.id(), source: "clear" };
+      await runSteps($, options, "SessionStart", [(io) => resetGate(io, payload)]);
+    }
     return next(e);
   });
   on("command.run", { command: "correct" }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? "")));
   on("classic.SessionStart", async ($, e, next) => {
+    await markClassic($, options, memory);
     const mine = await runSteps($, options, "SessionStart", [(io) => resetGate(io, e)]);
     return withNext(next, e, mine);
   });
+  on("prompt.submit", async ($, e, next) => {
+    if (await classicSeen($, memory))
+      return next(e);
+    const mine = await promptOutcome($, options);
+    if (mine.block !== undefined)
+      return { drop: mine.block };
+    const added = mine.additionalContext ?? [];
+    if (added.length === 0)
+      return next(e);
+    return next({ ...e, context: [...Array.isArray(e.context) ? e.context : [], ...added] });
+  });
   on("classic.UserPromptSubmit", async ($, e, next) => {
-    const mine = {};
-    const text = await createIo($, options).then((io) => loadRules(io, options.rulesFile));
-    if (text !== "")
-      mine.additionalContext = [text];
-    const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io)]);
-    return withNext(next, e, merge(mine, inject));
+    await markClassic($, options, memory);
+    return withNext(next, e, await promptOutcome($, options));
   });
   on("classic.PreToolUse", async ($guard, guardEvent, guardNext) => {
+    await markClassic($guard, options, memory);
     const tool = str(guardEvent.tool);
-    const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
-    if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool))
+    if (!guardsTool(options, tool))
       return guardNext(guardEvent);
     const payload = preToolUsePayload(guardEvent, tool, await $guard.session.id(), await $guard.session.cwd());
-    const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
-    const steps = tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
-    const mine = await runSteps($guard, options, "PreToolUse", steps);
+    const mine = await runSteps($guard, options, "PreToolUse", preGuardSteps(options, tool, payload, true));
     if (mine.deny !== undefined)
       return { deny: mine.deny };
     if (mine.ask !== undefined)
       return { ask: mine.ask };
     return guardNext(guardEvent);
   });
+  on("tool.check", async ($check, checkEvent, checkNext) => {
+    if (await classicSeen($check, memory))
+      return checkNext(checkEvent);
+    const mine = await checkOutcome($check, options, checkEvent);
+    if (mine.deny !== undefined)
+      return { decision: "deny", reason: mine.deny };
+    const decided = await checkNext(checkEvent);
+    if (mine.ask !== undefined && decided.decision !== "deny")
+      return { decision: "ask", reason: mine.ask };
+    return decided;
+  });
+  on("tool.call", async ($call, callEvent, callNext) => {
+    if (await classicSeen($call, memory))
+      return callNext(callEvent);
+    if (str(callEvent.tool) === "Bash")
+      await toolCallStarted($call, options, callEvent);
+    const ran = await callNext(callEvent);
+    if (await classicSeen($call, memory))
+      return ran;
+    await toolCallDone($call, options, callEvent, ran);
+    return ran;
+  });
   on("classic.PostToolUse", async ($, e, next) => {
-    if (/^(Agent|Task)$/.test(str(e.tool_name))) {
-      const mine = await runSteps($, options, "PostToolUse", [(io) => subagentReport(io, e)]);
-      return withNext(next, e, mine);
-    }
-    if (str(e.tool_name) === "Bash") {
-      const mine = await runSteps($, options, "PostToolUse", bashChangeSteps(e));
-      return withNext(next, e, mine);
-    }
-    if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name)))
+    await markClassic($, options, memory);
+    const steps = postToolSteps(str(e.tool_name), e);
+    if (!steps)
       return next(e);
-    const mine = await runSteps($, options, "PostToolUse", [
-      (io) => recordChanges(io, e),
-      (io) => feedbackPostEdit(io, e),
-      (io) => stopTestGate(io, "rules", e)
-    ]);
-    return withNext(next, e, mine);
+    return withNext(next, e, await runSteps($, options, "PostToolUse", steps));
   });
   on("classic.Notification", async ($, e, next) => {
+    await markClassic($, options, memory, true);
     await runSteps($, options, "Notification", [(io) => notification(io, "notify", e)]);
     return next(e);
   });
   on("classic.Stop", async ($, e, next) => {
+    await markClassic($, options, memory);
     const mine = await runSteps($, options, "Stop", [(io) => allStop(io, e)]);
     return withNext(next, e, mine);
   });
   on("classic.SubagentStop", async ($, e, next) => {
-    let gate;
-    let feedback;
-    const mine = await runSteps($, options, "SubagentStop", [
-      async (io) => gate = await stopTestGate(io, "checks", e),
-      async (io) => feedback = await feedbackStopCheck(io, e),
-      (io) => saveSubagentReport(io, e, gate, feedback)
-    ]);
+    await markClassic($, options, memory);
+    const mine = await runSteps($, options, "SubagentStop", subagentStopSteps(e));
     return withNext(next, e, mine);
+  });
+  on("turn.complete", async ($, e, next) => {
+    if (e.isAborted === true || await classicSeen($, memory))
+      return next(e);
+    const text = await turnComplete($, options, e, memory);
+    return text === undefined ? next(e) : { text };
   });
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (e.props.hasSurvey)
