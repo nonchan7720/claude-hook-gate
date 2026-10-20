@@ -6,6 +6,7 @@
 // セッションの継続なので、無条件に消すと中断前に変更したファイルがゲートの検証対象から丸ごと落ちて
 // しまう。source が startup / clear のときだけ削除し、resume / compact や未知の source
 // （取得できない場合を含む）では安全側に倒して削除しない。
+import { feedbackDir } from './feedback-rules.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, jqStr } from './pyutil.ts'
@@ -79,6 +80,11 @@ export async function resetGate(io: Io, payload: Dict): Promise<ScriptResult> {
       if (st && st.mtimeMs < now - DAY_MS) await io.removeTree(join(logRoot, e.name))
     }
   }
+  // classic.* が走った印のマーカー（<feedbackDir>/.classic_seen/<session>。src/register.ts と scripts/notification.sh が使う）も、
+  // 24h 超は掃除する。classic.Notification のたびに書き直されるので、動いているセッションのものは消えない。
+  const seenDir = join(feedbackDir(io), '.classic_seen')
+  await io.removeFiles((await io.list(seenDir)).filter((e) => e.kind === 'file' && e.mtimeMs < now - DAY_MS).map((e) => join(seenDir, e.name)))
+
   // 旧パスのログ置き場が空になったら片付ける。
   await io.removeDir(join(claudeDir, 'hooks', 'logs'))
   await io.removeDir(join(claudeDir, 'hooks'))

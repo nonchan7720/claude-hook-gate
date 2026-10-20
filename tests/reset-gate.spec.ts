@@ -287,3 +287,19 @@ describe('reset-gate status summary', () => {
       expect(exists(summary(proj, 'sess-live'))).toBe(true)
     }))
 })
+
+describe('classic_seen marker', () => {
+  test('prunes markers older than 24h and keeps fresh ones', () =>
+    withTmp(async (proj) =>
+      withTmp(async (feedback) => {
+        const dir = path.join(feedback, '.classic_seen')
+        fs.mkdirSync(dir, { recursive: true })
+        fs.writeFileSync(path.join(dir, 'old'), '1\n')
+        fs.writeFileSync(path.join(dir, 'fresh'), '1\n')
+        age(path.join(dir, 'old'))
+        await resetGate(makeIo({ projectDir: proj, env: { CLAUDE_FEEDBACK_DIR: feedback } }), { session_id: 'sess1' })
+        expect(exists(path.join(dir, 'old'))).toBe(false)
+        expect(exists(path.join(dir, 'fresh'))).toBe(true)
+      }),
+    ))
+})

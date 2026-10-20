@@ -1,1 +1,15 @@
-{ "modules": ["./register.js"] }
+{
+  "modules": ["./register.js"],
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/notification.sh\" notify"
+          }
+        ]
+      }
+    ]
+  }
+}

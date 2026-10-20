@@ -21,10 +21,30 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 | PreToolUse（Bash） | `src/bash-changes.ts`（`bashStarted`）。`feedback-guard` の前 | コマンドの開始時刻を控える（`bash_started.<session>--<tool_use_id>.json`）。`.claude/gate.yaml` があるプロジェクトでは `.claude/.gate-status/` に、無いプロジェクトでは `~/.claude/feedback/.bash_started/`（`.ask_state` と同じ feedback 側の状態置き場）に置く。後者は `post_edit` / `pre_edit` の enforce を持つ有効な feedback ルールがあるときだけで、`gate.yaml` の無いプロジェクトの作業ツリーには状態ファイルを作らない。 |
 | PostToolUse（Bash） | `src/bash-changes.ts` → `src/feedback-bash-edit.ts` → `src/stop-test-gate.ts`（`rules`） | コマンドが実際に書き換えたファイル（cwd の作業ツリーと、`.claude/worktrees/` 配下の worktree のうちコマンドにパス（`worktrees/<name>`）が出てくるものについて。それ以外の worktree は見ないので、別の Claude Code セッションがそこで編集中のファイルをこのコマンドの変更と取り違えない。git の変更・未追跡ファイルと、コマンド中に作られたコミットが触ったファイルのうち、mtime がコマンド開始以降のもの）を拾う。heredoc・`python`・`sed -i` などで書いても、Edit / Write に掛かる検査が抜けないようにするため。各ファイルを、Edit / Write の後と同じく `post_edit` の enforce でファイル全体に対して評価し、実行後に判定できる `pre_edit` の enforce（下記）も評価して、全ファイルの結果を 1 つの block / warn にまとめる。そのあと `.claude/gate.yaml` があるときだけ変更ファイルとして記録し、記録があれば該当ルールを実行する。feedback の検査は `gate.yaml` が無くても動く。git の履歴・作業ツリー操作（rebase / checkout / merge など）は検査も記録もしない。 |
 | PreToolUse（Agent / SendMessage）、任意 | `src/agent-launch-guard.ts` | `agentLaunchGuard` が `true` のときだけ有効。サブエージェントへ指示を送る前に、送信本文を見せて確認する。 |
-| Notification | `src/notification.ts`（`notify`） | 確認待ちのときにデスクトップ通知（`terminal-notifier` が必要、macOS）。 |
+| Notification | `src/notification.ts`（`notify`）と command hook `scripts/notification.sh` | 確認待ちのときにデスクトップ通知（`terminal-notifier` が必要、macOS）。mod の `classic.Notification` と、`hooks/hooks.json` の `command` hook（`scripts/notification.sh`、`jq` が必要）の両方で登録している。後者は settings hook なので組織のガードに飛ばされない。[ネイティブイベント](#ネイティブイベント組織のガードが-classic-を飛ばす環境)を参照。 |
 | Stop | `src/all-stop.ts` | ゲートの `checks` フェーズ（直っていない rules の失敗を再実行し、予約された consistency checks を実行）、`src/feedback-stop-check.ts`、`stop` 通知を順に実行する。 |
 | SubagentStop | ゲートの `checks` フェーズ、`src/feedback-stop-check.ts`、続けて `src/subagent-report.ts`（`saveSubagentReport`） | サブエージェント向けの同じゲートと `stop_check` ルール。結果は呼び出し元のエージェントへ渡すために控えます（[サブエージェントの結果](#results-of-subagents)）。 |
 | PostToolUse（Agent） | `src/subagent-report.ts`（`subagentReport`） | 終わったサブエージェントの gate / `stop_check` の結果を、呼び出し元のエージェントの context に追加します。 |
+
+### ネイティブイベント（組織のガードが `classic.*` を飛ばす環境）
+
+Claude Code を組織が管理している環境（Team / Enterprise ログイン、または managed settings）では、組み込みのガード `sec-default@builtin` が最初に走り、`classic.*` イベントをインストールしたプラグインすべてに対して飛ばします（`/plugin` に「Its hooks on classic.SessionStart, ... do not run here」と出ます）。そこでは上の `classic.*` のフックが一つも走りません。そのため、同じ処理をネイティブイベントにも登録し、**`classic.*` のフックが一度も走っていないときだけ**そちらで行います。
+
+| ネイティブイベント | 代わりに担うもの | 内容 |
+| --- | --- | --- |
+| `session.start` | SessionStart | `source` 無しの `src/reset-gate.ts`: 24 時間より古い状態の掃除だけを行う（mod のリロード後にも発火するので、自セッションの状態は消さない）。 |
+| `session.end`（`reason: clear`） | SessionStart の `source: clear` | 自セッションのゲート状態を消す。`resume` では残す。 |
+| `prompt.submit` | UserPromptSubmit | ルールファイルと確定済みの feedback ルールを `context`（Claude だけが読む）に足す。 |
+| `tool.check` | PreToolUse の `deny` / `ask` | `pre_bash` / `pre_edit`（とエージェント起動の確認）を評価し、`deny` を返すか、`allow` を `ask` に引き上げる。ルールや他の hook による `deny` はそのまま残す。`tool.call` は `ask` を返せないので、deny も ask もここでまとめて判定する（`classic.PreToolUse` と権限ルールの後に発火する）。 |
+| `tool.call` | PreToolUse（Bash の開始時刻）、PostToolUse（ツール後の処理すべて。サブエージェントの結果の受け渡しを含む） | 呼び出しの前に Bash の開始時刻を控え、`next(e)` の後にツールの入力と結果から PostToolUse の処理を走らせる。拒否・失敗した呼び出しは classic と同じく何もしない。block の理由や context は、`tool.call` から Claude へ渡す口が無いので、会話に user 行として足す（`$.session.append`）。 |
+| `turn.complete` | Stop、SubagentStop | メインのターンは `src/all-stop.ts` を実行する。 |
+
+classic との違い:
+
+- **二重に動かさない。** `classic.*` のフックは走るたびにその記録を残す（`$.state` のキー `feedback-gate.classicSeen`。mod のリロードをまたいで残る。加えてマーカーファイル `~/.claude/feedback/.classic_seen/<session>`。24 時間後に掃除される）。記録を見たネイティブのフックは `next(e)` で素通りする。`tool.call` では `next(e)` の後でもう一度記録を読む（`classic.PreToolUse` / `PostToolUse` はその内側で走るため）ので、最初の呼び出しでも PostToolUse の処理が二重に走らない。
+- **`turn.complete` は block できない。** classic の `Stop` は exit 2 / `decision: block` で Claude に作業を続けさせられました。メインのターンの block は、`$.prompt.submit` で新しいプロンプトとして投げ直し（ゲートの試行回数は `stop_hook_active` として引き継ぐ）、回答の下に 1 行を出します。投げ直せないときは toast に出します。**サブエージェントの**ターンは投げ直せません（`$.prompt.submit` は会話本体に送られる）。理由を 1 行で出すだけで、結果は呼び出し元の PostToolUse(Agent) の報告のために控えます。`continue: false`（`preventContinuation`）は再現しません。
+- **Notification** にはネイティブのイベントがありません。`classic.Notification` の mod フックと、`hooks.json` の command hook `scripts/notification.sh` の両方を登録しています。`classic.*` が飛ばされる環境では command hook が代わりに通知し、両方走る環境では command hook がセッションのマーカーファイルを見て黙ります（マーカーはどの `classic.*` フックも書き、`classic.Notification` のたびに更新されます）。
+- ネイティブイベントのフィールドは防御的に読んでいます（`tool.check` は `e.tool` / `e.input` / `e.agentId`、`turn.complete` は `e.answer` / `e.agentId` / `e.isAborted`）。
 
 ### Bash で書いたファイル
 
@@ -205,11 +225,12 @@ checks フェーズ（Stop / SubagentStop）で 1 件以上のコマンドが実
   - macOS の通知用に `osascript`（前面ウィンドウの名前を読み、今見ているプロジェクトなら通知しないため）と `terminal-notifier`（通知を表示します。クリックすると `open -b <ターミナルアプリ>` か `code -r <プロジェクト>` でウィンドウを前面に出します）。
 - **書き込むファイル**:
   - `<project>/.claude/.gate-status/`: gate の状態、コマンドのログ、ロック（プロジェクトに `.claude/gate.yaml` があるときだけ）。
-  - `~/.claude/feedback/`: `.violations.jsonl`、`.errors.jsonl`、`.count_state/`、`.ask_state/`、`.bash_started/`。
+  - `~/.claude/feedback/`: `.violations.jsonl`、`.errors.jsonl`、`.count_state/`、`.ask_state/`、`.bash_started/`、`.classic_seen/`（セッションごとの空のマーカー）。
   - フィードバックルールのファイル（Claude が従う指示）の frontmatter にある `count:` の行。`autoCount` が有効なときにルール違反があると書き換えます（プラグインの設定で無効にできます）。`/correct apply` でも書き換えます。ファイルのそれ以外の部分は変えません。
   - 設定ファイル、`CLAUDE.md`、ビルドや起動のファイル、フックの設定は書きません。
 - **権限の判定**（PreToolUse）: 返すのは `deny` か `ask` だけで、`allow` は返しません。呼び出しを厳しくすることはあっても、あなた自身の権限確認を飛ばすことはありません。判定するのは、Bash / Edit / Write / MultiEdit でフィードバックルールに一致したとき（ルールの `count` / `severity` により `deny` か `ask`）と、`agentLaunchGuard` が有効なときの `Agent` / `SendMessage`（全文を見せて `ask`）だけです。それ以外はイベントをそのまま次へ渡します。権限モード、設定、エージェント、Remote Control は変えません。
 - **追加するコンテキスト**: UserPromptSubmit で、ルールファイルと確定したフィードバックルール（`count >= 3`）をコンテキストに加えます。PostToolUse・Stop・SubagentStop では、gate の結果とルール違反を Claude に返します（フィードバックかブロックの理由として）。PostToolUse(Agent) では、終わったサブエージェントの結果を呼び出し元のコンテキストに加えます。
+- **ネイティブイベント**: 組織のガードが `classic.*` を飛ばす環境では、同じ検査を `tool.check`（`deny` を返すか `ask` に引き上げるだけで `allow` は返さない）、`tool.call`、`prompt.submit`（context を足す）、`turn.complete`（Stop の block を `$.prompt.submit` でプロンプトとして投げ直す、または `$.session.append` で user 行を足すことがある）、`session.start`、`session.end` で行います。`classic.*` のフックが一度でも走った後は何もしません。`hooks/hooks.json` には `Notification` の command hook（`scripts/notification.sh`）もあります。
 - **コマンド**: セッション開始時に `/correct` を登録し、`command.run` のフックはこのコマンドにだけ応答します。
 - **同梱ファイル**: `hooks/register.js` は `src/` から `scripts/build.ts` で作るもので、minify していません。`hooks/vendor/yaml.js` と `hooks/vendor/i18next.js` は npm パッケージの [`yaml`](https://www.npmjs.com/package/yaml) と [`i18next`](https://www.npmjs.com/package/i18next)（`package.json` / `bun.lock` で固定した版）で、ファイルを小さくするためだけに minify しています。検査で報告される getter、`Object.defineProperty`、Promise の判定（`typeof x.then === "function"`）は、この 2 つのライブラリ側のコードです（yaml のドキュメントのクラス、i18next の非同期読み込み）。プラグイン自身のコードは `Proxy`、`eval`、`new Function` を使っていません。
 

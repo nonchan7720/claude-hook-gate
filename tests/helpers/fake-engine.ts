@@ -22,6 +22,12 @@ export type FakeEngineOptions = {
   stubCommands?: string[]
   /** $.command.register に渡された引数を順に記録する。 */
   commandLog?: Array<{ name: string; description: string }>
+  /** $.prompt.submit に渡された引数を順に記録する。 */
+  submitLog?: Array<{ text: string }>
+  /** $.session.append に渡された user 行の本文を順に記録する。 */
+  appendLog?: string[]
+  /** $.ui.toast に渡されたテキストを順に記録する。 */
+  toastLog?: string[]
 }
 
 export type FakeEngine = {
@@ -34,9 +40,24 @@ export function makeEngine(opts: FakeEngineOptions): FakeEngine {
   // 既定の言語は日本語（テストの期待値は日本語で書かれている）。opts.env の LANG / options.language で切り替えられる。
   const env = { HOME: TEST_HOME, PATH: process.env.PATH ?? '', LANG: 'ja_JP.UTF-8', ...opts.env } as Record<string, string | undefined>
   const io = makeIo({ projectDir: opts.projectDir })
+  const stateValues = new Map<string, unknown>()
   const $: Engine = {
     plugin: { root: REPO_ROOT },
-    session: { id: async () => opts.sessionId ?? 'sess-1', root: async () => opts.projectDir, cwd: async () => opts.projectDir },
+    session: {
+      id: async () => opts.sessionId ?? 'sess-1',
+      root: async () => opts.projectDir,
+      cwd: async () => opts.projectDir,
+      append: async (init) => void opts.appendLog?.push(init.message.content.map((c) => c.text).join('')),
+    },
+    // $.state は plugin / key ごとの値。エンジンごとに独立している（テスト間で「classic が走った」印が漏れない）。
+    state: {
+      get: async (ref) => ({ value: stateValues.get(`${ref.plugin}.${ref.key}`), version: 1 }),
+      set: async (ref, value) => {
+        stateValues.set(`${ref.plugin}.${ref.key}`, value)
+        return { isSet: true }
+      },
+    },
+    prompt: { submit: async (init) => void opts.submitLog?.push({ text: init.text }) },
     env: { get: async (name) => env[name] },
     clock: {
       now: async () => Date.now(),
@@ -49,6 +70,7 @@ export function makeEngine(opts: FakeEngineOptions): FakeEngine {
     },
     ui: {
       status: (text) => void opts.statusLog?.push(text),
+      toast: (text) => void opts.toastLog?.push(text),
       invalidate: (event) => void opts.invalidateLog?.push(event),
     },
     fs: {

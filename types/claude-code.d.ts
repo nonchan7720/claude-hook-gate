@@ -47,11 +47,22 @@ declare module 'claude-code' {
       id(): Promise<string>
       root(): Promise<string>
       cwd(): Promise<string>
+      /** 会話に行を足す（Claude が次に読む user 行）。 */
+      append(init: { message: { type: 'user' | 'system'; content: Array<{ type: 'text'; text: string }> }; agentId?: string }): Promise<unknown>
     }
+    /** セッション内で mod のリロードをまたいで保持される値。参照は plugin / key を文字列リテラルで書き、types/index.d.ts の PluginState に載せる。 */
+    state: {
+      get(ref: { plugin: string; key: string }): Promise<{ value: unknown; version: number }>
+      set(ref: { plugin: string; key: string }, value: unknown, init?: { ifVersion?: number }): Promise<{ isSet: boolean }>
+    }
+    /** Claude にプロンプトを送る。turn.complete 以降のイベントから呼ぶ。 */
+    prompt: { submit(init: { text: string; asUser?: boolean }): Promise<unknown> }
     env: { get(name: string): Promise<string | undefined> }
     clock: { now(): Promise<number>; every(ms: number, fn: () => void): Timer }
     ui: {
       status(text: string | undefined): void
+      /** 一時的な通知を出す。 */
+      toast(text: string): void
       /** `ui.render` を描き直させる（毎秒 10 回まで）。 */
       invalidate(event: 'ui.render'): void
     }

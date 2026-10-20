@@ -1,5 +1,8 @@
 # hook が出すメッセージ（日本語）。en.yaml と同じキーを持つ（tests/i18n.spec.ts がキーの一致を検査する）。
 # {{name}} は i18next の補間。
+nativeStop:
+  continued: "feedback-gate: 止める前に直す点があったため、Claude に作業を続けさせます"
+  subagentBlocked: "feedback-gate: サブエージェントの終了時の検証で指摘がありました（続けさせることはできません）: {{reason}}"
 notify:
   waiting: "確認待ち"
   waitingFallback: "確認を待っています"
