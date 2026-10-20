@@ -1,224 +1,3 @@
-// src/path.ts
-var isAbsolute = (p) => p.startsWith("/");
-function join(...parts) {
-  let out = "";
-  for (const part of parts) {
-    if (part.startsWith("/"))
-      out = part;
-    else if (out === "" || out.endsWith("/"))
-      out += part;
-    else
-      out += `/${part}`;
-  }
-  return out;
-}
-function normpath(p) {
-  if (p === "")
-    return ".";
-  const abs = p.startsWith("/");
-  const out = [];
-  for (const seg of p.split("/")) {
-    if (seg === "" || seg === ".")
-      continue;
-    if (seg === "..") {
-      const last = out[out.length - 1];
-      if (last !== undefined && last !== "..")
-        out.pop();
-      else if (!abs)
-        out.push("..");
-    } else {
-      out.push(seg);
-    }
-  }
-  const joined = out.join("/");
-  if (abs)
-    return `/${joined}`;
-  return joined === "" ? "." : joined;
-}
-function dirname(p) {
-  const i = p.lastIndexOf("/") + 1;
-  const head = p.slice(0, i);
-  if (head !== "" && head !== "/".repeat(head.length))
-    return head.replace(/\/+$/, "");
-  return head;
-}
-function basename(p) {
-  return p.slice(p.lastIndexOf("/") + 1);
-}
-function splitext(p) {
-  const base = basename(p);
-  const dot = base.lastIndexOf(".");
-  if (dot <= 0 || /^\.+$/.test(base.slice(0, dot)))
-    return [p, ""];
-  const cut = p.length - base.length + dot;
-  return [p.slice(0, cut), p.slice(cut)];
-}
-function relpath(path, start) {
-  const a = normpath(path).split("/").filter(Boolean);
-  const b = normpath(start).split("/").filter(Boolean);
-  let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i])
-    i++;
-  const rel = [...b.slice(i).map(() => ".."), ...a.slice(i)];
-  return rel.length === 0 ? "." : rel.join("/");
-}
-function expandUser(p, home) {
-  if (!home)
-    return p;
-  if (p === "~")
-    return home;
-  if (p.startsWith("~/"))
-    return home.replace(/\/+$/, "") + p.slice(1);
-  return p;
-}
-
-// src/glob.ts
-function splitTopCommas(s) {
-  const parts = [];
-  let depth = 0;
-  let cur = "";
-  for (const c of s) {
-    if (c === "{") {
-      depth++;
-      cur += c;
-    } else if (c === "}") {
-      depth--;
-      cur += c;
-    } else if (c === "," && depth === 0) {
-      parts.push(cur);
-      cur = "";
-    } else {
-      cur += c;
-    }
-  }
-  parts.push(cur);
-  return parts;
-}
-function expandBraces(s) {
-  let depth = 0;
-  let start = -1;
-  for (let i = 0;i < s.length; i++) {
-    const c = s.charAt(i);
-    if (c === "{") {
-      if (depth === 0)
-        start = i;
-      depth++;
-    } else if (c === "}") {
-      depth--;
-      if (depth === 0) {
-        const pre = s.slice(0, start);
-        const inner = s.slice(start + 1, i);
-        const post = s.slice(i + 1);
-        const out = [];
-        for (const part of splitTopCommas(inner))
-          out.push(...expandBraces(pre + part + post));
-        return out;
-      }
-    }
-  }
-  return [s];
-}
-var escapeRegex = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-function globToRegex(pat) {
-  const n = pat.length;
-  let i = 0;
-  let out = "^";
-  while (i < n) {
-    const c = pat.charAt(i);
-    if (c === "*") {
-      let j = i;
-      while (j < n && pat.charAt(j) === "*")
-        j++;
-      if (j - i >= 2) {
-        if (j < n && pat.charAt(j) === "/") {
-          out += "(?:.*/)?";
-          i = j + 1;
-        } else {
-          out += ".*";
-          i = j;
-        }
-      } else {
-        out += "[^/]*";
-        i++;
-      }
-    } else if (c === "?") {
-      out += "[^/]";
-      i++;
-    } else if (c === "[") {
-      let j = i + 1;
-      if (j < n && "!^".includes(pat.charAt(j)))
-        j++;
-      if (j < n && pat.charAt(j) === "]")
-        j++;
-      while (j < n && pat.charAt(j) !== "]")
-        j++;
-      let cls = pat.slice(i, j + 1);
-      if (cls.startsWith("[!"))
-        cls = `[^${cls.slice(2)}`;
-      out += cls;
-      i = j + 1;
-    } else {
-      out += escapeRegex(c);
-      i++;
-    }
-  }
-  return `${out}$`;
-}
-function matchPatterns(pats) {
-  const pairs = [];
-  for (const pat of pats) {
-    for (const ex of expandBraces(pat))
-      pairs.push([ex, new RegExp(globToRegex(ex))]);
-  }
-  return pairs;
-}
-var compileGlobs = (patterns) => matchPatterns(patterns).map(([, rx]) => rx);
-function asList(v) {
-  if (typeof v === "string")
-    return [v];
-  if (Array.isArray(v))
-    return v;
-  return [];
-}
-var hasMagic = (seg) => /[*?[]/.test(seg);
-async function globExists(io, pattern) {
-  const abs = pattern.startsWith("/");
-  const segs = pattern.split("/").filter((s) => s !== "");
-  return walk(io, abs ? "/" : "", segs, 0);
-}
-async function walk(io, dir, segs, i) {
-  if (i >= segs.length)
-    return dir === "" ? true : io.exists(dir);
-  const seg = segs.at(i) ?? "";
-  const here = dir === "" ? "." : dir;
-  if (seg === "**") {
-    if (i === segs.length - 1)
-      return (await io.stat(here))?.kind === "dir";
-    if (await walk(io, dir, segs, i + 1))
-      return true;
-    for (const e of await io.list(here)) {
-      if (e.name.startsWith("."))
-        continue;
-      const sub = join(dir, e.name);
-      if ((await io.stat(sub))?.kind === "dir" && await walk(io, sub, segs, i))
-        return true;
-    }
-    return false;
-  }
-  if (!hasMagic(seg))
-    return walk(io, join(dir, seg), segs, i + 1);
-  const rx = new RegExp(globToRegex(seg));
-  for (const e of await io.list(here)) {
-    if (e.name.startsWith(".") && !seg.startsWith("."))
-      continue;
-    if (!rx.test(e.name))
-      continue;
-    if (await walk(io, join(dir, e.name), segs, i + 1))
-      return true;
-  }
-  return false;
-}
-
 // src/i18n.ts
 import i18next from "./vendor/i18next.js";
 import { parse } from "./vendor/yaml.js";
@@ -552,21 +331,8 @@ function resolveLang(env, configured) {
   return "en";
 }
 
-// src/load-yaml.ts
-import { parse as parse2 } from "./vendor/yaml.js";
-var PY_TRUE = /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON)$/;
-var PY_FALSE = /^(?:no|No|NO|false|False|FALSE|off|Off|OFF)$/;
-var pyBool = (original) => ({
-  ...original,
-  test: /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON|no|No|NO|false|False|FALSE|off|Off|OFF)$/,
-  resolve: (str) => PY_TRUE.test(str) ? true : PY_FALSE.test(str) ? false : str
-});
-var parseYaml = (text) => parse2(text, {
-  schema: "yaml-1.1",
-  uniqueKeys: false,
-  logLevel: "error",
-  customTags: (tags) => tags.map((t) => typeof t === "object" && ("tag" in t) && t.tag === "tag:yaml.org,2002:bool" ? pyBool(t) : t)
-});
+// src/io.ts
+var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
 
 // src/pyutil.ts
 function truthy(v) {
@@ -663,6 +429,282 @@ function jqStr(v) {
   return typeof v === "string" ? v : JSON.stringify(v);
 }
 var isDict = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+// src/agent-launch-guard.ts
+var ASK_AGENT_TYPES = ["code-implementer"];
+var ALLOW_RECIPIENTS = ["git-operator"];
+var ask = (reason) => ok(`${JSON.stringify({
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "ask",
+    permissionDecisionReason: reason
+  }
+})}
+`);
+function agentLaunchGuard(payload, lang) {
+  const t = tr(lang);
+  const tool = jqStr(payload.tool_name);
+  const input = isDict(payload.tool_input) ? payload.tool_input : {};
+  if (tool === "Agent") {
+    const agentType = jqStr(input.subagent_type);
+    if (agentType === "")
+      return ok();
+    if (ASK_AGENT_TYPES.includes(agentType)) {
+      return ask(`${t("launch.promptTo", { agentType })}
+
+${jqStr(input.prompt)}
+
+${t("launch.checklist")}`);
+    }
+  } else if (tool === "SendMessage") {
+    const recipient = jqStr(input.to);
+    if (!ALLOW_RECIPIENTS.includes(recipient)) {
+      return ask(`${t("launch.messageTo", { recipient: recipient || t("launch.unknownRecipient") })}
+
+${jqStr(input.message)}
+
+${t("launch.checklist")}`);
+    }
+  }
+  return ok();
+}
+
+// src/path.ts
+var isAbsolute = (p) => p.startsWith("/");
+function join(...parts) {
+  let out = "";
+  for (const part of parts) {
+    if (part.startsWith("/"))
+      out = part;
+    else if (out === "" || out.endsWith("/"))
+      out += part;
+    else
+      out += `/${part}`;
+  }
+  return out;
+}
+function normpath(p) {
+  if (p === "")
+    return ".";
+  const abs = p.startsWith("/");
+  const out = [];
+  for (const seg of p.split("/")) {
+    if (seg === "" || seg === ".")
+      continue;
+    if (seg === "..") {
+      const last = out[out.length - 1];
+      if (last !== undefined && last !== "..")
+        out.pop();
+      else if (!abs)
+        out.push("..");
+    } else {
+      out.push(seg);
+    }
+  }
+  const joined = out.join("/");
+  if (abs)
+    return `/${joined}`;
+  return joined === "" ? "." : joined;
+}
+function dirname(p) {
+  const i = p.lastIndexOf("/") + 1;
+  const head = p.slice(0, i);
+  if (head !== "" && head !== "/".repeat(head.length))
+    return head.replace(/\/+$/, "");
+  return head;
+}
+function basename(p) {
+  return p.slice(p.lastIndexOf("/") + 1);
+}
+function splitext(p) {
+  const base = basename(p);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || /^\.+$/.test(base.slice(0, dot)))
+    return [p, ""];
+  const cut = p.length - base.length + dot;
+  return [p.slice(0, cut), p.slice(cut)];
+}
+function relpath(path, start) {
+  const a = normpath(path).split("/").filter(Boolean);
+  const b = normpath(start).split("/").filter(Boolean);
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i])
+    i++;
+  const rel = [...b.slice(i).map(() => ".."), ...a.slice(i)];
+  return rel.length === 0 ? "." : rel.join("/");
+}
+function expandUser(p, home) {
+  if (!home)
+    return p;
+  if (p === "~")
+    return home;
+  if (p.startsWith("~/"))
+    return home.replace(/\/+$/, "") + p.slice(1);
+  return p;
+}
+
+// src/glob.ts
+function splitTopCommas(s) {
+  const parts = [];
+  let depth = 0;
+  let cur = "";
+  for (const c of s) {
+    if (c === "{") {
+      depth++;
+      cur += c;
+    } else if (c === "}") {
+      depth--;
+      cur += c;
+    } else if (c === "," && depth === 0) {
+      parts.push(cur);
+      cur = "";
+    } else {
+      cur += c;
+    }
+  }
+  parts.push(cur);
+  return parts;
+}
+function expandBraces(s) {
+  let depth = 0;
+  let start = -1;
+  for (let i = 0;i < s.length; i++) {
+    const c = s.charAt(i);
+    if (c === "{") {
+      if (depth === 0)
+        start = i;
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0) {
+        const pre = s.slice(0, start);
+        const inner = s.slice(start + 1, i);
+        const post = s.slice(i + 1);
+        const out = [];
+        for (const part of splitTopCommas(inner))
+          out.push(...expandBraces(pre + part + post));
+        return out;
+      }
+    }
+  }
+  return [s];
+}
+var escapeRegex = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+function globToRegex(pat) {
+  const n = pat.length;
+  let i = 0;
+  let out = "^";
+  while (i < n) {
+    const c = pat.charAt(i);
+    if (c === "*") {
+      let j = i;
+      while (j < n && pat.charAt(j) === "*")
+        j++;
+      if (j - i >= 2) {
+        if (j < n && pat.charAt(j) === "/") {
+          out += "(?:.*/)?";
+          i = j + 1;
+        } else {
+          out += ".*";
+          i = j;
+        }
+      } else {
+        out += "[^/]*";
+        i++;
+      }
+    } else if (c === "?") {
+      out += "[^/]";
+      i++;
+    } else if (c === "[") {
+      let j = i + 1;
+      if (j < n && "!^".includes(pat.charAt(j)))
+        j++;
+      if (j < n && pat.charAt(j) === "]")
+        j++;
+      while (j < n && pat.charAt(j) !== "]")
+        j++;
+      let cls = pat.slice(i, j + 1);
+      if (cls.startsWith("[!"))
+        cls = `[^${cls.slice(2)}`;
+      out += cls;
+      i = j + 1;
+    } else {
+      out += escapeRegex(c);
+      i++;
+    }
+  }
+  return `${out}$`;
+}
+function matchPatterns(pats) {
+  const pairs = [];
+  for (const pat of pats) {
+    for (const ex of expandBraces(pat))
+      pairs.push([ex, new RegExp(globToRegex(ex))]);
+  }
+  return pairs;
+}
+var compileGlobs = (patterns) => matchPatterns(patterns).map(([, rx]) => rx);
+function asList(v) {
+  if (typeof v === "string")
+    return [v];
+  if (Array.isArray(v))
+    return v;
+  return [];
+}
+var hasMagic = (seg) => /[*?[]/.test(seg);
+async function globExists(io, pattern) {
+  const abs = pattern.startsWith("/");
+  const segs = pattern.split("/").filter((s) => s !== "");
+  return walk(io, abs ? "/" : "", segs, 0);
+}
+async function walk(io, dir, segs, i) {
+  if (i >= segs.length)
+    return dir === "" ? true : io.exists(dir);
+  const seg = segs.at(i) ?? "";
+  const here = dir === "" ? "." : dir;
+  if (seg === "**") {
+    if (i === segs.length - 1)
+      return (await io.stat(here))?.kind === "dir";
+    if (await walk(io, dir, segs, i + 1))
+      return true;
+    for (const e of await io.list(here)) {
+      if (e.name.startsWith("."))
+        continue;
+      const sub = join(dir, e.name);
+      if ((await io.stat(sub))?.kind === "dir" && await walk(io, sub, segs, i))
+        return true;
+    }
+    return false;
+  }
+  if (!hasMagic(seg))
+    return walk(io, join(dir, seg), segs, i + 1);
+  const rx = new RegExp(globToRegex(seg));
+  for (const e of await io.list(here)) {
+    if (e.name.startsWith(".") && !seg.startsWith("."))
+      continue;
+    if (!rx.test(e.name))
+      continue;
+    if (await walk(io, join(dir, e.name), segs, i + 1))
+      return true;
+  }
+  return false;
+}
+
+// src/load-yaml.ts
+import { parse as parse2 } from "./vendor/yaml.js";
+var PY_TRUE = /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON)$/;
+var PY_FALSE = /^(?:no|No|NO|false|False|FALSE|off|Off|OFF)$/;
+var pyBool = (original) => ({
+  ...original,
+  test: /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON|no|No|NO|false|False|FALSE|off|Off|OFF)$/,
+  resolve: (str) => PY_TRUE.test(str) ? true : PY_FALSE.test(str) ? false : str
+});
+var parseYaml = (text) => parse2(text, {
+  schema: "yaml-1.1",
+  uniqueKeys: false,
+  logLevel: "error",
+  customTags: (tags) => tags.map((t) => typeof t === "object" && ("tag" in t) && t.tag === "tag:yaml.org,2002:bool" ? pyBool(t) : t)
+});
 
 // src/roots.ts
 function relativize(p, projectDir) {
@@ -1331,9 +1373,6 @@ async function evalStopCheck(io, rules, projectDir, changedFiles) {
   });
 }
 
-// src/io.ts
-var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
-
 // src/feedback-stop-check.ts
 var MAX_ATTEMPTS = 3;
 var attemptsPath = (projectDir, sessionId, agentId) => join(projectDir, ".claude", ".gate-status", `feedback_gate_attempts.${agentId ? `${sessionId}--${agentId}` : sessionId}.txt`);
@@ -1603,10 +1642,6 @@ function finishedSummary(entries, lang) {
 var summaryFile = (io, sessionId) => join(gateStatusDir(io), `summary.${sessionId}.txt`);
 var saveSummary = (io, sessionId, text) => io.writeFile(summaryFile(io, sessionId), text);
 var clearSummary = (io, sessionId) => io.removeFiles([summaryFile(io, sessionId)]);
-async function loadSummary(io, sessionId) {
-  const text = await io.readFile(summaryFile(io, sessionId));
-  return text === undefined || text === "" ? undefined : text;
-}
 
 // src/shared-run.ts
 var GRACE_MS = 5000;
@@ -3144,45 +3179,6 @@ async function allStop(io, payload) {
   return { exitCode: 0, stdout, stderr };
 }
 
-// src/agent-launch-guard.ts
-var ASK_AGENT_TYPES = ["code-implementer"];
-var ALLOW_RECIPIENTS = ["git-operator"];
-var ask = (reason) => ok(`${JSON.stringify({
-  hookSpecificOutput: {
-    hookEventName: "PreToolUse",
-    permissionDecision: "ask",
-    permissionDecisionReason: reason
-  }
-})}
-`);
-function agentLaunchGuard(payload, lang) {
-  const t = tr(lang);
-  const tool = jqStr(payload.tool_name);
-  const input = isDict(payload.tool_input) ? payload.tool_input : {};
-  if (tool === "Agent") {
-    const agentType = jqStr(input.subagent_type);
-    if (agentType === "")
-      return ok();
-    if (ASK_AGENT_TYPES.includes(agentType)) {
-      return ask(`${t("launch.promptTo", { agentType })}
-
-${jqStr(input.prompt)}
-
-${t("launch.checklist")}`);
-    }
-  } else if (tool === "SendMessage") {
-    const recipient = jqStr(input.to);
-    if (!ALLOW_RECIPIENTS.includes(recipient)) {
-      return ask(`${t("launch.messageTo", { recipient: recipient || t("launch.unknownRecipient") })}
-
-${jqStr(input.message)}
-
-${t("launch.checklist")}`);
-    }
-  }
-  return ok();
-}
-
 // src/feedback-guard.ts
 var SEVERITY_ORDER = { warn: 0, ask: 1, block: 2, deny: 3 };
 var decisionFor = (severity) => severity === "deny" || severity === "block" ? "deny" : "ask";
@@ -3616,276 +3612,6 @@ async function feedbackPostEdit(io, payload) {
   }
 }
 
-// src/outcome.ts
-var TEXT_CONTEXT_EVENTS = new Set(["UserPromptSubmit", "SessionStart"]);
-var parseJson = (text) => {
-  const t = text.trim();
-  if (!t.startsWith("{"))
-    return;
-  try {
-    const v = JSON.parse(t);
-    return isDict(v) ? v : undefined;
-  } catch {
-    return;
-  }
-};
-var fromJson = (event, json) => {
-  const out = {};
-  if (json.decision === "block")
-    out.block = String(json.reason ?? "");
-  if (json.continue === false) {
-    out.preventContinuation = true;
-    if (typeof json.stopReason === "string")
-      out.stopReason = json.stopReason;
-  }
-  const specific = json.hookSpecificOutput;
-  if (isDict(specific)) {
-    if (typeof specific.additionalContext === "string" && specific.additionalContext !== "") {
-      out.additionalContext = [specific.additionalContext];
-    }
-    if (event === "PreToolUse") {
-      const reason = String(specific.permissionDecisionReason ?? "");
-      if (specific.permissionDecision === "allow")
-        out.allow = true;
-      else if (specific.permissionDecision === "ask")
-        out.ask = reason;
-      else if (specific.permissionDecision === "deny")
-        out.deny = reason;
-    }
-  }
-  return out;
-};
-var toOutcome = (event, ran) => {
-  if (ran.exitCode === 2) {
-    const reason = ran.stderr.trim() || "hook exited with code 2";
-    return event === "PreToolUse" ? { deny: reason } : { block: reason };
-  }
-  if (ran.exitCode !== 0)
-    return {};
-  const json = parseJson(ran.stdout);
-  if (json)
-    return fromJson(event, json);
-  const text = ran.stdout.trim();
-  return text !== "" && TEXT_CONTEXT_EVENTS.has(event) ? { additionalContext: [text] } : {};
-};
-var merge = (first, second) => {
-  const out = { ...second, ...first };
-  const ctx = [...first.additionalContext ?? [], ...second.additionalContext ?? []];
-  if (ctx.length > 0)
-    out.additionalContext = ctx;
-  else
-    delete out.additionalContext;
-  return out;
-};
-var outcomeToClassic = (event, outcome, stderr = "") => {
-  const json = {};
-  const specific = {};
-  const context = (outcome.additionalContext ?? []).filter((c) => c.trim() !== "").join(`
-
-`);
-  if (event === "PreToolUse") {
-    const decision = outcome.deny !== undefined ? "deny" : outcome.ask !== undefined ? "ask" : undefined;
-    if (decision !== undefined) {
-      specific.permissionDecision = decision;
-      specific.permissionDecisionReason = outcome.deny ?? outcome.ask ?? "";
-    }
-  } else if (outcome.block !== undefined) {
-    json.decision = "block";
-    json.reason = outcome.block;
-  }
-  if (context !== "" && event !== "Stop" && event !== "SubagentStop" && event !== "Notification")
-    specific.additionalContext = context;
-  if (Object.keys(specific).length > 0)
-    json.hookSpecificOutput = { hookEventName: event, ...specific };
-  if (outcome.preventContinuation) {
-    json.continue = false;
-    if (outcome.stopReason !== undefined)
-      json.stopReason = outcome.stopReason;
-  }
-  return { exitCode: 0, stdout: Object.keys(json).length > 0 ? `${JSON.stringify(json)}
-` : "", stderr };
-};
-
-// src/record-changes.ts
-async function recordChanges(io, payload) {
-  const projectDir = io.projectDir || io.cwd;
-  if (!await io.exists(join(projectDir, ".claude", "gate.yaml")))
-    return ok();
-  const filePath = jqStr(isDict(payload.tool_input) ? payload.tool_input.file_path : undefined);
-  const sessionId = jqStr(payload.session_id) || "unknown";
-  const agentId = jqStr(payload.agent_id);
-  const stateId = agentId ? `${sessionId}--${agentId}` : sessionId;
-  const memo = join(projectDir, ".claude", ".gate-status", `changed_files.${stateId}.txt`);
-  if (filePath) {
-    const existing = await io.readFile(memo) ?? "";
-    if (!existing.split(`
-`).includes(filePath))
-      await io.writeFile(memo, `${existing}${filePath}
-`);
-  }
-  return ok();
-}
-
-// src/rules-file.ts
-var DEFAULT_RULES_FILE = "~/.claude/feedback-gate/feedback_rules.md";
-var bundledRulesName = (lang) => lang === "en" ? "feedback_rules.en.md" : "feedback_rules.md";
-async function loadRules(io, rulesFile) {
-  const home = io.env.HOME;
-  const configured = typeof rulesFile === "string" && rulesFile !== "" ? rulesFile : DEFAULT_RULES_FILE;
-  const custom = configured.startsWith("~") ? home ? `${home}${configured.slice(1)}` : undefined : configured;
-  const bundled = join(io.pluginRoot, "rules", bundledRulesName(io.lang));
-  for (const path of [custom, bundled]) {
-    if (path && await io.exists(path))
-      return (await io.readFile(path) ?? "").trim();
-  }
-  return "";
-}
-
-// src/subagent-report.ts
-var reportPath = (io, sessionId, agentId) => join(io.projectDir || io.cwd, ".claude", ".gate-status", `subagent_report.${sessionId}--${agentId}.json`);
-var blockReason = (stdout) => {
-  for (const line of stdout.split(`
-`)) {
-    try {
-      const v = JSON.parse(line);
-      if (isDict(v) && v.decision === "block" && typeof v.reason === "string")
-        return v.reason;
-    } catch {}
-  }
-  return "";
-};
-var feedbackText = (r) => (r.exitCode === 2 ? blockReason(r.stdout) || r.stderr : r.stderr).trim();
-async function loadReport(io, path) {
-  const text = await io.readFile(path);
-  if (text === undefined)
-    return;
-  try {
-    const v = JSON.parse(text);
-    return isDict(v) ? v : undefined;
-  } catch {
-    return;
-  }
-}
-async function saveSubagentReport(io, payload, gate, feedback) {
-  try {
-    const agentId = jqStr(payload.agent_id);
-    if (agentId === "")
-      return ok();
-    const path = reportPath(io, jqStr(payload.session_id) || "unknown", agentId);
-    const gateText = gate?.reportConsumed ? (await loadReport(io, path))?.gate ?? "" : (gate?.report ?? "").trim();
-    const fbText = feedback ? feedbackText(feedback) : "";
-    if (gateText === "" && fbText === "") {
-      await io.removeFiles([path]);
-      return ok();
-    }
-    const report = {
-      ...jqStr(payload.agent_type) ? { agentType: jqStr(payload.agent_type) } : {},
-      ...gateText ? { gate: gateText } : {},
-      ...fbText ? { feedback: fbText } : {}
-    };
-    await io.writeFile(path, `${JSON.stringify(report)}
-`);
-  } catch {}
-  return ok();
-}
-async function subagentReport(io, payload) {
-  const response = payload.tool_response;
-  const agentId = isDict(response) ? jqStr(response.agentId) : "";
-  if (agentId === "")
-    return ok();
-  const path = reportPath(io, jqStr(payload.session_id) || "unknown", agentId);
-  const report = await loadReport(io, path);
-  await io.removeFiles([path]);
-  if (!report || !report.gate && !report.feedback)
-    return ok();
-  const agent = report.agentType ? `${report.agentType} (${agentId})` : agentId;
-  const body = [tr(io.lang)("subagentReport.header", { agent }), report.gate, report.feedback].filter((s) => s).join(`
-`);
-  return ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: body } })}
-`);
-}
-
-// src/hooks.ts
-var PROGRESS_DELAY_MS = 3000;
-async function runStepsCollect(base, sessionId, event, steps) {
-  let acc = {};
-  let stderr = "";
-  let shown = false;
-  let pending;
-  let cancelDelay;
-  const show = () => {
-    if (shown || pending === undefined)
-      return;
-    shown = true;
-    cancelDelay?.();
-    base.progress?.(pending);
-  };
-  const io = {
-    ...base,
-    progress: (text) => {
-      if (shown)
-        return base.progress?.(text);
-      pending = text;
-      if (text === undefined || cancelDelay)
-        return;
-      if (!base.every)
-        return show();
-      cancelDelay = base.every(PROGRESS_DELAY_MS, show);
-      if (shown)
-        cancelDelay();
-    }
-  };
-  try {
-    for (const step of steps) {
-      const ran = await step(io).catch(() => {
-        return;
-      });
-      if (!ran)
-        continue;
-      acc = merge(acc, toOutcome(event, ran));
-      if (ran.exitCode === 0)
-        stderr += ran.stderr;
-    }
-  } finally {
-    cancelDelay?.();
-    if (shown)
-      base.progress?.(await loadSummary(base, sessionId));
-  }
-  return { outcome: acc, stderr };
-}
-var guardsTool = (options, tool) => options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool) || /^(Bash|Edit|Write|MultiEdit)$/.test(tool);
-function preGuardSteps(options, tool, payload) {
-  const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
-  const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
-  return tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
-}
-function postToolSteps(tool, payload) {
-  if (/^(Agent|Task)$/.test(tool))
-    return [(io) => subagentReport(io, payload)];
-  if (tool === "Bash")
-    return bashChangeSteps(payload);
-  if (!/^(Write|Edit|MultiEdit)$/.test(tool))
-    return;
-  return [(io) => recordChanges(io, payload), (io) => feedbackPostEdit(io, payload), (io) => stopTestGate(io, "rules", payload)];
-}
-function subagentStopSteps(payload) {
-  let gate;
-  let feedback;
-  return [
-    async (io) => gate = await stopTestGate(io, "checks", payload),
-    async (io) => feedback = await feedbackStopCheck(io, payload),
-    (io) => saveSubagentReport(io, payload, gate, feedback)
-  ];
-}
-async function promptStepsResult(io, sessionId, options) {
-  const mine = {};
-  const text = await loadRules(io, options.rulesFile);
-  if (text !== "")
-    mine.additionalContext = [text];
-  const inject = await runStepsCollect(io, sessionId, "UserPromptSubmit", [(i) => feedbackInject(i)]);
-  return { outcome: merge(mine, inject.outcome), stderr: inject.stderr };
-}
-
 // src/node-io.ts
 import { spawn } from "node:child_process";
 import * as fs from "node:fs";
@@ -4035,6 +3761,116 @@ function runProcess(argv, options = {}) {
   });
 }
 
+// src/outcome.ts
+var TEXT_CONTEXT_EVENTS = new Set(["UserPromptSubmit", "SessionStart"]);
+var parseJson = (text) => {
+  const t = text.trim();
+  if (!t.startsWith("{"))
+    return;
+  try {
+    const v = JSON.parse(t);
+    return isDict(v) ? v : undefined;
+  } catch {
+    return;
+  }
+};
+var fromJson = (event, json) => {
+  const out = {};
+  if (json.decision === "block")
+    out.block = String(json.reason ?? "");
+  if (json.continue === false) {
+    out.preventContinuation = true;
+    if (typeof json.stopReason === "string")
+      out.stopReason = json.stopReason;
+  }
+  const specific = json.hookSpecificOutput;
+  if (isDict(specific)) {
+    if (typeof specific.additionalContext === "string" && specific.additionalContext !== "") {
+      out.additionalContext = [specific.additionalContext];
+    }
+    if (event === "PreToolUse") {
+      const reason = String(specific.permissionDecisionReason ?? "");
+      if (specific.permissionDecision === "allow")
+        out.allow = true;
+      else if (specific.permissionDecision === "ask")
+        out.ask = reason;
+      else if (specific.permissionDecision === "deny")
+        out.deny = reason;
+    }
+  }
+  return out;
+};
+var toOutcome = (event, ran) => {
+  if (ran.exitCode === 2) {
+    const reason = ran.stderr.trim() || "hook exited with code 2";
+    return event === "PreToolUse" ? { deny: reason } : { block: reason };
+  }
+  if (ran.exitCode !== 0)
+    return {};
+  const json = parseJson(ran.stdout);
+  if (json)
+    return fromJson(event, json);
+  const text = ran.stdout.trim();
+  return text !== "" && TEXT_CONTEXT_EVENTS.has(event) ? { additionalContext: [text] } : {};
+};
+var merge = (first, second) => {
+  const out = { ...second, ...first };
+  const ctx = [...first.additionalContext ?? [], ...second.additionalContext ?? []];
+  if (ctx.length > 0)
+    out.additionalContext = ctx;
+  else
+    delete out.additionalContext;
+  return out;
+};
+var outcomeToClassic = (event, outcome, stderr = "") => {
+  const json = {};
+  const specific = {};
+  const context = (outcome.additionalContext ?? []).filter((c) => c.trim() !== "").join(`
+
+`);
+  if (event === "PreToolUse") {
+    const decision = outcome.deny !== undefined ? "deny" : outcome.ask !== undefined ? "ask" : undefined;
+    if (decision !== undefined) {
+      specific.permissionDecision = decision;
+      specific.permissionDecisionReason = outcome.deny ?? outcome.ask ?? "";
+    }
+  } else if (outcome.block !== undefined) {
+    json.decision = "block";
+    json.reason = outcome.block;
+  }
+  if (context !== "" && event !== "Stop" && event !== "SubagentStop" && event !== "Notification")
+    specific.additionalContext = context;
+  if (Object.keys(specific).length > 0)
+    json.hookSpecificOutput = { hookEventName: event, ...specific };
+  if (outcome.preventContinuation) {
+    json.continue = false;
+    if (outcome.stopReason !== undefined)
+      json.stopReason = outcome.stopReason;
+  }
+  return { exitCode: 0, stdout: Object.keys(json).length > 0 ? `${JSON.stringify(json)}
+` : "", stderr };
+};
+
+// src/record-changes.ts
+async function recordChanges(io, payload) {
+  const projectDir = io.projectDir || io.cwd;
+  if (!await io.exists(join(projectDir, ".claude", "gate.yaml")))
+    return ok();
+  const filePath = jqStr(isDict(payload.tool_input) ? payload.tool_input.file_path : undefined);
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  const agentId = jqStr(payload.agent_id);
+  const stateId = agentId ? `${sessionId}--${agentId}` : sessionId;
+  const memo = join(projectDir, ".claude", ".gate-status", `changed_files.${stateId}.txt`);
+  if (filePath) {
+    const existing = await io.readFile(memo) ?? "";
+    if (!existing.split(`
+`).includes(filePath))
+      await io.writeFile(memo, `${existing}${filePath}
+`);
+  }
+  return ok();
+}
+
 // src/reset-gate.ts
 var STATE_FILES = [
   ["changed_files", ".txt"],
@@ -4107,9 +3943,89 @@ async function resetGate(io, payload) {
   return ok();
 }
 
+// src/rules-file.ts
+var DEFAULT_RULES_FILE = "~/.claude/feedback-gate/feedback_rules.md";
+var bundledRulesName = (lang) => lang === "en" ? "feedback_rules.en.md" : "feedback_rules.md";
+async function loadRules(io, rulesFile) {
+  const home = io.env.HOME;
+  const configured = typeof rulesFile === "string" && rulesFile !== "" ? rulesFile : DEFAULT_RULES_FILE;
+  const custom = configured.startsWith("~") ? home ? `${home}${configured.slice(1)}` : undefined : configured;
+  const bundled = join(io.pluginRoot, "rules", bundledRulesName(io.lang));
+  for (const path of [custom, bundled]) {
+    if (path && await io.exists(path))
+      return (await io.readFile(path) ?? "").trim();
+  }
+  return "";
+}
+
+// src/subagent-report.ts
+var reportPath = (io, sessionId, agentId) => join(io.projectDir || io.cwd, ".claude", ".gate-status", `subagent_report.${sessionId}--${agentId}.json`);
+var blockReason = (stdout) => {
+  for (const line of stdout.split(`
+`)) {
+    try {
+      const v = JSON.parse(line);
+      if (isDict(v) && v.decision === "block" && typeof v.reason === "string")
+        return v.reason;
+    } catch {}
+  }
+  return "";
+};
+var feedbackText = (r) => (r.exitCode === 2 ? blockReason(r.stdout) || r.stderr : r.stderr).trim();
+async function loadReport(io, path) {
+  const text = await io.readFile(path);
+  if (text === undefined)
+    return;
+  try {
+    const v = JSON.parse(text);
+    return isDict(v) ? v : undefined;
+  } catch {
+    return;
+  }
+}
+async function saveSubagentReport(io, payload, gate, feedback) {
+  try {
+    const agentId = jqStr(payload.agent_id);
+    if (agentId === "")
+      return ok();
+    const path = reportPath(io, jqStr(payload.session_id) || "unknown", agentId);
+    const gateText = gate?.reportConsumed ? (await loadReport(io, path))?.gate ?? "" : (gate?.report ?? "").trim();
+    const fbText = feedback ? feedbackText(feedback) : "";
+    if (gateText === "" && fbText === "") {
+      await io.removeFiles([path]);
+      return ok();
+    }
+    const report = {
+      ...jqStr(payload.agent_type) ? { agentType: jqStr(payload.agent_type) } : {},
+      ...gateText ? { gate: gateText } : {},
+      ...fbText ? { feedback: fbText } : {}
+    };
+    await io.writeFile(path, `${JSON.stringify(report)}
+`);
+  } catch {}
+  return ok();
+}
+async function subagentReport(io, payload) {
+  const response = payload.tool_response;
+  const agentId = isDict(response) ? jqStr(response.agentId) : "";
+  if (agentId === "")
+    return ok();
+  const path = reportPath(io, jqStr(payload.session_id) || "unknown", agentId);
+  const report = await loadReport(io, path);
+  await io.removeFiles([path]);
+  if (!report || !report.gate && !report.feedback)
+    return ok();
+  const agent = report.agentType ? `${report.agentType} (${agentId})` : agentId;
+  const body = [tr(io.lang)("subagentReport.header", { agent }), report.gate, report.feedback].filter((s) => s).join(`
+`);
+  return ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: body } })}
+`);
+}
+
 // src/cli.ts
 var EVENTS2 = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SubagentStop"];
 var str = (v) => typeof v === "string" ? v : "";
+var nothing = { exitCode: 0, stdout: "", stderr: "" };
 function optionsFromEnv(env) {
   const opt = (key) => env[`CLAUDE_PLUGIN_OPTION_${key}`];
   return {
@@ -4119,56 +4035,64 @@ function optionsFromEnv(env) {
     rulesFile: opt("rulesFile")
   };
 }
-async function readStdin() {
-  const chunks = [];
-  for await (const chunk of process.stdin)
-    chunks.push(Buffer.from(chunk));
-  return Buffer.concat(chunks).toString("utf8");
-}
-function parsePayload(text) {
-  try {
-    const v = JSON.parse(text);
-    return isDict(v) ? v : {};
-  } catch {
-    return {};
+async function runSteps(io, event, steps, first = {}) {
+  let acc = first;
+  let stderr = "";
+  for (const step of steps) {
+    const ran = await step(io).catch(() => {
+      return;
+    });
+    if (!ran)
+      continue;
+    acc = merge(acc, toOutcome(event, ran));
+    if (ran.exitCode === 0)
+      stderr += ran.stderr;
   }
+  return outcomeToClassic(event, acc, stderr);
 }
 async function runHook(event, payload, env) {
   const options = optionsFromEnv(env);
   const io = makeNodeIo({ env, payloadCwd: str(payload.cwd), language: str(options.language), autoCount: options.autoCount !== false });
-  const sessionId = str(payload.session_id) || "unknown";
-  const run = (steps) => runStepsCollect(io, sessionId, event, steps);
-  let result = { outcome: {}, stderr: "" };
+  const tool = str(payload.tool_name);
   switch (event) {
     case "SessionStart":
-      result = await run([(i) => resetGate(i, payload)]);
-      break;
-    case "UserPromptSubmit":
-      result = await promptStepsResult(io, sessionId, options);
-      break;
+      return runSteps(io, event, [(i) => resetGate(i, payload)]);
+    case "UserPromptSubmit": {
+      const text = await loadRules(io, options.rulesFile);
+      return runSteps(io, event, [(i) => feedbackInject(i)], text === "" ? {} : { additionalContext: [text] });
+    }
     case "PreToolUse": {
-      const tool = str(payload.tool_name);
-      if (guardsTool(options, tool))
-        result = await run(preGuardSteps(options, tool, payload));
-      break;
+      const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
+      if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool))
+        return nothing;
+      const step = guardsAgents ? async (i) => agentLaunchGuard(payload, i.lang) : (i) => feedbackGuard(i, payload);
+      return runSteps(io, event, tool === "Bash" ? [(i) => bashStarted(i, payload), step] : [step]);
     }
-    case "PostToolUse": {
-      const steps = postToolSteps(str(payload.tool_name), payload);
-      if (steps)
-        result = await run(steps);
-      break;
-    }
+    case "PostToolUse":
+      if (/^(Agent|Task)$/.test(tool))
+        return runSteps(io, event, [(i) => subagentReport(i, payload)]);
+      if (tool === "Bash")
+        return runSteps(io, event, bashChangeSteps(payload));
+      if (!/^(Write|Edit|MultiEdit)$/.test(tool))
+        return nothing;
+      return runSteps(io, event, [(i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, "rules", payload)]);
     case "Notification":
-      await run([(i) => notification(i, "notify", payload)]);
-      break;
+      await notification(io, "notify", payload).catch(() => {
+        return;
+      });
+      return nothing;
     case "Stop":
-      result = await run([(i) => allStop(i, payload)]);
-      break;
-    case "SubagentStop":
-      result = await run(subagentStopSteps(payload));
-      break;
+      return runSteps(io, event, [(i) => allStop(i, payload)]);
+    case "SubagentStop": {
+      let gate;
+      let feedback;
+      return runSteps(io, event, [
+        async (i) => gate = await stopTestGate(i, "checks", payload),
+        async (i) => feedback = await feedbackStopCheck(i, payload),
+        (i) => saveSubagentReport(i, payload, gate, feedback)
+      ]);
+    }
   }
-  return outcomeToClassic(event, result.outcome, result.stderr);
 }
 async function main5() {
   const event = EVENTS2.find((e) => e === process.argv[2]);
@@ -4177,7 +4101,15 @@ async function main5() {
 `);
     process.exit(1);
   }
-  const payload = parsePayload(await readStdin());
+  const chunks = [];
+  for await (const chunk of process.stdin)
+    chunks.push(Buffer.from(chunk));
+  let payload = {};
+  try {
+    const v = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+    if (isDict(v))
+      payload = v;
+  } catch {}
   try {
     const out = await runHook(event, payload, process.env);
     process.stdout.write(out.stdout);

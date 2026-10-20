@@ -1,224 +1,3 @@
-// src/path.ts
-var isAbsolute = (p) => p.startsWith("/");
-function join(...parts) {
-  let out = "";
-  for (const part of parts) {
-    if (part.startsWith("/"))
-      out = part;
-    else if (out === "" || out.endsWith("/"))
-      out += part;
-    else
-      out += `/${part}`;
-  }
-  return out;
-}
-function normpath(p) {
-  if (p === "")
-    return ".";
-  const abs = p.startsWith("/");
-  const out = [];
-  for (const seg of p.split("/")) {
-    if (seg === "" || seg === ".")
-      continue;
-    if (seg === "..") {
-      const last = out[out.length - 1];
-      if (last !== undefined && last !== "..")
-        out.pop();
-      else if (!abs)
-        out.push("..");
-    } else {
-      out.push(seg);
-    }
-  }
-  const joined = out.join("/");
-  if (abs)
-    return `/${joined}`;
-  return joined === "" ? "." : joined;
-}
-function dirname(p) {
-  const i = p.lastIndexOf("/") + 1;
-  const head = p.slice(0, i);
-  if (head !== "" && head !== "/".repeat(head.length))
-    return head.replace(/\/+$/, "");
-  return head;
-}
-function basename(p) {
-  return p.slice(p.lastIndexOf("/") + 1);
-}
-function splitext(p) {
-  const base = basename(p);
-  const dot = base.lastIndexOf(".");
-  if (dot <= 0 || /^\.+$/.test(base.slice(0, dot)))
-    return [p, ""];
-  const cut = p.length - base.length + dot;
-  return [p.slice(0, cut), p.slice(cut)];
-}
-function relpath(path, start) {
-  const a = normpath(path).split("/").filter(Boolean);
-  const b = normpath(start).split("/").filter(Boolean);
-  let i = 0;
-  while (i < a.length && i < b.length && a[i] === b[i])
-    i++;
-  const rel = [...b.slice(i).map(() => ".."), ...a.slice(i)];
-  return rel.length === 0 ? "." : rel.join("/");
-}
-function expandUser(p, home) {
-  if (!home)
-    return p;
-  if (p === "~")
-    return home;
-  if (p.startsWith("~/"))
-    return home.replace(/\/+$/, "") + p.slice(1);
-  return p;
-}
-
-// src/glob.ts
-function splitTopCommas(s) {
-  const parts = [];
-  let depth = 0;
-  let cur = "";
-  for (const c of s) {
-    if (c === "{") {
-      depth++;
-      cur += c;
-    } else if (c === "}") {
-      depth--;
-      cur += c;
-    } else if (c === "," && depth === 0) {
-      parts.push(cur);
-      cur = "";
-    } else {
-      cur += c;
-    }
-  }
-  parts.push(cur);
-  return parts;
-}
-function expandBraces(s) {
-  let depth = 0;
-  let start = -1;
-  for (let i = 0;i < s.length; i++) {
-    const c = s.charAt(i);
-    if (c === "{") {
-      if (depth === 0)
-        start = i;
-      depth++;
-    } else if (c === "}") {
-      depth--;
-      if (depth === 0) {
-        const pre = s.slice(0, start);
-        const inner = s.slice(start + 1, i);
-        const post = s.slice(i + 1);
-        const out = [];
-        for (const part of splitTopCommas(inner))
-          out.push(...expandBraces(pre + part + post));
-        return out;
-      }
-    }
-  }
-  return [s];
-}
-var escapeRegex = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
-function globToRegex(pat) {
-  const n = pat.length;
-  let i = 0;
-  let out = "^";
-  while (i < n) {
-    const c = pat.charAt(i);
-    if (c === "*") {
-      let j = i;
-      while (j < n && pat.charAt(j) === "*")
-        j++;
-      if (j - i >= 2) {
-        if (j < n && pat.charAt(j) === "/") {
-          out += "(?:.*/)?";
-          i = j + 1;
-        } else {
-          out += ".*";
-          i = j;
-        }
-      } else {
-        out += "[^/]*";
-        i++;
-      }
-    } else if (c === "?") {
-      out += "[^/]";
-      i++;
-    } else if (c === "[") {
-      let j = i + 1;
-      if (j < n && "!^".includes(pat.charAt(j)))
-        j++;
-      if (j < n && pat.charAt(j) === "]")
-        j++;
-      while (j < n && pat.charAt(j) !== "]")
-        j++;
-      let cls = pat.slice(i, j + 1);
-      if (cls.startsWith("[!"))
-        cls = `[^${cls.slice(2)}`;
-      out += cls;
-      i = j + 1;
-    } else {
-      out += escapeRegex(c);
-      i++;
-    }
-  }
-  return `${out}$`;
-}
-function matchPatterns(pats) {
-  const pairs = [];
-  for (const pat of pats) {
-    for (const ex of expandBraces(pat))
-      pairs.push([ex, new RegExp(globToRegex(ex))]);
-  }
-  return pairs;
-}
-var compileGlobs = (patterns) => matchPatterns(patterns).map(([, rx]) => rx);
-function asList(v) {
-  if (typeof v === "string")
-    return [v];
-  if (Array.isArray(v))
-    return v;
-  return [];
-}
-var hasMagic = (seg) => /[*?[]/.test(seg);
-async function globExists(io, pattern) {
-  const abs = pattern.startsWith("/");
-  const segs = pattern.split("/").filter((s) => s !== "");
-  return walk(io, abs ? "/" : "", segs, 0);
-}
-async function walk(io, dir, segs, i) {
-  if (i >= segs.length)
-    return dir === "" ? true : io.exists(dir);
-  const seg = segs.at(i) ?? "";
-  const here = dir === "" ? "." : dir;
-  if (seg === "**") {
-    if (i === segs.length - 1)
-      return (await io.stat(here))?.kind === "dir";
-    if (await walk(io, dir, segs, i + 1))
-      return true;
-    for (const e of await io.list(here)) {
-      if (e.name.startsWith("."))
-        continue;
-      const sub = join(dir, e.name);
-      if ((await io.stat(sub))?.kind === "dir" && await walk(io, sub, segs, i))
-        return true;
-    }
-    return false;
-  }
-  if (!hasMagic(seg))
-    return walk(io, join(dir, seg), segs, i + 1);
-  const rx = new RegExp(globToRegex(seg));
-  for (const e of await io.list(here)) {
-    if (e.name.startsWith(".") && !seg.startsWith("."))
-      continue;
-    if (!rx.test(e.name))
-      continue;
-    if (await walk(io, join(dir, e.name), segs, i + 1))
-      return true;
-  }
-  return false;
-}
-
 // src/i18n.ts
 import i18next from "./vendor/i18next.js";
 import { parse } from "./vendor/yaml.js";
@@ -552,21 +331,8 @@ function resolveLang(env, configured) {
   return "en";
 }
 
-// src/load-yaml.ts
-import { parse as parse2 } from "./vendor/yaml.js";
-var PY_TRUE = /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON)$/;
-var PY_FALSE = /^(?:no|No|NO|false|False|FALSE|off|Off|OFF)$/;
-var pyBool = (original) => ({
-  ...original,
-  test: /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON|no|No|NO|false|False|FALSE|off|Off|OFF)$/,
-  resolve: (str) => PY_TRUE.test(str) ? true : PY_FALSE.test(str) ? false : str
-});
-var parseYaml = (text) => parse2(text, {
-  schema: "yaml-1.1",
-  uniqueKeys: false,
-  logLevel: "error",
-  customTags: (tags) => tags.map((t) => typeof t === "object" && ("tag" in t) && t.tag === "tag:yaml.org,2002:bool" ? pyBool(t) : t)
-});
+// src/io.ts
+var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
 
 // src/pyutil.ts
 function truthy(v) {
@@ -663,6 +429,282 @@ function jqStr(v) {
   return typeof v === "string" ? v : JSON.stringify(v);
 }
 var isDict = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+// src/agent-launch-guard.ts
+var ASK_AGENT_TYPES = ["code-implementer"];
+var ALLOW_RECIPIENTS = ["git-operator"];
+var ask = (reason) => ok(`${JSON.stringify({
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "ask",
+    permissionDecisionReason: reason
+  }
+})}
+`);
+function agentLaunchGuard(payload, lang) {
+  const t = tr(lang);
+  const tool = jqStr(payload.tool_name);
+  const input = isDict(payload.tool_input) ? payload.tool_input : {};
+  if (tool === "Agent") {
+    const agentType = jqStr(input.subagent_type);
+    if (agentType === "")
+      return ok();
+    if (ASK_AGENT_TYPES.includes(agentType)) {
+      return ask(`${t("launch.promptTo", { agentType })}
+
+${jqStr(input.prompt)}
+
+${t("launch.checklist")}`);
+    }
+  } else if (tool === "SendMessage") {
+    const recipient = jqStr(input.to);
+    if (!ALLOW_RECIPIENTS.includes(recipient)) {
+      return ask(`${t("launch.messageTo", { recipient: recipient || t("launch.unknownRecipient") })}
+
+${jqStr(input.message)}
+
+${t("launch.checklist")}`);
+    }
+  }
+  return ok();
+}
+
+// src/path.ts
+var isAbsolute = (p) => p.startsWith("/");
+function join(...parts) {
+  let out = "";
+  for (const part of parts) {
+    if (part.startsWith("/"))
+      out = part;
+    else if (out === "" || out.endsWith("/"))
+      out += part;
+    else
+      out += `/${part}`;
+  }
+  return out;
+}
+function normpath(p) {
+  if (p === "")
+    return ".";
+  const abs = p.startsWith("/");
+  const out = [];
+  for (const seg of p.split("/")) {
+    if (seg === "" || seg === ".")
+      continue;
+    if (seg === "..") {
+      const last = out[out.length - 1];
+      if (last !== undefined && last !== "..")
+        out.pop();
+      else if (!abs)
+        out.push("..");
+    } else {
+      out.push(seg);
+    }
+  }
+  const joined = out.join("/");
+  if (abs)
+    return `/${joined}`;
+  return joined === "" ? "." : joined;
+}
+function dirname(p) {
+  const i = p.lastIndexOf("/") + 1;
+  const head = p.slice(0, i);
+  if (head !== "" && head !== "/".repeat(head.length))
+    return head.replace(/\/+$/, "");
+  return head;
+}
+function basename(p) {
+  return p.slice(p.lastIndexOf("/") + 1);
+}
+function splitext(p) {
+  const base = basename(p);
+  const dot = base.lastIndexOf(".");
+  if (dot <= 0 || /^\.+$/.test(base.slice(0, dot)))
+    return [p, ""];
+  const cut = p.length - base.length + dot;
+  return [p.slice(0, cut), p.slice(cut)];
+}
+function relpath(path, start) {
+  const a = normpath(path).split("/").filter(Boolean);
+  const b = normpath(start).split("/").filter(Boolean);
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i])
+    i++;
+  const rel = [...b.slice(i).map(() => ".."), ...a.slice(i)];
+  return rel.length === 0 ? "." : rel.join("/");
+}
+function expandUser(p, home) {
+  if (!home)
+    return p;
+  if (p === "~")
+    return home;
+  if (p.startsWith("~/"))
+    return home.replace(/\/+$/, "") + p.slice(1);
+  return p;
+}
+
+// src/glob.ts
+function splitTopCommas(s) {
+  const parts = [];
+  let depth = 0;
+  let cur = "";
+  for (const c of s) {
+    if (c === "{") {
+      depth++;
+      cur += c;
+    } else if (c === "}") {
+      depth--;
+      cur += c;
+    } else if (c === "," && depth === 0) {
+      parts.push(cur);
+      cur = "";
+    } else {
+      cur += c;
+    }
+  }
+  parts.push(cur);
+  return parts;
+}
+function expandBraces(s) {
+  let depth = 0;
+  let start = -1;
+  for (let i = 0;i < s.length; i++) {
+    const c = s.charAt(i);
+    if (c === "{") {
+      if (depth === 0)
+        start = i;
+      depth++;
+    } else if (c === "}") {
+      depth--;
+      if (depth === 0) {
+        const pre = s.slice(0, start);
+        const inner = s.slice(start + 1, i);
+        const post = s.slice(i + 1);
+        const out = [];
+        for (const part of splitTopCommas(inner))
+          out.push(...expandBraces(pre + part + post));
+        return out;
+      }
+    }
+  }
+  return [s];
+}
+var escapeRegex = (c) => c.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+function globToRegex(pat) {
+  const n = pat.length;
+  let i = 0;
+  let out = "^";
+  while (i < n) {
+    const c = pat.charAt(i);
+    if (c === "*") {
+      let j = i;
+      while (j < n && pat.charAt(j) === "*")
+        j++;
+      if (j - i >= 2) {
+        if (j < n && pat.charAt(j) === "/") {
+          out += "(?:.*/)?";
+          i = j + 1;
+        } else {
+          out += ".*";
+          i = j;
+        }
+      } else {
+        out += "[^/]*";
+        i++;
+      }
+    } else if (c === "?") {
+      out += "[^/]";
+      i++;
+    } else if (c === "[") {
+      let j = i + 1;
+      if (j < n && "!^".includes(pat.charAt(j)))
+        j++;
+      if (j < n && pat.charAt(j) === "]")
+        j++;
+      while (j < n && pat.charAt(j) !== "]")
+        j++;
+      let cls = pat.slice(i, j + 1);
+      if (cls.startsWith("[!"))
+        cls = `[^${cls.slice(2)}`;
+      out += cls;
+      i = j + 1;
+    } else {
+      out += escapeRegex(c);
+      i++;
+    }
+  }
+  return `${out}$`;
+}
+function matchPatterns(pats) {
+  const pairs = [];
+  for (const pat of pats) {
+    for (const ex of expandBraces(pat))
+      pairs.push([ex, new RegExp(globToRegex(ex))]);
+  }
+  return pairs;
+}
+var compileGlobs = (patterns) => matchPatterns(patterns).map(([, rx]) => rx);
+function asList(v) {
+  if (typeof v === "string")
+    return [v];
+  if (Array.isArray(v))
+    return v;
+  return [];
+}
+var hasMagic = (seg) => /[*?[]/.test(seg);
+async function globExists(io, pattern) {
+  const abs = pattern.startsWith("/");
+  const segs = pattern.split("/").filter((s) => s !== "");
+  return walk(io, abs ? "/" : "", segs, 0);
+}
+async function walk(io, dir, segs, i) {
+  if (i >= segs.length)
+    return dir === "" ? true : io.exists(dir);
+  const seg = segs.at(i) ?? "";
+  const here = dir === "" ? "." : dir;
+  if (seg === "**") {
+    if (i === segs.length - 1)
+      return (await io.stat(here))?.kind === "dir";
+    if (await walk(io, dir, segs, i + 1))
+      return true;
+    for (const e of await io.list(here)) {
+      if (e.name.startsWith("."))
+        continue;
+      const sub = join(dir, e.name);
+      if ((await io.stat(sub))?.kind === "dir" && await walk(io, sub, segs, i))
+        return true;
+    }
+    return false;
+  }
+  if (!hasMagic(seg))
+    return walk(io, join(dir, seg), segs, i + 1);
+  const rx = new RegExp(globToRegex(seg));
+  for (const e of await io.list(here)) {
+    if (e.name.startsWith(".") && !seg.startsWith("."))
+      continue;
+    if (!rx.test(e.name))
+      continue;
+    if (await walk(io, join(dir, e.name), segs, i + 1))
+      return true;
+  }
+  return false;
+}
+
+// src/load-yaml.ts
+import { parse as parse2 } from "./vendor/yaml.js";
+var PY_TRUE = /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON)$/;
+var PY_FALSE = /^(?:no|No|NO|false|False|FALSE|off|Off|OFF)$/;
+var pyBool = (original) => ({
+  ...original,
+  test: /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON|no|No|NO|false|False|FALSE|off|Off|OFF)$/,
+  resolve: (str) => PY_TRUE.test(str) ? true : PY_FALSE.test(str) ? false : str
+});
+var parseYaml = (text) => parse2(text, {
+  schema: "yaml-1.1",
+  uniqueKeys: false,
+  logLevel: "error",
+  customTags: (tags) => tags.map((t) => typeof t === "object" && ("tag" in t) && t.tag === "tag:yaml.org,2002:bool" ? pyBool(t) : t)
+});
 
 // src/roots.ts
 function relativize(p, projectDir) {
@@ -1330,9 +1372,6 @@ async function evalStopCheck(io, rules, projectDir, changedFiles) {
     };
   });
 }
-
-// src/io.ts
-var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
 
 // src/feedback-stop-check.ts
 var MAX_ATTEMPTS = 3;
@@ -3185,6 +3224,354 @@ async function allStop(io, payload) {
   return { exitCode: 0, stdout, stderr };
 }
 
+// src/feedback-guard.ts
+var SEVERITY_ORDER = { warn: 0, ask: 1, block: 2, deny: 3 };
+var decisionFor = (severity) => severity === "deny" || severity === "block" ? "deny" : "ask";
+var buildReason = (violations) => violations.map((v) => `${v.rule} (count: ${v.count}): ${v.message}`).join(`
+`);
+var askStatePath = (io, sessionId) => join(feedbackDir(io), ".ask_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
+async function loadAskedKeys(io, sessionId) {
+  try {
+    const text = await io.readFile(askStatePath(io, sessionId));
+    if (text === undefined)
+      return new Set;
+    const data = JSON.parse(text);
+    if (isDict(data) && Array.isArray(data.asked))
+      return new Set(data.asked.map(String));
+  } catch {}
+  return new Set;
+}
+async function saveAskedKeys(io, sessionId, askedKeys) {
+  try {
+    await io.writeFile(askStatePath(io, sessionId), JSON.stringify({ asked: [...askedKeys].sort() }));
+  } catch {}
+}
+function askKey(v, toolInput) {
+  const target = v.event === "pre_edit" ? truthy(toolInput.file_path) ? String(toolInput.file_path) : "" : "";
+  return `${v.rule}|${v.event}|${target}`;
+}
+async function downgradeRepeatedAsks(io, violations, sessionId, toolInput) {
+  if (!truthy(sessionId))
+    return;
+  const sid = String(sessionId);
+  const asked = await loadAskedKeys(io, sid);
+  const newlyAsked = new Set;
+  for (const v of violations) {
+    if (v.severity !== "ask")
+      continue;
+    const key = askKey(v, toolInput);
+    if (asked.has(key))
+      v.severity = "warn";
+    else
+      newlyAsked.add(key);
+  }
+  if (newlyAsked.size > 0)
+    await saveAskedKeys(io, sid, new Set([...asked, ...newlyAsked]));
+}
+async function main2(io, payload) {
+  const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
+  const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
+  const rules = await listRules(io);
+  let violations;
+  if (toolName === "Bash") {
+    violations = await evalPreBash(io, rules, truthy(toolInput.command) ? String(toolInput.command) : "");
+  } else if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit") {
+    const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : "";
+    if (!filePath)
+      return ok();
+    violations = await evalPreEdit(io, rules, filePath, extractPreEditContent(toolName, toolInput));
+  } else {
+    return ok();
+  }
+  if (violations.length === 0)
+    return ok();
+  await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
+  for (const v of violations)
+    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
+  const blocking = violations.filter((v) => v.severity !== "warn");
+  const warnings = violations.filter((v) => v.severity === "warn");
+  let stdout = "";
+  if (blocking.length > 0) {
+    const top = blocking.reduce((a, b) => (SEVERITY_ORDER[b.severity] ?? 0) > (SEVERITY_ORDER[a.severity] ?? 0) ? b : a);
+    stdout = `${JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: decisionFor(top.severity),
+        permissionDecisionReason: [buildReason(blocking), ...notes].join(`
+`)
+      }
+    })}
+`;
+  }
+  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}`), ...notes].map((l) => `${l}
+`).join("");
+  return ok(stdout, stderr);
+}
+async function feedbackGuard(io, payload) {
+  try {
+    return await main2(io, payload);
+  } catch (e) {
+    await logError(io, "feedback-guard", errorText(e));
+    return ok("", `[feedback-guard] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+
+// src/feedback-bash-edit.ts
+var EVENTS = new Set(["post_edit", "pre_edit"]);
+var wantsBashEdits = (rules) => rules.some((r) => r.enforce.some((e) => isDict(e) && EVENTS.has(String(e.event))));
+var hasPreEditContent = (rules) => rules.some((r) => r.enforce.some((e) => isDict(e) && e.event === "pre_edit" && truthy(e.when)));
+function addedLines(diff) {
+  const out = [];
+  let inHunk = false;
+  for (const line of diff.split(`
+`)) {
+    if (line.startsWith("diff --git "))
+      inHunk = false;
+    else if (line.startsWith("@@"))
+      inHunk = true;
+    else if (inHunk && line.startsWith("+"))
+      out.push(line.slice(1));
+  }
+  return out;
+}
+async function writtenContent(io, file, threshold) {
+  const dir = dirname(file);
+  const name = basename(file);
+  const opts = { timeoutMs: 1e4 };
+  const whole = async () => await io.readFile(file) ?? "";
+  const tracked = await io.run(["git", "-C", dir, "ls-files", "--error-unmatch", "--", name], opts);
+  if (tracked.exitCode !== 0)
+    return whole();
+  const diff = await io.run(["git", "-C", dir, "diff", "--no-color", "--no-ext-diff", "-U0", "HEAD", "--", name], opts);
+  if (diff.exitCode !== 0)
+    return whole();
+  let added = addedLines(diff.stdout);
+  if (added.length === 0) {
+    const since = `--since=@${Math.floor(threshold / 1000)}`;
+    const log = await io.run(["git", "-C", dir, "log", since, "--no-merges", "-p", "--no-color", "--no-ext-diff", "-U0", "--format=", "--", name], opts);
+    if (log.exitCode === 0)
+      added = addedLines(log.stdout);
+  }
+  return added.join(`
+`);
+}
+var label = (projectDir, file) => {
+  if (!isAbsolute(file))
+    return file;
+  const rel = relpath(file, projectDir);
+  return rel.startsWith("../") || rel === ".." ? file : rel;
+};
+async function main3(io, payload, files, threshold) {
+  const rules = await listRules(io);
+  if (!wantsBashEdits(rules))
+    return ok();
+  const projectDir = io.projectDir || io.cwd;
+  const needContent = hasPreEditContent(rules);
+  const found = [];
+  for (const file of [...files].sort()) {
+    const abs = isAbsolute(file) ? file : join(projectDir, file);
+    for (const v of await evalPostEdit(io, rules, abs))
+      found.push({ file: abs, v });
+    const content = needContent ? await writtenContent(io, abs, threshold) : "";
+    const pre = await evalPreEdit(io, rules, abs, content);
+    if (pre.length === 0)
+      continue;
+    await downgradeRepeatedAsks(io, pre, payload.session_id, { file_path: abs });
+    for (const v of pre)
+      found.push({ file: abs, v });
+  }
+  if (found.length === 0)
+    return ok();
+  for (const { v } of found)
+    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
+  const violations = found.map(({ v }) => v);
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
+  const t = tr(io.lang);
+  const tag = (v) => v.event === "pre_edit" ? "[feedback-guard]" : "[feedback-post-edit]";
+  const after = (v) => v.event === "pre_edit" ? ` ${t("bashEdit.preEditAfter")}` : "";
+  const warnings = found.filter(({ v }) => v.severity === "warn");
+  const blocking = found.filter(({ v }) => v.severity !== "warn");
+  let stderr = warnings.map(({ file, v }) => `${tag(v)} warn: ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)})${after(v)}
+`).join("");
+  if (blocking.length === 0)
+    return ok("", stderr + notes.map((l) => `${l}
+`).join(""));
+  const lines = blocking.map(({ file, v }) => `${tag(v)} ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)}: ${v.detail})${after(v)}`);
+  lines.unshift(t("bashEdit.header"));
+  lines.push(...notes);
+  stderr += lines.map((l) => `${l}
+`).join("");
+  return ok(`${JSON.stringify({ decision: "block", reason: lines.join(`
+`) })}
+`, stderr);
+}
+async function feedbackBashEdits(io, payload, files, threshold) {
+  try {
+    return await main3(io, payload, files, threshold);
+  } catch (e) {
+    await logError(io, "feedback-bash-edit", errorText(e));
+    return ok("", `[feedback-bash-edit] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+
+// src/bash-changes.ts
+var SKIP_COMMAND_RE = /\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?:=\S+)?))*\s+(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/;
+var MTIME_SLACK_MS = 2000;
+var STALE_STARTED_MS = 2 * 60 * 60 * 1000;
+var STATE_DIR = ".gate-status";
+var stateIdOf = (payload) => {
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  const agentId = jqStr(payload.agent_id);
+  return agentId ? `${sessionId}--${agentId}` : sessionId;
+};
+var startedKey = (payload) => {
+  const toolUseId = jqStr(payload.tool_use_id).replace(/[^A-Za-z0-9_.-]/g, "_");
+  if (toolUseId === "")
+    return stateIdOf(payload);
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  return `${sessionId}--${toolUseId}`;
+};
+var hasGate = (io, projectDir) => io.exists(join(projectDir, ".claude", "gate.yaml"));
+var startedDir = (io, projectDir, gate) => gate ? join(projectDir, ".claude", STATE_DIR) : join(feedbackDir(io), ".bash_started");
+var startedPath = (dir, payload) => join(dir, `bash_started.${startedKey(payload)}.json`);
+async function bashStarted(io, payload) {
+  try {
+    const projectDir = io.projectDir || io.cwd;
+    const gate = await hasGate(io, projectDir);
+    if (!gate && !wantsBashEdits(await listRules(io)))
+      return ok();
+    const dir = startedDir(io, projectDir, gate);
+    const started = await io.now();
+    await io.writeFile(startedPath(dir, payload), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}
+`);
+    await sweepStale(io, dir, jqStr(payload.session_id) || "unknown", started);
+  } catch {}
+  return ok();
+}
+async function sweepStale(io, stateDir, sessionId, now) {
+  const prefix = `bash_started.${sessionId}--`;
+  const stale = (await io.list(stateDir)).filter((e) => e.kind === "file" && e.name.startsWith(prefix) && e.name.endsWith(".json") && e.mtimeMs < now - STALE_STARTED_MS).map((e) => join(stateDir, e.name));
+  if (stale.length > 0)
+    await io.removeFiles(stale);
+}
+var NONE = { changed: [], recorded: [], threshold: 0, gate: false };
+async function detectBashChanges(io, payload) {
+  try {
+    const projectDir = io.projectDir || io.cwd;
+    const gate = await hasGate(io, projectDir);
+    const dir = startedDir(io, projectDir, gate);
+    const startedFile = startedPath(dir, payload);
+    const raw = await io.readFile(startedFile);
+    if (raw === undefined)
+      return NONE;
+    try {
+      return await detect(io, projectDir, gate, dir, raw, payload);
+    } finally {
+      await io.removeFiles([startedFile]);
+    }
+  } catch {
+    return NONE;
+  }
+}
+async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
+  let saved;
+  try {
+    saved = JSON.parse(raw);
+  } catch {
+    return NONE;
+  }
+  if (!isDict(saved) || typeof saved.started !== "number")
+    return NONE;
+  if (jqStr(saved.tool_use_id) !== jqStr(payload.tool_use_id))
+    return NONE;
+  const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
+  if (SKIP_COMMAND_RE.test(command))
+    return NONE;
+  const threshold = saved.started - MTIME_SLACK_MS;
+  const stateDir = join(projectDir, ".claude", STATE_DIR);
+  const picked = new Set;
+  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd, command)) {
+    for (const rel of await candidates(io, root, threshold)) {
+      const abs = join(root, rel);
+      if (abs.startsWith(`${stateDir}/`) || abs.startsWith(`${startedDirPath}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
+        continue;
+      const st = await io.stat(abs);
+      if (st?.kind === "file" && st.mtimeMs >= threshold)
+        picked.add(abs);
+    }
+  }
+  const changed = [...picked];
+  if (changed.length === 0 || !gate)
+    return { changed, recorded: [], threshold, gate };
+  const memo = join(stateDir, `changed_files.${stateIdOf(payload)}.txt`);
+  const existing = await io.readFile(memo) ?? "";
+  const have = new Set(existing.split(`
+`));
+  const recorded = changed.filter((p) => !have.has(p));
+  if (recorded.length > 0)
+    await io.writeFile(memo, `${existing}${recorded.map((p) => `${p}
+`).join("")}`);
+  return { changed, recorded, threshold, gate };
+}
+var gitTop = async (io, dir) => {
+  const top = await io.run(["git", "-C", dir, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 });
+  return top.exitCode === 0 ? top.stdout.replace(/\n+$/, "") : "";
+};
+var mentionsWorktree = (command, name) => {
+  const needle = `worktrees/${name}`;
+  for (let i = command.indexOf(needle);i >= 0; i = command.indexOf(needle, i + 1)) {
+    const next = command.charAt(i + needle.length);
+    if (!/[A-Za-z0-9._-]/.test(next))
+      return true;
+  }
+  return false;
+};
+async function scanRoots(io, projectDir, cwd, command) {
+  const roots = [];
+  const add = (top) => {
+    if (top !== "" && !roots.includes(top))
+      roots.push(top);
+  };
+  add(await gitTop(io, cwd));
+  const worktreesDir = join(projectDir, ".claude", "worktrees");
+  for (const e of await io.list(worktreesDir)) {
+    if (e.kind === "dir" && mentionsWorktree(command, e.name))
+      add(await gitTop(io, join(worktreesDir, e.name)));
+  }
+  return roots;
+}
+async function candidates(io, root, threshold) {
+  const out = new Set;
+  const listed = await io.run(["git", "-C", root, "ls-files", "-z", "--modified", "--others", "--exclude-standard", "--full-name"], { timeoutMs: 1e4 });
+  if (listed.exitCode === 0) {
+    for (const s of listed.stdout.split("\x00"))
+      if (s !== "" && !s.endsWith("/"))
+        out.add(s);
+  }
+  const since = `--since=@${Math.floor(threshold / 1000)}`;
+  const logged = await io.run(["git", "-C", root, "log", since, "--no-merges", "--name-only", "-z", "--format=", "HEAD"], { timeoutMs: 1e4 });
+  if (logged.exitCode === 0) {
+    for (const s of logged.stdout.split(/[\0\n]/))
+      if (s !== "")
+        out.add(s);
+  }
+  return [...out];
+}
+function bashChangeSteps(payload) {
+  let found = NONE;
+  return [
+    async (io) => {
+      found = await detectBashChanges(io, payload);
+      return ok();
+    },
+    (io) => found.changed.length > 0 ? feedbackBashEdits(io, payload, found.changed, found.threshold) : Promise.resolve(ok()),
+    (io) => found.recorded.length > 0 ? stopTestGate(io, "rules", payload) : Promise.resolve(ok())
+  ];
+}
+
 // src/correct.ts
 var HOUR_MS = 3600000;
 var DAY_MS2 = 86400000;
@@ -3579,393 +3966,6 @@ async function createIo($, options = {}) {
   };
 }
 
-// src/agent-launch-guard.ts
-var ASK_AGENT_TYPES = ["code-implementer"];
-var ALLOW_RECIPIENTS = ["git-operator"];
-var ask = (reason) => ok(`${JSON.stringify({
-  hookSpecificOutput: {
-    hookEventName: "PreToolUse",
-    permissionDecision: "ask",
-    permissionDecisionReason: reason
-  }
-})}
-`);
-function agentLaunchGuard(payload, lang) {
-  const t = tr(lang);
-  const tool = jqStr(payload.tool_name);
-  const input = isDict(payload.tool_input) ? payload.tool_input : {};
-  if (tool === "Agent") {
-    const agentType = jqStr(input.subagent_type);
-    if (agentType === "")
-      return ok();
-    if (ASK_AGENT_TYPES.includes(agentType)) {
-      return ask(`${t("launch.promptTo", { agentType })}
-
-${jqStr(input.prompt)}
-
-${t("launch.checklist")}`);
-    }
-  } else if (tool === "SendMessage") {
-    const recipient = jqStr(input.to);
-    if (!ALLOW_RECIPIENTS.includes(recipient)) {
-      return ask(`${t("launch.messageTo", { recipient: recipient || t("launch.unknownRecipient") })}
-
-${jqStr(input.message)}
-
-${t("launch.checklist")}`);
-    }
-  }
-  return ok();
-}
-
-// src/feedback-guard.ts
-var SEVERITY_ORDER = { warn: 0, ask: 1, block: 2, deny: 3 };
-var decisionFor = (severity) => severity === "deny" || severity === "block" ? "deny" : "ask";
-var buildReason = (violations) => violations.map((v) => `${v.rule} (count: ${v.count}): ${v.message}`).join(`
-`);
-var askStatePath = (io, sessionId) => join(feedbackDir(io), ".ask_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
-async function loadAskedKeys(io, sessionId) {
-  try {
-    const text = await io.readFile(askStatePath(io, sessionId));
-    if (text === undefined)
-      return new Set;
-    const data = JSON.parse(text);
-    if (isDict(data) && Array.isArray(data.asked))
-      return new Set(data.asked.map(String));
-  } catch {}
-  return new Set;
-}
-async function saveAskedKeys(io, sessionId, askedKeys) {
-  try {
-    await io.writeFile(askStatePath(io, sessionId), JSON.stringify({ asked: [...askedKeys].sort() }));
-  } catch {}
-}
-function askKey(v, toolInput) {
-  const target = v.event === "pre_edit" ? truthy(toolInput.file_path) ? String(toolInput.file_path) : "" : "";
-  return `${v.rule}|${v.event}|${target}`;
-}
-async function downgradeRepeatedAsks(io, violations, sessionId, toolInput) {
-  if (!truthy(sessionId))
-    return;
-  const sid = String(sessionId);
-  const asked = await loadAskedKeys(io, sid);
-  const newlyAsked = new Set;
-  for (const v of violations) {
-    if (v.severity !== "ask")
-      continue;
-    const key = askKey(v, toolInput);
-    if (asked.has(key))
-      v.severity = "warn";
-    else
-      newlyAsked.add(key);
-  }
-  if (newlyAsked.size > 0)
-    await saveAskedKeys(io, sid, new Set([...asked, ...newlyAsked]));
-}
-async function main2(io, payload) {
-  const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
-  const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
-  const rules = await listRules(io);
-  let violations;
-  if (toolName === "Bash") {
-    violations = await evalPreBash(io, rules, truthy(toolInput.command) ? String(toolInput.command) : "");
-  } else if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit") {
-    const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : "";
-    if (!filePath)
-      return ok();
-    violations = await evalPreEdit(io, rules, filePath, extractPreEditContent(toolName, toolInput));
-  } else {
-    return ok();
-  }
-  if (violations.length === 0)
-    return ok();
-  await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
-  for (const v of violations)
-    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
-  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
-  const blocking = violations.filter((v) => v.severity !== "warn");
-  const warnings = violations.filter((v) => v.severity === "warn");
-  let stdout = "";
-  if (blocking.length > 0) {
-    const top = blocking.reduce((a, b) => (SEVERITY_ORDER[b.severity] ?? 0) > (SEVERITY_ORDER[a.severity] ?? 0) ? b : a);
-    stdout = `${JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: decisionFor(top.severity),
-        permissionDecisionReason: [buildReason(blocking), ...notes].join(`
-`)
-      }
-    })}
-`;
-  }
-  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}`), ...notes].map((l) => `${l}
-`).join("");
-  return ok(stdout, stderr);
-}
-async function feedbackGuard(io, payload) {
-  try {
-    return await main2(io, payload);
-  } catch (e) {
-    await logError(io, "feedback-guard", errorText(e));
-    return ok("", `[feedback-guard] internal error (ignored): ${errorText(e)}
-`);
-  }
-}
-
-// src/feedback-bash-edit.ts
-var EVENTS = new Set(["post_edit", "pre_edit"]);
-var wantsBashEdits = (rules) => rules.some((r) => r.enforce.some((e) => isDict(e) && EVENTS.has(String(e.event))));
-var hasPreEditContent = (rules) => rules.some((r) => r.enforce.some((e) => isDict(e) && e.event === "pre_edit" && truthy(e.when)));
-function addedLines(diff) {
-  const out = [];
-  let inHunk = false;
-  for (const line of diff.split(`
-`)) {
-    if (line.startsWith("diff --git "))
-      inHunk = false;
-    else if (line.startsWith("@@"))
-      inHunk = true;
-    else if (inHunk && line.startsWith("+"))
-      out.push(line.slice(1));
-  }
-  return out;
-}
-async function writtenContent(io, file, threshold) {
-  const dir = dirname(file);
-  const name = basename(file);
-  const opts = { timeoutMs: 1e4 };
-  const whole = async () => await io.readFile(file) ?? "";
-  const tracked = await io.run(["git", "-C", dir, "ls-files", "--error-unmatch", "--", name], opts);
-  if (tracked.exitCode !== 0)
-    return whole();
-  const diff = await io.run(["git", "-C", dir, "diff", "--no-color", "--no-ext-diff", "-U0", "HEAD", "--", name], opts);
-  if (diff.exitCode !== 0)
-    return whole();
-  let added = addedLines(diff.stdout);
-  if (added.length === 0) {
-    const since = `--since=@${Math.floor(threshold / 1000)}`;
-    const log = await io.run(["git", "-C", dir, "log", since, "--no-merges", "-p", "--no-color", "--no-ext-diff", "-U0", "--format=", "--", name], opts);
-    if (log.exitCode === 0)
-      added = addedLines(log.stdout);
-  }
-  return added.join(`
-`);
-}
-var label = (projectDir, file) => {
-  if (!isAbsolute(file))
-    return file;
-  const rel = relpath(file, projectDir);
-  return rel.startsWith("../") || rel === ".." ? file : rel;
-};
-async function main3(io, payload, files, threshold) {
-  const rules = await listRules(io);
-  if (!wantsBashEdits(rules))
-    return ok();
-  const projectDir = io.projectDir || io.cwd;
-  const needContent = hasPreEditContent(rules);
-  const found = [];
-  for (const file of [...files].sort()) {
-    const abs = isAbsolute(file) ? file : join(projectDir, file);
-    for (const v of await evalPostEdit(io, rules, abs))
-      found.push({ file: abs, v });
-    const content = needContent ? await writtenContent(io, abs, threshold) : "";
-    const pre = await evalPreEdit(io, rules, abs, content);
-    if (pre.length === 0)
-      continue;
-    await downgradeRepeatedAsks(io, pre, payload.session_id, { file_path: abs });
-    for (const v of pre)
-      found.push({ file: abs, v });
-  }
-  if (found.length === 0)
-    return ok();
-  for (const { v } of found)
-    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
-  const violations = found.map(({ v }) => v);
-  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
-  const t = tr(io.lang);
-  const tag = (v) => v.event === "pre_edit" ? "[feedback-guard]" : "[feedback-post-edit]";
-  const after = (v) => v.event === "pre_edit" ? ` ${t("bashEdit.preEditAfter")}` : "";
-  const warnings = found.filter(({ v }) => v.severity === "warn");
-  const blocking = found.filter(({ v }) => v.severity !== "warn");
-  let stderr = warnings.map(({ file, v }) => `${tag(v)} warn: ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)})${after(v)}
-`).join("");
-  if (blocking.length === 0)
-    return ok("", stderr + notes.map((l) => `${l}
-`).join(""));
-  const lines = blocking.map(({ file, v }) => `${tag(v)} ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)}: ${v.detail})${after(v)}`);
-  lines.unshift(t("bashEdit.header"));
-  lines.push(...notes);
-  stderr += lines.map((l) => `${l}
-`).join("");
-  return ok(`${JSON.stringify({ decision: "block", reason: lines.join(`
-`) })}
-`, stderr);
-}
-async function feedbackBashEdits(io, payload, files, threshold) {
-  try {
-    return await main3(io, payload, files, threshold);
-  } catch (e) {
-    await logError(io, "feedback-bash-edit", errorText(e));
-    return ok("", `[feedback-bash-edit] internal error (ignored): ${errorText(e)}
-`);
-  }
-}
-
-// src/bash-changes.ts
-var SKIP_COMMAND_RE = /\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?:=\S+)?))*\s+(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/;
-var MTIME_SLACK_MS = 2000;
-var STALE_STARTED_MS = 2 * 60 * 60 * 1000;
-var STATE_DIR = ".gate-status";
-var stateIdOf = (payload) => {
-  const sessionId = jqStr(payload.session_id) || "unknown";
-  const agentId = jqStr(payload.agent_id);
-  return agentId ? `${sessionId}--${agentId}` : sessionId;
-};
-var startedKey = (payload) => {
-  const toolUseId = jqStr(payload.tool_use_id).replace(/[^A-Za-z0-9_.-]/g, "_");
-  if (toolUseId === "")
-    return stateIdOf(payload);
-  const sessionId = jqStr(payload.session_id) || "unknown";
-  return `${sessionId}--${toolUseId}`;
-};
-var hasGate = (io, projectDir) => io.exists(join(projectDir, ".claude", "gate.yaml"));
-var startedDir = (io, projectDir, gate) => gate ? join(projectDir, ".claude", STATE_DIR) : join(feedbackDir(io), ".bash_started");
-var startedPath = (dir, payload) => join(dir, `bash_started.${startedKey(payload)}.json`);
-async function bashStarted(io, payload) {
-  try {
-    const projectDir = io.projectDir || io.cwd;
-    const gate = await hasGate(io, projectDir);
-    if (!gate && !wantsBashEdits(await listRules(io)))
-      return ok();
-    const dir = startedDir(io, projectDir, gate);
-    const started = await io.now();
-    await io.writeFile(startedPath(dir, payload), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}
-`);
-    await sweepStale(io, dir, jqStr(payload.session_id) || "unknown", started);
-  } catch {}
-  return ok();
-}
-async function sweepStale(io, stateDir, sessionId, now) {
-  const prefix = `bash_started.${sessionId}--`;
-  const stale = (await io.list(stateDir)).filter((e) => e.kind === "file" && e.name.startsWith(prefix) && e.name.endsWith(".json") && e.mtimeMs < now - STALE_STARTED_MS).map((e) => join(stateDir, e.name));
-  if (stale.length > 0)
-    await io.removeFiles(stale);
-}
-var NONE = { changed: [], recorded: [], threshold: 0, gate: false };
-async function detectBashChanges(io, payload) {
-  try {
-    const projectDir = io.projectDir || io.cwd;
-    const gate = await hasGate(io, projectDir);
-    const dir = startedDir(io, projectDir, gate);
-    const startedFile = startedPath(dir, payload);
-    const raw = await io.readFile(startedFile);
-    if (raw === undefined)
-      return NONE;
-    try {
-      return await detect(io, projectDir, gate, dir, raw, payload);
-    } finally {
-      await io.removeFiles([startedFile]);
-    }
-  } catch {
-    return NONE;
-  }
-}
-async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
-  let saved;
-  try {
-    saved = JSON.parse(raw);
-  } catch {
-    return NONE;
-  }
-  if (!isDict(saved) || typeof saved.started !== "number")
-    return NONE;
-  if (jqStr(saved.tool_use_id) !== jqStr(payload.tool_use_id))
-    return NONE;
-  const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
-  if (SKIP_COMMAND_RE.test(command))
-    return NONE;
-  const threshold = saved.started - MTIME_SLACK_MS;
-  const stateDir = join(projectDir, ".claude", STATE_DIR);
-  const picked = new Set;
-  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd, command)) {
-    for (const rel of await candidates(io, root, threshold)) {
-      const abs = join(root, rel);
-      if (abs.startsWith(`${stateDir}/`) || abs.startsWith(`${startedDirPath}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
-        continue;
-      const st = await io.stat(abs);
-      if (st?.kind === "file" && st.mtimeMs >= threshold)
-        picked.add(abs);
-    }
-  }
-  const changed = [...picked];
-  if (changed.length === 0 || !gate)
-    return { changed, recorded: [], threshold, gate };
-  const memo = join(stateDir, `changed_files.${stateIdOf(payload)}.txt`);
-  const existing = await io.readFile(memo) ?? "";
-  const have = new Set(existing.split(`
-`));
-  const recorded = changed.filter((p) => !have.has(p));
-  if (recorded.length > 0)
-    await io.writeFile(memo, `${existing}${recorded.map((p) => `${p}
-`).join("")}`);
-  return { changed, recorded, threshold, gate };
-}
-var gitTop = async (io, dir) => {
-  const top = await io.run(["git", "-C", dir, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 });
-  return top.exitCode === 0 ? top.stdout.replace(/\n+$/, "") : "";
-};
-var mentionsWorktree = (command, name) => {
-  const needle = `worktrees/${name}`;
-  for (let i = command.indexOf(needle);i >= 0; i = command.indexOf(needle, i + 1)) {
-    const next = command.charAt(i + needle.length);
-    if (!/[A-Za-z0-9._-]/.test(next))
-      return true;
-  }
-  return false;
-};
-async function scanRoots(io, projectDir, cwd, command) {
-  const roots = [];
-  const add = (top) => {
-    if (top !== "" && !roots.includes(top))
-      roots.push(top);
-  };
-  add(await gitTop(io, cwd));
-  const worktreesDir = join(projectDir, ".claude", "worktrees");
-  for (const e of await io.list(worktreesDir)) {
-    if (e.kind === "dir" && mentionsWorktree(command, e.name))
-      add(await gitTop(io, join(worktreesDir, e.name)));
-  }
-  return roots;
-}
-async function candidates(io, root, threshold) {
-  const out = new Set;
-  const listed = await io.run(["git", "-C", root, "ls-files", "-z", "--modified", "--others", "--exclude-standard", "--full-name"], { timeoutMs: 1e4 });
-  if (listed.exitCode === 0) {
-    for (const s of listed.stdout.split("\x00"))
-      if (s !== "" && !s.endsWith("/"))
-        out.add(s);
-  }
-  const since = `--since=@${Math.floor(threshold / 1000)}`;
-  const logged = await io.run(["git", "-C", root, "log", since, "--no-merges", "--name-only", "-z", "--format=", "HEAD"], { timeoutMs: 1e4 });
-  if (logged.exitCode === 0) {
-    for (const s of logged.stdout.split(/[\0\n]/))
-      if (s !== "")
-        out.add(s);
-  }
-  return [...out];
-}
-function bashChangeSteps(payload) {
-  let found = NONE;
-  return [
-    async (io) => {
-      found = await detectBashChanges(io, payload);
-      return ok();
-    },
-    (io) => found.changed.length > 0 ? feedbackBashEdits(io, payload, found.changed, found.threshold) : Promise.resolve(ok()),
-    (io) => found.recorded.length > 0 ? stopTestGate(io, "rules", payload) : Promise.resolve(ok())
-  ];
-}
-
 // src/feedback-inject.ts
 async function formatFull(io, rule) {
   const lines = [tr(io.lang)("inject.ruleTitle", { name: rule.name, count: rule.count }), rule.description];
@@ -4133,6 +4133,78 @@ async function recordChanges(io, payload) {
   return ok();
 }
 
+// src/reset-gate.ts
+var STATE_FILES = [
+  ["changed_files", ".txt"],
+  ["gate_attempts", ".txt"],
+  ["gate_passed", ".txt"],
+  ["gate_push_verified", ".txt"],
+  ["gate_reported", ".txt"],
+  ["gate_pending_checks", ".json"],
+  ["gate_trace", ".jsonl"],
+  ["gate_deferred", ".json"],
+  ["gate_failed", ".txt"],
+  ["bash_started", ".json"],
+  ["feedback_gate_attempts", ".txt"],
+  ["subagent_report", ".json"],
+  ["summary", ".txt"]
+];
+var DAY_MS3 = 1440 * 60 * 1000;
+var globMatch = (name, prefix, suffix) => name.length >= prefix.length + suffix.length && name.startsWith(prefix) && name.endsWith(suffix);
+async function resetGate(io, payload) {
+  const projectDir = io.projectDir || io.cwd;
+  const claudeDir = join(projectDir, ".claude");
+  const stateDir = join(claudeDir, ".gate-status");
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  const source = jqStr(payload.source);
+  const now = await io.now();
+  if (source === "startup" || source === "clear") {
+    for (const dir of [stateDir, claudeDir]) {
+      const names = (await io.list(dir)).map((e) => e.name);
+      const doomed = [];
+      for (const [base, ext] of STATE_FILES) {
+        const exact = `${base}.${sessionId}${ext}`;
+        for (const name of names) {
+          if (name === exact || globMatch(name, `${base}.${sessionId}--`, ext))
+            doomed.push(join(dir, name));
+        }
+      }
+      await io.removeFiles(doomed);
+    }
+    for (const logRoot of [join(stateDir, "logs"), join(claudeDir, "hooks", "logs")]) {
+      for (const e of await io.list(logRoot)) {
+        if (e.name === sessionId || e.name.startsWith(`${sessionId}--`))
+          await io.removeTree(join(logRoot, e.name));
+      }
+    }
+  }
+  for (const dir of [stateDir, claudeDir]) {
+    const old = [];
+    for (const e of await io.list(dir)) {
+      if (e.kind !== "file" || e.mtimeMs >= now - DAY_MS3)
+        continue;
+      if (STATE_FILES.some(([base, ext]) => globMatch(e.name, `${base}.`, ext))) {
+        old.push(join(dir, e.name));
+      }
+    }
+    await io.removeFiles(old);
+  }
+  for (const logRoot of [join(stateDir, "logs"), join(claudeDir, "hooks", "logs")]) {
+    for (const e of await io.list(logRoot)) {
+      if (e.kind !== "dir")
+        continue;
+      const st = await io.stat(join(logRoot, e.name));
+      if (st && st.mtimeMs < now - DAY_MS3)
+        await io.removeTree(join(logRoot, e.name));
+    }
+  }
+  const seenDir = join(feedbackDir(io), ".classic_seen");
+  await io.removeFiles((await io.list(seenDir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS3).map((e) => join(seenDir, e.name)));
+  await io.removeDir(join(claudeDir, "hooks", "logs"));
+  await io.removeDir(join(claudeDir, "hooks"));
+  return ok();
+}
+
 // src/rules-file.ts
 var DEFAULT_RULES_FILE = "~/.claude/feedback-gate/feedback_rules.md";
 var bundledRulesName = (lang) => lang === "en" ? "feedback_rules.en.md" : "feedback_rules.md";
@@ -4212,11 +4284,13 @@ async function subagentReport(io, payload) {
 `);
 }
 
-// src/hooks.ts
+// src/register.ts
 var PROGRESS_DELAY_MS = 3000;
-async function runStepsCollect(base, sessionId, event, steps) {
+var str = (v) => typeof v === "string" ? v : "";
+async function runSteps($, options, event, steps) {
   let acc = {};
-  let stderr = "";
+  const base = await createIo($, options);
+  const sessionId = await $.session.id();
   let shown = false;
   let pending;
   let cancelDelay;
@@ -4247,130 +4321,15 @@ async function runStepsCollect(base, sessionId, event, steps) {
       const ran = await step(io).catch(() => {
         return;
       });
-      if (!ran)
-        continue;
-      acc = merge(acc, toOutcome(event, ran));
-      if (ran.exitCode === 0)
-        stderr += ran.stderr;
+      if (ran)
+        acc = merge(acc, toOutcome(event, ran));
     }
   } finally {
     cancelDelay?.();
     if (shown)
       base.progress?.(await loadSummary(base, sessionId));
   }
-  return { outcome: acc, stderr };
-}
-var runSteps = async (base, sessionId, event, steps) => (await runStepsCollect(base, sessionId, event, steps)).outcome;
-var guardsTool = (options, tool) => options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool) || /^(Bash|Edit|Write|MultiEdit)$/.test(tool);
-function preGuardSteps(options, tool, payload) {
-  const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
-  const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
-  return tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
-}
-function postToolSteps(tool, payload) {
-  if (/^(Agent|Task)$/.test(tool))
-    return [(io) => subagentReport(io, payload)];
-  if (tool === "Bash")
-    return bashChangeSteps(payload);
-  if (!/^(Write|Edit|MultiEdit)$/.test(tool))
-    return;
-  return [(io) => recordChanges(io, payload), (io) => feedbackPostEdit(io, payload), (io) => stopTestGate(io, "rules", payload)];
-}
-function subagentStopSteps(payload) {
-  let gate;
-  let feedback;
-  return [
-    async (io) => gate = await stopTestGate(io, "checks", payload),
-    async (io) => feedback = await feedbackStopCheck(io, payload),
-    (io) => saveSubagentReport(io, payload, gate, feedback)
-  ];
-}
-async function promptStepsResult(io, sessionId, options) {
-  const mine = {};
-  const text = await loadRules(io, options.rulesFile);
-  if (text !== "")
-    mine.additionalContext = [text];
-  const inject = await runStepsCollect(io, sessionId, "UserPromptSubmit", [(i) => feedbackInject(i)]);
-  return { outcome: merge(mine, inject.outcome), stderr: inject.stderr };
-}
-var promptOutcome = async (io, sessionId, options) => (await promptStepsResult(io, sessionId, options)).outcome;
-
-// src/reset-gate.ts
-var STATE_FILES = [
-  ["changed_files", ".txt"],
-  ["gate_attempts", ".txt"],
-  ["gate_passed", ".txt"],
-  ["gate_push_verified", ".txt"],
-  ["gate_reported", ".txt"],
-  ["gate_pending_checks", ".json"],
-  ["gate_trace", ".jsonl"],
-  ["gate_deferred", ".json"],
-  ["gate_failed", ".txt"],
-  ["bash_started", ".json"],
-  ["feedback_gate_attempts", ".txt"],
-  ["subagent_report", ".json"],
-  ["summary", ".txt"]
-];
-var DAY_MS3 = 1440 * 60 * 1000;
-var globMatch = (name, prefix, suffix) => name.length >= prefix.length + suffix.length && name.startsWith(prefix) && name.endsWith(suffix);
-async function resetGate(io, payload) {
-  const projectDir = io.projectDir || io.cwd;
-  const claudeDir = join(projectDir, ".claude");
-  const stateDir = join(claudeDir, ".gate-status");
-  const sessionId = jqStr(payload.session_id) || "unknown";
-  const source = jqStr(payload.source);
-  const now = await io.now();
-  if (source === "startup" || source === "clear") {
-    for (const dir of [stateDir, claudeDir]) {
-      const names = (await io.list(dir)).map((e) => e.name);
-      const doomed = [];
-      for (const [base, ext] of STATE_FILES) {
-        const exact = `${base}.${sessionId}${ext}`;
-        for (const name of names) {
-          if (name === exact || globMatch(name, `${base}.${sessionId}--`, ext))
-            doomed.push(join(dir, name));
-        }
-      }
-      await io.removeFiles(doomed);
-    }
-    for (const logRoot of [join(stateDir, "logs"), join(claudeDir, "hooks", "logs")]) {
-      for (const e of await io.list(logRoot)) {
-        if (e.name === sessionId || e.name.startsWith(`${sessionId}--`))
-          await io.removeTree(join(logRoot, e.name));
-      }
-    }
-  }
-  for (const dir of [stateDir, claudeDir]) {
-    const old = [];
-    for (const e of await io.list(dir)) {
-      if (e.kind !== "file" || e.mtimeMs >= now - DAY_MS3)
-        continue;
-      if (STATE_FILES.some(([base, ext]) => globMatch(e.name, `${base}.`, ext))) {
-        old.push(join(dir, e.name));
-      }
-    }
-    await io.removeFiles(old);
-  }
-  for (const logRoot of [join(stateDir, "logs"), join(claudeDir, "hooks", "logs")]) {
-    for (const e of await io.list(logRoot)) {
-      if (e.kind !== "dir")
-        continue;
-      const st = await io.stat(join(logRoot, e.name));
-      if (st && st.mtimeMs < now - DAY_MS3)
-        await io.removeTree(join(logRoot, e.name));
-    }
-  }
-  const seenDir = join(feedbackDir(io), ".classic_seen");
-  await io.removeFiles((await io.list(seenDir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS3).map((e) => join(seenDir, e.name)));
-  await io.removeDir(join(claudeDir, "hooks", "logs"));
-  await io.removeDir(join(claudeDir, "hooks"));
-  return ok();
-}
-
-// src/register.ts
-var str = (v) => typeof v === "string" ? v : "";
-async function runSteps2($, options, event, steps) {
-  return runSteps(await createIo($, options), await $.session.id(), event, steps);
+  return acc;
 }
 async function withNext(next, e, mine) {
   const rest = await next(e);
@@ -4417,21 +4376,28 @@ export const register = (on, options) => {
   on("command.run", { command: "correct" }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? "")));
   on("classic.SessionStart", async ($, e, next) => {
     await markClassic($, options);
-    const mine = await runSteps2($, options, "SessionStart", [(io) => resetGate(io, e)]);
+    const mine = await runSteps($, options, "SessionStart", [(io) => resetGate(io, e)]);
     return withNext(next, e, mine);
   });
   on("classic.UserPromptSubmit", async ($, e, next) => {
     await markClassic($, options);
-    const mine = await promptOutcome(await createIo($, options), await $.session.id(), options);
-    return withNext(next, e, mine);
+    const mine = {};
+    const text = await createIo($, options).then((io) => loadRules(io, options.rulesFile));
+    if (text !== "")
+      mine.additionalContext = [text];
+    const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io)]);
+    return withNext(next, e, merge(mine, inject));
   });
   on("classic.PreToolUse", async ($guard, guardEvent, guardNext) => {
     await markClassic($guard, options);
     const tool = str(guardEvent.tool);
-    if (!guardsTool(options, tool))
+    const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
+    if (!guardsAgents && !/^(Bash|Edit|Write|MultiEdit)$/.test(tool))
       return guardNext(guardEvent);
     const payload = preToolUsePayload(guardEvent, tool, await $guard.session.id(), await $guard.session.cwd());
-    const mine = await runSteps2($guard, options, "PreToolUse", preGuardSteps(options, tool, payload));
+    const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
+    const steps = tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
+    const mine = await runSteps($guard, options, "PreToolUse", steps);
     if (mine.deny !== undefined)
       return { deny: mine.deny };
     if (mine.ask !== undefined)
@@ -4440,24 +4406,42 @@ export const register = (on, options) => {
   });
   on("classic.PostToolUse", async ($, e, next) => {
     await markClassic($, options);
-    const steps = postToolSteps(str(e.tool_name), e);
-    if (!steps)
+    if (/^(Agent|Task)$/.test(str(e.tool_name))) {
+      const mine = await runSteps($, options, "PostToolUse", [(io) => subagentReport(io, e)]);
+      return withNext(next, e, mine);
+    }
+    if (str(e.tool_name) === "Bash") {
+      const mine = await runSteps($, options, "PostToolUse", bashChangeSteps(e));
+      return withNext(next, e, mine);
+    }
+    if (!/^(Write|Edit|MultiEdit)$/.test(str(e.tool_name)))
       return next(e);
-    return withNext(next, e, await runSteps2($, options, "PostToolUse", steps));
+    const mine = await runSteps($, options, "PostToolUse", [
+      (io) => recordChanges(io, e),
+      (io) => feedbackPostEdit(io, e),
+      (io) => stopTestGate(io, "rules", e)
+    ]);
+    return withNext(next, e, mine);
   });
   on("classic.Notification", async ($, e, next) => {
     await markClassic($, options, true);
-    await runSteps2($, options, "Notification", [(io) => notification(io, "notify", e)]);
+    await runSteps($, options, "Notification", [(io) => notification(io, "notify", e)]);
     return next(e);
   });
   on("classic.Stop", async ($, e, next) => {
     await markClassic($, options);
-    const mine = await runSteps2($, options, "Stop", [(io) => allStop(io, e)]);
+    const mine = await runSteps($, options, "Stop", [(io) => allStop(io, e)]);
     return withNext(next, e, mine);
   });
   on("classic.SubagentStop", async ($, e, next) => {
     await markClassic($, options);
-    const mine = await runSteps2($, options, "SubagentStop", subagentStopSteps(e));
+    let gate;
+    let feedback;
+    const mine = await runSteps($, options, "SubagentStop", [
+      async (io) => gate = await stopTestGate(io, "checks", e),
+      async (io) => feedback = await feedbackStopCheck(io, e),
+      (io) => saveSubagentReport(io, e, gate, feedback)
+    ]);
     return withNext(next, e, mine);
   });
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
