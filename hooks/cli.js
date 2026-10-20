@@ -44,6 +44,9 @@ subagentReport:
 autoCount:
   bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
 
+codex:
+  askAsDeny: "[feedback-gate] Codex has no ask in PreToolUse, so this rule denied the call. Read the reason above and fix the call; the same rule on the same target is only warned about from the next call in this session."
+
 launch:
   checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"
   promptTo: "Prompt to send to {{agentType}}:"
@@ -189,6 +192,9 @@ subagentReport:
 
 autoCount:
   bumped: "[feedback-gate] 違反を検出したため {{rule}} の count を {{from}} → {{to}} に上げました（{{path}}）。同じ違反を繰り返すと強制力（warn → ask/block → deny）が上がります。"
+
+codex:
+  askAsDeny: "[feedback-gate] Codex の PreToolUse には ask が無いので、このルールは呼び出しを拒否しました。上の理由を読んで呼び出しを直してください。同じセッション・同じ対象への同じルールは、次の呼び出しからは warn になります。"
 
 launch:
   checklist: "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件"
@@ -1575,16 +1581,18 @@ async function notification(io, type, payload) {
   }
   if (!await which(io, "terminal-notifier"))
     return ok();
+  const appName = io.appName || "Claude Code";
+  const group = appName.toLowerCase().replace(/\s+/g, "-");
   await io.run([
     "terminal-notifier",
     "-title",
-    "Claude Code",
+    appName,
     "-subtitle",
     `\uD83D\uDCC1 ${project} · ${t(kind.label)}`,
     "-message",
     message,
     "-group",
-    `claude-code-${target}`,
+    `${group}-${target}`,
     "-execute",
     click
   ]);
@@ -3952,6 +3960,29 @@ function postToolUse(io, sessionId, payload) {
     return Promise.resolve(none);
   return run([(i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, "rules", payload)]);
 }
+async function preToolUseEdits(io, sessionId, options, payloads) {
+  const runs = [];
+  for (const p of payloads)
+    runs.push(await preToolUse(io, sessionId, options, p));
+  const denies = runs.map((r) => r.outcome.deny).filter((r) => r !== undefined);
+  const asks = runs.map((r) => r.outcome.ask).filter((r) => r !== undefined);
+  const outcome = {};
+  if (denies.length > 0)
+    outcome.deny = [...denies, ...asks].join(`
+`);
+  else if (asks.length > 0)
+    outcome.ask = asks.join(`
+`);
+  return { outcome, stderr: runs.map((r) => r.stderr).join("") };
+}
+function postToolUseEdits(io, sessionId, payloads) {
+  const [first] = payloads;
+  if (!first)
+    return Promise.resolve(none);
+  const steps = payloads.flatMap((p) => [(i) => recordChanges(i, p), (i) => feedbackPostEdit(i, p)]);
+  steps.push((i) => stopTestGate(i, "rules", first));
+  return runSteps(io, sessionId, "PostToolUse", steps);
+}
 var notification2 = (io, sessionId, payload) => runSteps(io, sessionId, "Notification", [(i) => notification(i, "notify", payload)]);
 var stop = (io, sessionId, payload) => runSteps(io, sessionId, "Stop", [(i) => allStop(i, payload)]);
 function subagentStop(io, sessionId, payload) {
@@ -4001,6 +4032,7 @@ function makeNodeIo(init) {
     projectDir: init.env.CLAUDE_PROJECT_DIR || cwd,
     cwd,
     pluginRoot: init.env.CLAUDE_PLUGIN_ROOT || process.cwd(),
+    ...init.appName !== undefined ? { appName: init.appName } : {},
     readFile: async (p) => {
       try {
         return fs.readFileSync(p, "utf8");
@@ -4113,38 +4145,45 @@ function runProcess(argv, options = {}) {
   });
 }
 
-// src/cli.ts
-var EVENTS2 = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SubagentStop"];
+// src/host.ts
+var CORE_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SubagentStop"];
+var none2 = { outcome: {}, stderr: "" };
+async function runCore(io, call, sessionId, options) {
+  if (!call)
+    return none2;
+  const [first] = call.payloads;
+  if (!first)
+    return none2;
+  const many = call.payloads.length > 1;
+  switch (call.event) {
+    case "SessionStart":
+      return sessionStart(io, sessionId, first);
+    case "UserPromptSubmit":
+      return userPromptSubmit(io, sessionId, options);
+    case "PreToolUse":
+      return many ? preToolUseEdits(io, sessionId, options, call.payloads) : preToolUse(io, sessionId, options, first);
+    case "PostToolUse":
+      return many ? postToolUseEdits(io, sessionId, call.payloads) : postToolUse(io, sessionId, first);
+    case "Notification":
+      return notification2(io, sessionId, first);
+    case "Stop":
+      return stop(io, sessionId, first);
+    case "SubagentStop":
+      return subagentStop(io, sessionId, first);
+  }
+}
 var str2 = (v) => typeof v === "string" ? v : "";
-function optionsFromEnv(env) {
-  const opt = (key) => env[`CLAUDE_PLUGIN_OPTION_${key}`];
-  return {
-    language: opt("language"),
-    agentLaunchGuard: opt("agentLaunchGuard") === "true",
-    autoCount: opt("autoCount") !== "false",
-    rulesFile: opt("rulesFile")
-  };
-}
-async function runHook(event, payload, env) {
-  const options = optionsFromEnv(env);
-  const io = makeNodeIo({ env, payloadCwd: str2(payload.cwd), language: str2(options.language), autoCount: options.autoCount !== false });
+async function runHostHook(host, event, payload, env) {
+  const options = host.options(env);
+  const io = makeNodeIo({ env, payloadCwd: str2(payload.cwd), language: str2(options.language), autoCount: options.autoCount !== false, appName: host.appName });
   const sessionId = str2(payload.session_id) || "unknown";
-  const run = {
-    SessionStart: () => sessionStart(io, sessionId, payload),
-    UserPromptSubmit: () => userPromptSubmit(io, sessionId, options),
-    PreToolUse: () => preToolUse(io, sessionId, options, payload),
-    PostToolUse: () => postToolUse(io, sessionId, payload),
-    Notification: () => notification2(io, sessionId, payload),
-    Stop: () => stop(io, sessionId, payload),
-    SubagentStop: () => subagentStop(io, sessionId, payload)
-  }[event];
-  const { outcome, stderr } = await run();
-  return outcomeToClassic(event, outcome, stderr);
+  const { outcome, stderr } = await runCore(io, host.normalize(event, payload, io), sessionId, options);
+  return host.render(event, outcome, stderr, io);
 }
-async function main5() {
-  const event = EVENTS2.find((e) => e === process.argv[2]);
+async function cliMain(host) {
+  const event = host.events.find((e) => e === process.argv[2]);
   if (!event) {
-    process.stderr.write(`usage: cli.js <${EVENTS2.join("|")}>
+    process.stderr.write(`usage: cli.js <${host.events.join("|")}>
 `);
     process.exit(1);
   }
@@ -4158,7 +4197,7 @@ async function main5() {
       payload = v;
   } catch {}
   try {
-    const out = await runHook(event, payload, process.env);
+    const out = await runHostHook(host, event, payload, process.env);
     process.stdout.write(out.stdout);
     process.stderr.write(out.stderr);
     process.exitCode = out.exitCode;
@@ -4166,8 +4205,24 @@ async function main5() {
     process.exitCode = 0;
   }
 }
-await main5();
-export {
-  optionsFromEnv,
-  runHook
+
+// src/host-claude.ts
+function optionsFromEnv(env) {
+  const opt = (key) => env[`CLAUDE_PLUGIN_OPTION_${key}`];
+  return {
+    language: opt("language"),
+    agentLaunchGuard: opt("agentLaunchGuard") === "true",
+    autoCount: opt("autoCount") !== "false",
+    rulesFile: opt("rulesFile")
+  };
+}
+var claudeHost = {
+  appName: "Claude Code",
+  events: CORE_EVENTS,
+  options: optionsFromEnv,
+  normalize: (event, payload) => ({ event, payloads: [payload] }),
+  render: (event, outcome, stderr) => outcomeToClassic(event, outcome, stderr)
 };
+
+// src/cli.ts
+await cliMain(claudeHost);

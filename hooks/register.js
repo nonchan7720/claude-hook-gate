@@ -265,6 +265,9 @@ subagentReport:
 autoCount:
   bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
 
+codex:
+  askAsDeny: "[feedback-gate] Codex has no ask in PreToolUse, so this rule denied the call. Read the reason above and fix the call; the same rule on the same target is only warned about from the next call in this session."
+
 launch:
   checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"
   promptTo: "Prompt to send to {{agentType}}:"
@@ -410,6 +413,9 @@ subagentReport:
 
 autoCount:
   bumped: "[feedback-gate] 違反を検出したため {{rule}} の count を {{from}} → {{to}} に上げました（{{path}}）。同じ違反を繰り返すと強制力（warn → ask/block → deny）が上がります。"
+
+codex:
+  askAsDeny: "[feedback-gate] Codex の PreToolUse には ask が無いので、このルールは呼び出しを拒否しました。上の理由を読んで呼び出しを直してください。同じセッション・同じ対象への同じルールは、次の呼び出しからは warn になります。"
 
 launch:
   checklist: "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件"
@@ -1969,16 +1975,18 @@ async function notification(io, type, payload) {
   }
   if (!await which(io, "terminal-notifier"))
     return ok();
+  const appName = io.appName || "Claude Code";
+  const group = appName.toLowerCase().replace(/\s+/g, "-");
   await io.run([
     "terminal-notifier",
     "-title",
-    "Claude Code",
+    appName,
     "-subtitle",
     `\uD83D\uDCC1 ${project} · ${t(kind.label)}`,
     "-message",
     message,
     "-group",
-    `claude-code-${target}`,
+    `${group}-${target}`,
     "-execute",
     click
   ]);
