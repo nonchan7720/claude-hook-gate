@@ -15,11 +15,12 @@ import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, truthy } from './pyutil.ts'
+import { gateStatusDir } from './running-registry.ts'
 
 export const MAX_ATTEMPTS = 3
 
-export const attemptsPath = (projectDir: string, sessionId: string, agentId?: string | null): string =>
-  join(projectDir, '.claude', '.gate-status', `feedback_gate_attempts.${agentId ? `${sessionId}--${agentId}` : sessionId}.txt`)
+export const attemptsPath = (io: Io, sessionId: string, agentId?: string | null): string =>
+  join(gateStatusDir(io), `feedback_gate_attempts.${agentId ? `${sessionId}--${agentId}` : sessionId}.txt`)
 
 async function bumpAttempts(io: Io, path: string): Promise<number> {
   let attempts = 0
@@ -38,7 +39,7 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
   const projectDir = io.projectDir || io.cwd
   const sessionId = truthy(payload.session_id) ? String(payload.session_id) : 'unknown'
   const agentId = truthy(payload.agent_id) ? String(payload.agent_id) : null
-  const ap = attemptsPath(projectDir, sessionId, agentId)
+  const ap = attemptsPath(io, sessionId, agentId)
 
   const files = await getChangedFiles(io, projectDir, sessionId, agentId)
   if (files.length === 0) {

@@ -7,19 +7,14 @@
 // どちらもディレクトリ掲載の「1 ファイル 256 KiB 未満」に余裕を持って収めるため（全部を 1 ファイルにすると 400 KiB を超える）。
 // 出力は Claude Code の検証（claude plugin validate）に合わせて `export const register = ...` の形に整える
 // （bun は `var register = ...; export { register }` と書き出すが、検証は前者の形しか受け付けない）。
-import { cp, mkdir, rm } from 'node:fs/promises'
+import { rm } from 'node:fs/promises'
 import * as path from 'node:path'
 
 const root = path.resolve(import.meta.dir, '..')
 const hooksDir = path.join(root, 'hooks')
 const vendorDir = path.join(hooksDir, 'vendor')
-// Codex プラグイン（plugins/codex）。Claude Code 版と同じ構成（hooks/hooks.json → scripts/hook.sh → hooks/cli.js）で、
-// cli.js は src/codex-cli.ts から作り、依存は同じ hooks/vendor/*.js を plugins/codex/hooks/vendor/ にも書き出す。
-// 実行時に pluginRoot から読む同梱ファイル（rules/、scripts/dogwood/、scripts/gate.schema.json）もコピーする
-// （Codex はプラグインのディレクトリだけを取り込むので、プラグインの中で完結している必要がある）。
-const codexDir = path.join(root, 'plugins', 'codex')
-const codexHooksDir = path.join(codexDir, 'hooks')
-const codexVendorDir = path.join(codexHooksDir, 'vendor')
+// Codex プラグインの CLI の置き場所。プラグインのルートはリポジトリのルートなので、依存（hooks/vendor/）や同梱ファイルは共有する。
+const codexHooksDir = path.join(root, 'plugins', 'codex', 'hooks')
 
 // hooks/vendor/<name>.js に切り出す依存と、その中身（再 export するだけのエントリ）。
 const vendors: Record<string, string> = {
@@ -47,9 +42,7 @@ const scratch = path.join(root, 'node_modules', '.cache', 'vendor-entries')
 for (const [name, entry] of Object.entries(vendors)) {
   const entryPath = path.join(scratch, `${name}.ts`)
   await Bun.write(entryPath, entry)
-  const vendorCode = await build({ entrypoints: [entryPath], minify: true })
-  outputs[path.join(vendorDir, `${name}.js`)] = vendorCode
-  outputs[path.join(codexVendorDir, `${name}.js`)] = vendorCode
+  outputs[path.join(vendorDir, `${name}.js`)] = await build({ entrypoints: [entryPath], minify: true })
 }
 
 let code = await build({
@@ -57,10 +50,10 @@ let code = await build({
   external: ['claude-code', ...Object.keys(vendors)],
   minify: false,
 })
-// 外に出した依存の import を hooks/vendor/ への相対パスに差し替える。
-const useVendor = (text: string): string => {
+// 外に出した依存の import を hooks/vendor/ への相対パスに差し替える（vendorPath は出力ファイルから見た hooks/vendor/）。
+const useVendor = (text: string, vendorPath = './vendor'): string => {
   for (const name of Object.keys(vendors)) {
-    text = text.replace(new RegExp(`(\\bfrom\\s*)(['"])${name}\\2`, 'g'), `$1$2./vendor/${name}.js$2`)
+    text = text.replace(new RegExp(`(\\bfrom\\s*)(['"])${name}\\2`, 'g'), `$1$2${vendorPath}/${name}.js$2`)
   }
   return text
 }
@@ -111,7 +104,7 @@ const cliCode = useVendor(
 const cliFile = path.join(hooksDir, 'cli.js')
 outputs[cliFile] = cliCode
 
-// Codex プラグインの CLI（plugins/codex/hooks/cli.js）。cli.js と同じ Node プログラム（src/host.ts の cliMain）で、ホストが src/host-codex.ts。
+// Codex の CLI（plugins/codex/hooks/cli.js）。cli.js と同じ Node プログラムで、ホストだけ src/host-codex.ts。
 const codexCliCode = useVendor(
   await build({
     entrypoints: [path.join(root, 'src', 'codex-cli.ts')],
@@ -119,6 +112,7 @@ const codexCliCode = useVendor(
     external: ['claude-code', ...Object.keys(vendors)],
     minify: false,
   }),
+  '../../../hooks/vendor',
 )
 const codexCliFile = path.join(codexHooksDir, 'cli.js')
 outputs[codexCliFile] = codexCliCode
@@ -154,18 +148,7 @@ for (const [file, text] of Object.entries(outputs)) {
 }
 
 await rm(vendorDir, { recursive: true, force: true })
-await rm(codexVendorDir, { recursive: true, force: true })
 for (const [file, text] of Object.entries(outputs)) {
   await Bun.write(file, text)
   console.log(`wrote ${path.relative(root, file)} (${(new TextEncoder().encode(text).length / 1024).toFixed(0)} KiB)`)
-}
-
-// Codex プラグインが実行時に読む同梱ファイルを、リポジトリのものからコピーする（元を編集したら bun run build で揃える。CI も同じ）。
-const bundledAssets = ['rules', path.join('scripts', 'dogwood'), path.join('scripts', 'gate.schema.json')]
-for (const rel of bundledAssets) {
-  const dest = path.join(codexDir, rel)
-  await rm(dest, { recursive: true, force: true })
-  await mkdir(path.dirname(dest), { recursive: true })
-  await cp(path.join(root, rel), dest, { recursive: true })
-  console.log(`copied ${rel} -> ${path.relative(root, dest)}`)
 }

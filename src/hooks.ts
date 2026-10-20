@@ -118,11 +118,7 @@ export function postToolUse(io: Io, sessionId: string, payload: Dict): Promise<H
   return run([(i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, 'rules', payload)])
 }
 
-/**
- * PreToolUse（1 回で複数ファイルを編集するツール向け。Codex の apply_patch を src/host-codex.ts がファイルごとの Edit / Write の
- * payload に分けて渡す）: ファイルごとに preToolUse を走らせ、1 つの判定にする。deny が 1 つでもあれば deny、無ければ ask。
- * 理由は全件をつなぐ。warn（stderr）もつなぐ。
- */
+/** 複数ファイルを 1 回で編集するツール向け: ファイルごとに preToolUse を走らせ、deny > ask で 1 つの判定にする。 */
 export async function preToolUseEdits(io: Io, sessionId: string, options: PluginOptions, payloads: Dict[]): Promise<HookRun> {
   const runs: HookRun[] = []
   for (const p of payloads) runs.push(await preToolUse(io, sessionId, options, p))
@@ -134,10 +130,7 @@ export async function preToolUseEdits(io: Io, sessionId: string, options: Plugin
   return { outcome, stderr: runs.map((r) => r.stderr).join('') }
 }
 
-/**
- * PostToolUse（1 回で複数ファイルを編集するツール向け。Codex の apply_patch を src/host-codex.ts がファイルごとの Edit / Write の
- * payload に分けて渡す）: 各ファイルの記録と post_edit の検査を済ませてから、gate の rules フェーズを 1 回だけ走らせる。
- */
+/** 複数ファイルを 1 回で編集するツール向け: ファイルごとの記録と post_edit の後、gate の rules フェーズは 1 回だけ走らせる。 */
 export function postToolUseEdits(io: Io, sessionId: string, payloads: Dict[]): Promise<HookRun> {
   const [first] = payloads
   if (!first) return Promise.resolve(none)

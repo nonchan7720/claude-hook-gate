@@ -1,10 +1,11 @@
 // settings hook の CLI（src/cli.ts）用: Node の fs / child_process で Io を実装する。
 // mod の実行環境（engine-io.ts）と違って普通の Node プロセスなので、ファイルとプロセスにはそのまま触れる。
 // 画面に出す手段（progress / result / redraw / every）は持たない（no-op）。プロンプト上の帯は mod 側の ui.render が
-// 実行中一覧のファイル（.claude/.gate-status/running/）を読んで描くので、一覧ファイルの読み書きは従来どおり行う。
+// 実行中一覧のファイル（<設定ディレクトリ>/.gate-status/running/）を読んで描くので、一覧ファイルの読み書きは従来どおり行う。
 import { spawn } from 'node:child_process'
 import * as fs from 'node:fs'
 import { dirname, join } from 'node:path'
+import { CLAUDE_CONFIG_DIRS } from './config-dir.ts'
 import { resolveLang } from './i18n.ts'
 import type { DirEntry, EnvVars, Io, RunOptions, RunResult, Stat } from './io.ts'
 
@@ -35,11 +36,21 @@ export type NodeIoInit = {
   autoCount?: boolean
   /** 通知の見出しに使うアプリ名（Io.appName）。 */
   appName?: string
+  /** 設定ディレクトリ名の候補（Io.configDirNames）。省略時は Claude Code のもの。 */
+  configDirNames?: readonly string[]
+}
+
+/** 候補のうち最初に存在するディレクトリ。無ければ先頭。 */
+export function pickConfigDirSync(names: readonly string[], base: string): string {
+  for (const name of names) if (fs.existsSync(join(base, name))) return join(base, name)
+  return join(base, names[0] ?? '.claude')
 }
 
 export function makeNodeIo(init: NodeIoInit): Io {
   const env = pickEnv(init.env)
   const cwd = init.payloadCwd || process.cwd()
+  const projectDir = init.env.CLAUDE_PROJECT_DIR || cwd
+  const configDirNames = init.configDirNames ?? CLAUDE_CONFIG_DIRS
   const stat = async (p: string): Promise<Stat | undefined> => {
     try {
       const s = fs.statSync(p)
@@ -52,9 +63,12 @@ export function makeNodeIo(init: NodeIoInit): Io {
     env,
     lang: resolveLang(env, init.language),
     ...(init.autoCount !== undefined ? { autoCount: init.autoCount } : {}),
-    projectDir: init.env.CLAUDE_PROJECT_DIR || cwd,
+    projectDir,
     cwd,
     pluginRoot: init.env.CLAUDE_PLUGIN_ROOT || process.cwd(),
+    configDirNames,
+    projectConfigDir: pickConfigDirSync(configDirNames, projectDir),
+    homeConfigDir: pickConfigDirSync(configDirNames, env.HOME || '~'),
     ...(init.appName !== undefined ? { appName: init.appName } : {}),
     readFile: async (p) => {
       try {

@@ -19,11 +19,14 @@
 // 一方、classic.PostToolUse は stdin JSON そのままで agent_id を持つ。状態 ID（<session>[--<agent>]）で引くと
 // サブエージェントの中では両者が食い違って開始時刻が見つからず、Bash の変更が一切記録されなかった。tool_use_id は
 // 両方のイベントに同じ値で入るので、これを鍵にする。変更の記録先（changed_files）は PostToolUse 側の状態 ID で決める。
+
+import { findGateYaml } from './config-dir.ts'
 import { feedbackBashEdits, wantsBashEdits } from './feedback-bash-edit.ts'
 import { feedbackDir, listRules } from './feedback-rules.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, isDict, jqStr } from './pyutil.ts'
+import { gateStatusDir } from './running-registry.ts'
 import { stopTestGate } from './stop-test-gate.ts'
 
 /**
@@ -57,11 +60,10 @@ const startedKey = (payload: Dict): string => {
   return `${sessionId}--${toolUseId}`
 }
 
-const hasGate = (io: Io, projectDir: string): Promise<boolean> => io.exists(join(projectDir, '.claude', 'gate.yaml'))
+const hasGate = async (io: Io, projectDir: string): Promise<boolean> => (await findGateYaml(io, projectDir)) !== undefined
 
-/** 開始時刻ファイルを置くディレクトリ。gate.yaml があれば .claude/.gate-status/、無ければ <feedbackDir>/.bash_started/。 */
-export const startedDir = (io: Io, projectDir: string, gate: boolean): string =>
-  gate ? join(projectDir, '.claude', STATE_DIR) : join(feedbackDir(io), '.bash_started')
+/** 開始時刻ファイルを置くディレクトリ。gate.yaml があれば <設定ディレクトリ>/.gate-status/、無ければ <feedbackDir>/.bash_started/。 */
+export const startedDir = (io: Io, _projectDir: string, gate: boolean): string => (gate ? gateStatusDir(io) : join(feedbackDir(io), '.bash_started'))
 
 const startedPath = (dir: string, payload: Dict): string => join(dir, `bash_started.${startedKey(payload)}.json`)
 
@@ -138,7 +140,7 @@ async function detect(io: Io, projectDir: string, gate: boolean, startedDirPath:
   if (SKIP_COMMAND_RE.test(command)) return NONE
 
   const threshold = saved.started - MTIME_SLACK_MS
-  const stateDir = join(projectDir, '.claude', STATE_DIR)
+  const stateDir = gateStatusDir(io)
   const picked = new Set<string>()
   for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd, command)) {
     for (const rel of await candidates(io, root, threshold)) {

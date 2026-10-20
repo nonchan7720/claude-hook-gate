@@ -1,43 +1,22 @@
-// Codex の apply_patch ツール（tool_name: apply_patch）の入力を、Edit / Write の tool_input の形に読み替える。
-//
-// Codex はファイルの編集を 1 つのパッチ（下の形式）で行い、hook にはパッチ全文が tool_input.command として届く
-// （Claude Code の Edit / Write のような file_path / content / new_string は無い）。feedback の pre_edit / post_edit や
-// gate の変更ファイルの記録はファイル単位で動くので、パッチをファイルごとに分け、Add File は Write（content = 全文）、
-// Update File は Edit（new_string = 追加された行）として扱う。Delete File は検査の対象外（ファイルが無くなる）。
+// Codex の apply_patch（tool_input.command がパッチ全文）を、ファイルごとの Edit / Write の tool_input に読み替える。
 //
 //   *** Begin Patch
-//   *** Add File: path/to/new.py
-//   +line
-//   *** Update File: path/to/existing.py
-//   *** Move to: path/to/renamed.py        （任意）
-//   @@ context
-//    unchanged
-//   -removed
-//   +added
-//   *** End of File                         （任意）
-//   *** Delete File: path/to/old.py
+//   *** Add File: path            → Write（content = + の行の全文）
+//   *** Update File: path         → Edit（new_string = + の行）
+//   *** Move to: new/path         （任意。検査は移動先のパスで行う）
+//   *** Delete File: path         （検査しない）
 //   *** End Patch
-//
-// パスは cwd 相対（絶対パスも可）。相対パスは payload の cwd（無ければ Io の cwd）を起点に絶対パスへ直す。
 import { isAbsolute, join } from './path.ts'
 import { type Dict, isDict } from './pyutil.ts'
 
 export type PatchOp = 'add' | 'update' | 'delete'
 
-export type PatchFile = {
-  op: PatchOp
-  /** パッチに書かれたままのパス。 */
-  path: string
-  /** Update File の Move to（移動先）。 */
-  movedTo?: string
-  /** 追加された行（先頭の + を除いたもの）を改行でつないだもの。Add File では新しいファイルの全文。 */
-  added: string
-}
+export type PatchFile = { op: PatchOp; path: string; movedTo?: string; added: string }
 
 const BEGIN = '*** Begin Patch'
 const END = '*** End Patch'
 
-/** tool_input からパッチ本文を取り出す。command（現行）→ input / patch（古い形）の順。 */
+/** command のほか、古い形の input / patch も見る。 */
 export function patchText(toolInput: unknown): string {
   if (!isDict(toolInput)) return ''
   for (const key of ['command', 'input', 'patch']) {
@@ -47,7 +26,6 @@ export function patchText(toolInput: unknown): string {
   return ''
 }
 
-/** パッチ本文をファイルごとに分ける。パッチの形をしていなければ空配列。 */
 export function parsePatch(text: string): PatchFile[] {
   const begin = text.indexOf(BEGIN)
   if (begin < 0) return []
@@ -83,24 +61,17 @@ export function parsePatch(text: string): PatchFile[] {
     } else if (current && line.startsWith('+')) {
       current.lines.push(line.slice(1))
     }
-    // それ以外（@@ の行、文脈行、削除行、*** End of File）は読み飛ばす。
   }
   flush()
   return files
 }
 
-/** パッチ内のパスを絶対パスにする（相対パスは base 起点）。 */
 export const absolutePath = (p: string, base: string): string => (isAbsolute(p) ? p : join(base, p))
 
-/**
- * apply_patch の payload を、ファイルごとの Edit / Write の payload に分ける（Delete File は除く）。
- * 共通のキー（session_id / cwd / tool_use_id / agent_id など）はそのまま写し、tool_name と tool_input を差し替える。
- * 移動を伴う更新は移動先のパスで扱う（パッチ適用後にファイルがある場所）。
- */
+/** 共通のキー（session_id / cwd / tool_use_id / agent_id ...）は写し、tool_name と tool_input だけ差し替える。 */
 export function patchPayloads(payload: Dict, base: string): Dict[] {
-  const files = parsePatch(patchText(payload.tool_input))
   const out: Dict[] = []
-  for (const f of files) {
+  for (const f of parsePatch(patchText(payload.tool_input))) {
     if (f.op === 'delete') continue
     const filePath = absolutePath(f.movedTo ?? f.path, base)
     const toolInput: Dict = f.op === 'add' ? { file_path: filePath, content: f.added } : { file_path: filePath, old_string: '', new_string: f.added }

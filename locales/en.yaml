@@ -138,7 +138,7 @@ gate:
   checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
   checksGaveUp: "[gate] Gave up because consistency checks failed {{max}} times in a row. The target files were returned to CHANGED unverified. Please check them manually. To clear this now, start a new session or run /clear (reset-gate on SessionStart removes the state files)."
   checksFailed: "[gate] Verification failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
-  ymlTypo: "[gate] .claude/gate.yaml was not found but .claude/gate.yml exists. Check whether the extension is yml instead of yaml."
+  ymlTypo: "[gate] gate.yaml was not found but {{path}} exists. Check whether the extension is yml instead of yaml."
   policyUnevaluated: "=== [gate] ({{label}}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [{{reason}}] $ {{cmd}} ==="
   policySkipped: "=== [gate] ({{label}}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ {{cmd}} ==="
   notePolicySkipped: "(deferred by the policy verdict; queued to run automatically later)"

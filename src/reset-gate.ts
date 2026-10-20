@@ -10,6 +10,7 @@ import { feedbackDir } from './feedback-rules.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, jqStr } from './pyutil.ts'
+import { gateStatusDir } from './running-registry.ts'
 
 // [ファイル名の先頭, 拡張子]。<base>.<session>.<ext> と <base>.<session>--<agent>.<ext> が対象。
 const STATE_FILES: ReadonlyArray<readonly [string, string]> = [
@@ -33,9 +34,8 @@ const globMatch = (name: string, prefix: string, suffix: string): boolean =>
   name.length >= prefix.length + suffix.length && name.startsWith(prefix) && name.endsWith(suffix)
 
 export async function resetGate(io: Io, payload: Dict): Promise<ScriptResult> {
-  const projectDir = io.projectDir || io.cwd
-  const claudeDir = join(projectDir, '.claude')
-  const stateDir = join(claudeDir, '.gate-status')
+  const claudeDir = io.projectConfigDir
+  const stateDir = gateStatusDir(io)
   const sessionId = jqStr(payload.session_id) || 'unknown'
   const source = jqStr(payload.source)
   const now = await io.now()

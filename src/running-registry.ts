@@ -25,7 +25,7 @@ const MAX_RUN_MS = 600_000 // コマンド 1 本の最大実行時間（gate.ts 
 const STALE_MS = MAX_RUN_MS + 60_000 // これより古い開始時刻だけの一覧は、落ちたプロセスの残骸とみなす
 
 /** 状態ファイルとログの置き場所（gate.yaml は動かさない）。 */
-export const gateStatusDir = (io: Io): string => join(io.projectDir || io.cwd, '.claude', '.gate-status')
+export const gateStatusDir = (io: Io): string => join(io.projectConfigDir, '.gate-status')
 
 const runningDir = (io: Io): string => join(gateStatusDir(io), 'running')
 const ownerFile = (io: Io, owner: string): string => join(runningDir(io), `${owner}.json`)

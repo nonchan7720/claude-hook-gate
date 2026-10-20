@@ -8,6 +8,7 @@ describe('claudeHost', () => {
 
   test('名前・イベント・設定', () => {
     expect(claudeHost.appName).toBe('Claude Code')
+    expect([...claudeHost.configDirNames]).toEqual(['.claude', '.agents'])
     expect([...claudeHost.events]).toEqual(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'Notification', 'Stop', 'SubagentStop'])
     expect(
       claudeHost.options({

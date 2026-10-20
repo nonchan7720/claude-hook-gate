@@ -1,5 +1,4 @@
-// Codex プラグイン（plugins/codex）の command hook の入口: `node hooks/cli.js <Event>`（plugins/codex/scripts/hook.sh から）。
-// src/cli.ts（Claude Code の settings hook）と同じ作りで、ホストだけ Codex（src/host-codex.ts）に差し替える。
+// Codex の command hook（plugins/codex/hooks/hooks.json）の入口: `node plugins/codex/hooks/cli.js <Event>`。
 import { cliMain } from './host.ts'
 import { codexHost } from './host-codex.ts'
 

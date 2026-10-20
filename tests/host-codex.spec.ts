@@ -57,6 +57,7 @@ describe('codexHost / normalize', () => {
 
   test('ホストの名前とイベント', () => {
     expect(codexHost.appName).toBe('Codex')
+    expect([...codexHost.configDirNames]).toEqual(['.agents', '.claude'])
     expect([...codexHost.events]).toEqual(['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest', 'Stop', 'SubagentStop'])
     expect(codexHost.options({ FEEDBACK_GATE_AGENT_LAUNCH_GUARD: 'true', FEEDBACK_GATE_AUTO_COUNT: 'false', FEEDBACK_GATE_RULES_FILE: '/r.md' })).toEqual({
       language: undefined,

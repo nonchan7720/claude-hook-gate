@@ -1,5 +1,6 @@
 // エンジンの `$` から Io を作る。hook モジュールはここ経由でしかファイルやプロセスに触れない。
 import type { Engine } from 'claude-code'
+import { CLAUDE_CONFIG_DIRS, pickConfigDir } from './config-dir.ts'
 import { resolveLang } from './i18n.ts'
 import type { DirEntry, EnvVars, Io, RunOptions, RunResult, Stat } from './io.ts'
 
@@ -27,6 +28,11 @@ async function readEnv($: Engine): Promise<EnvVars> {
 export async function createIo($: Engine, options: Readonly<Record<string, unknown>> = {}): Promise<Io> {
   const [env, projectDir, cwd] = await Promise.all([readEnv($), $.session.root(), $.session.cwd()])
   const lang = resolveLang(env, options.language)
+  const exists = (path: string): Promise<boolean> => $.fs.exists(path).catch(() => false)
+  const [projectConfigDir, homeConfigDir] = await Promise.all([
+    pickConfigDir(CLAUDE_CONFIG_DIRS, projectDir, exists),
+    pickConfigDir(CLAUDE_CONFIG_DIRS, env.HOME || '~', exists),
+  ])
 
   const stat = async (path: string): Promise<Stat | undefined> => {
     try {
@@ -65,9 +71,12 @@ export async function createIo($: Engine, options: Readonly<Record<string, unkno
     projectDir,
     cwd,
     pluginRoot: $.plugin.root,
+    configDirNames: CLAUDE_CONFIG_DIRS,
+    projectConfigDir,
+    homeConfigDir,
     readFile: (path) => $.fs.read(path).then(String, () => undefined),
     writeFile: (path, text) => $.fs.write(path, text),
-    exists: (path) => $.fs.exists(path).catch(() => false),
+    exists,
     stat,
     list: async (path): Promise<DirEntry[]> => {
       try {

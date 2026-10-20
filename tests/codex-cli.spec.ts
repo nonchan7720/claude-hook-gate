@@ -30,8 +30,7 @@ async function withEnv<T>(body: (env: Env) => Promise<T>): Promise<T> {
 
 const { CLAUDE_PROJECT_DIR: _cpd, ...base } = process.env as Record<string, string>
 
-// プラグインのルート。plugins/codex/ の同梱ファイル（rules/、scripts/dogwood/）はビルドがルートからコピーする生成物で、CI が
-// バンドルをコミットするまでツリーに無いので、同じ内容を持つリポジトリのルートを使う。
+// Codex プラグインのルートはリポジトリのルート（hook.sh が PLUGIN_ROOT を CLAUDE_PLUGIN_ROOT として cli.js に渡す）。
 const PLUGIN_ROOT = REPO_ROOT
 
 /** CLI を子プロセスで走らせる。Codex はプロジェクトの環境変数（CLAUDE_PROJECT_DIR など）を渡さないので、cwd は payload から取らせる。 */
@@ -234,7 +233,7 @@ describe('SessionStart / PermissionRequest', () => {
 })
 
 describe('plugins/codex layout', () => {
-  test('hooks.json wires every event to scripts/hook.sh, and the hand-written files are in place', () => {
+  test('hooks.json wires every Codex event to scripts/hook.sh under PLUGIN_ROOT, and the manifests at the repository root point at it', () => {
     const dir = path.join(REPO_ROOT, 'plugins', 'codex')
     const hooks = JSON.parse(fs.readFileSync(path.join(dir, 'hooks', 'hooks.json'), 'utf8')) as {
       hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>>
@@ -249,15 +248,23 @@ describe('plugins/codex layout', () => {
       'UserPromptSubmit',
     ])
     for (const [event, groups] of Object.entries(hooks.hooks)) {
-      for (const g of groups) for (const h of g.hooks) expect(h.command).toBe(`bash "\${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh" ${event}`)
+      for (const g of groups) for (const h of g.hooks) expect(h.command).toBe(`bash "\${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh" ${event}`)
     }
-    // hooks/cli.js・hooks/vendor/・rules/・scripts/dogwood/・scripts/gate.schema.json はビルドの生成物（CI がコミットする）なので見ない。
-    for (const rel of ['scripts/hook.sh', '.codex-plugin/plugin.json', 'plugin.json', 'README.md', 'README_ja.md']) {
-      expect(fs.existsSync(path.join(dir, rel))).toBe(true)
-    }
-    const manifest = JSON.parse(fs.readFileSync(path.join(dir, '.codex-plugin', 'plugin.json'), 'utf8')) as { name: string; version: string }
-    const root = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, '.claude-plugin', 'plugin.json'), 'utf8')) as { version: string }
-    expect(manifest.name).toBe('feedback-gate')
-    expect(manifest.version).toBe(root.version)
+    for (const rel of ['scripts/hook.sh', 'README.md', 'README_ja.md']) expect(fs.existsSync(path.join(dir, rel))).toBe(true)
+    // 静的ファイル（rules/、scripts/dogwood/）を二重に持たないよう、Codex のプラグインのルートはリポジトリのルート。
+    const read = (rel: string) => JSON.parse(fs.readFileSync(path.join(REPO_ROOT, rel), 'utf8'))
+    const compat = read('.codex-plugin/plugin.json') as { name: string; version: string; hooks: string }
+    const portable = read('plugin.json') as { name: string; version: string; extensions: { 'com.openai': { hooks: string } } }
+    const claude = read('.claude-plugin/plugin.json') as { version: string }
+    const marketplace = read('.agents/plugins/marketplace.json') as { name: string; plugins: Array<{ name: string; source: { path: string } }> }
+    expect(compat).toMatchObject({ name: 'feedback-gate', version: claude.version, hooks: './plugins/codex/hooks/hooks.json' })
+    expect(portable).toMatchObject({
+      name: 'feedback-gate',
+      version: claude.version,
+      extensions: { 'com.openai': { hooks: './plugins/codex/hooks/hooks.json' } },
+    })
+    expect(marketplace.name).toBe('hook-gate')
+    expect(marketplace.plugins[0]).toMatchObject({ name: 'feedback-gate', source: { path: './' } })
+    expect(fs.existsSync(path.join(REPO_ROOT, 'plugins', 'codex', 'rules'))).toBe(false)
   })
 })

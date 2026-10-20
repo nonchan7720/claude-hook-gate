@@ -2,39 +2,39 @@
   "hooks": {
     "SessionStart": [
       {
-        "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh\" SessionStart" }]
+        "hooks": [{ "type": "command", "command": "bash \"${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh\" SessionStart" }]
       }
     ],
     "UserPromptSubmit": [
       {
-        "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh\" UserPromptSubmit" }]
+        "hooks": [{ "type": "command", "command": "bash \"${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh\" UserPromptSubmit" }]
       }
     ],
     "PreToolUse": [
       {
         "matcher": "Bash|apply_patch|spawn_agent|send_input",
-        "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh\" PreToolUse" }]
+        "hooks": [{ "type": "command", "command": "bash \"${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh\" PreToolUse" }]
       }
     ],
     "PostToolUse": [
       {
         "matcher": "Bash|apply_patch|spawn_agent",
-        "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh\" PostToolUse", "timeout": 600 }]
+        "hooks": [{ "type": "command", "command": "bash \"${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh\" PostToolUse", "timeout": 600 }]
       }
     ],
     "PermissionRequest": [
       {
-        "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh\" PermissionRequest" }]
+        "hooks": [{ "type": "command", "command": "bash \"${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh\" PermissionRequest" }]
       }
     ],
     "Stop": [
       {
-        "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh\" Stop", "timeout": 600 }]
+        "hooks": [{ "type": "command", "command": "bash \"${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh\" Stop", "timeout": 600 }]
       }
     ],
     "SubagentStop": [
       {
-        "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh\" SubagentStop", "timeout": 600 }]
+        "hooks": [{ "type": "command", "command": "bash \"${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh\" SubagentStop", "timeout": 600 }]
       }
     ]
   }

@@ -15,8 +15,6 @@
       "!hooks/cli.js",
       "!hooks/vendor",
       "!plugins/codex/hooks/cli.js",
-      "!plugins/codex/hooks/vendor",
-      "!plugins/codex/scripts/gate.schema.json",
       "!.release-please-manifest.json",
       "!CHANGELOG.md"
     ]

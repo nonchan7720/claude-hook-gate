@@ -4,6 +4,7 @@ import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { CLAUDE_CONFIG_DIRS } from '../../src/config-dir.ts'
 import type { Lang } from '../../src/i18n.ts'
 import type { DirEntry, EnvVars, Io, RunOptions, RunResult, Stat } from '../../src/io.ts'
 import { mergeRunning, runningBand, runningLines } from '../../src/running-registry.ts'
@@ -43,7 +44,12 @@ export type NodeIoOptions = {
   bandLog?: Array<string | undefined>
   /** every() を差し替える（時間を注入するため）。省略時は setInterval。 */
   every?: (ms: number, fn: () => void) => () => void
+  /** 設定ディレクトリ名の候補。省略時は Claude Code のもの。 */
+  configDirNames?: readonly string[]
 }
+
+const pick = (names: readonly string[], base: string): string =>
+  names.map((n) => path.join(base, n)).find((p) => fs.existsSync(p)) ?? path.join(base, names[0] ?? '.claude')
 
 /** 共有の実行中一覧のファイルを同期で読み、帯に描かれる内容を返す（redraw の時点の記録用）。 */
 function snapshotBand(projectDir: string, now: number, lang: Lang): string | undefined {
@@ -66,6 +72,7 @@ export function makeIo(opts: NodeIoOptions): Io {
     }
   }
   const lang = opts.lang ?? 'ja'
+  const configDirNames = opts.configDirNames ?? CLAUDE_CONFIG_DIRS
   return {
     env,
     lang,
@@ -73,6 +80,9 @@ export function makeIo(opts: NodeIoOptions): Io {
     projectDir: opts.projectDir,
     cwd: opts.cwd ?? opts.projectDir,
     pluginRoot: opts.pluginRoot ?? REPO_ROOT,
+    configDirNames,
+    projectConfigDir: pick(configDirNames, opts.projectDir),
+    homeConfigDir: pick(configDirNames, env.HOME || TEST_HOME),
     readFile: async (p) => {
       try {
         return fs.readFileSync(p, 'utf8')
