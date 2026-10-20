@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.8.0...v0.9.0) (2026-10-20)
+
+
+### Features
+
+* add a Codex plugin (plugins/codex) behind a host interface ([#59](https://github.com/nonchan7720/claude-hook-gate/issues/59)) ([c899662](https://github.com/nonchan7720/claude-hook-gate/commit/c899662f8b4606748cf4f586306623ed38c91b05))
+
+
+### Bug Fixes
+
+* keep plugin.json in the format release-please writes ([#61](https://github.com/nonchan7720/claude-hook-gate/issues/61)) ([514aa10](https://github.com/nonchan7720/claude-hook-gate/commit/514aa101b5300de0b4d5a6fa1d981729f7279a48))
+
 ## [0.8.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.5...v0.8.0) (2026-10-20)
 
 
