@@ -1,6 +1,6 @@
 // src/i18n.ts
-import i18next from "./vendor/i18next.js";
-import { parse } from "./vendor/yaml.js";
+import i18next from "../../../hooks/vendor/i18next.js";
+import { parse } from "../../../hooks/vendor/yaml.js";
 
 // locales/en.yaml
 var en_default = `# Messages printed by the hooks (English). Has the same keys as ja.yaml (tests/i18n.spec.ts checks the key sets match).
@@ -143,7 +143,7 @@ gate:
   checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
   checksGaveUp: "[gate] Gave up because consistency checks failed {{max}} times in a row. The target files were returned to CHANGED unverified. Please check them manually. To clear this now, start a new session or run /clear (reset-gate on SessionStart removes the state files)."
   checksFailed: "[gate] Verification failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
-  ymlTypo: "[gate] .claude/gate.yaml was not found but .claude/gate.yml exists. Check whether the extension is yml instead of yaml."
+  ymlTypo: "[gate] gate.yaml was not found but {{path}} exists. Check whether the extension is yml instead of yaml."
   policyUnevaluated: "=== [gate] ({{label}}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [{{reason}}] $ {{cmd}} ==="
   policySkipped: "=== [gate] ({{label}}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ {{cmd}} ==="
   notePolicySkipped: "(deferred by the policy verdict; queued to run automatically later)"
@@ -292,7 +292,7 @@ gate:
   checksGaveUpStderr: "consistency checks が {{max}} 回連続失敗。ループを打ち切ります。手動確認を。"
   checksGaveUp: "[gate] consistency checks が{{max}}回連続で失敗したため打ち切りました。対象ファイルは未検証のまま CHANGED へ戻しました。手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか /clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。"
   checksFailed: "[gate] 検証に失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て修正を継続してください。"
-  ymlTypo: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
+  ymlTypo: "[gate] gate.yaml が見つかりませんが {{path}} があります。拡張子が yaml ではなく yml になっていないか確認してください。"
   policyUnevaluated: "=== [gate] ({{label}}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［{{reason}}］ $ {{cmd}} ==="
   policySkipped: "=== [gate] ({{label}}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ {{cmd}} ==="
   notePolicySkipped: "(ポリシー判定で見送り。控えに積んだので後で自動実行)"
@@ -549,6 +549,17 @@ function expandUser(p, home) {
   return p;
 }
 
+// src/config-dir.ts
+var CLAUDE_CONFIG_DIRS = [".claude", ".agents"];
+var configPaths = (io, base, ...rel) => io.configDirNames.map((name) => join(base, name, ...rel));
+async function findConfigPath(io, base, ...rel) {
+  for (const path of configPaths(io, base, ...rel))
+    if (await io.exists(path))
+      return path;
+  return;
+}
+var findGateYaml = (io, base = io.projectDir || io.cwd) => findConfigPath(io, base, "gate.yaml");
+
 // src/glob.ts
 function splitTopCommas(s) {
   const parts = [];
@@ -697,7 +708,7 @@ async function walk(io, dir, segs, i) {
 }
 
 // src/load-yaml.ts
-import { parse as parse2 } from "./vendor/yaml.js";
+import { parse as parse2 } from "../../../hooks/vendor/yaml.js";
 var PY_TRUE = /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON)$/;
 var PY_FALSE = /^(?:no|No|NO|false|False|FALSE|off|Off|OFF)$/;
 var pyBool = (original) => ({
@@ -734,16 +745,76 @@ function splitRoot(projectDir, path) {
   return [projectDir, relativize(path, projectDir)];
 }
 
+// src/running-registry.ts
+var MAX_RUN_MS = 600000;
+var STALE_MS = MAX_RUN_MS + 60000;
+var gateStatusDir = (io) => join(io.projectConfigDir, ".gate-status");
+var runningDir = (io) => join(gateStatusDir(io), "running");
+var ownerFile = (io, owner) => join(runningDir(io), `${owner}.json`);
+var publishRunning = (io, owner, entries) => io.writeFile(ownerFile(io, owner), JSON.stringify(entries));
+var withdrawRunning = (io, owner) => io.removeFiles([ownerFile(io, owner)]);
+function mergeRunning(texts, now) {
+  const groups = [];
+  for (const text of texts) {
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      continue;
+    }
+    const entries = (Array.isArray(parsed) ? parsed : []).filter(isDict);
+    if (entries.length === 0 || Math.max(...entries.map((e) => e.started)) < now - STALE_MS)
+      continue;
+    groups.push(entries);
+  }
+  groups.sort((a, b) => a[0].started - b[0].started);
+  return groups.flat();
+}
+var ownedBySession = (name, sessionId) => name.startsWith(`${sessionId}.`) || name.startsWith(`${sessionId}--`);
+async function listRunning(io, sessionId) {
+  const now = await io.now();
+  const texts = [];
+  for (const f of await io.list(runningDir(io))) {
+    if (f.kind !== "file" || !f.name.endsWith(".json") || !ownedBySession(f.name, sessionId))
+      continue;
+    const text = await io.readFile(join(runningDir(io), f.name));
+    if (text !== undefined)
+      texts.push(text);
+  }
+  return mergeRunning(texts, now);
+}
+function finishedSummary(entries, lang) {
+  if (entries.length === 0 || entries.some((e) => !e.result))
+    return;
+  const passed = entries.filter((e) => e.result === "ok").length;
+  const failed = entries.length - passed;
+  const counts = [passed > 0 ? `✓ ${passed}` : "", failed > 0 ? `✗ ${failed}` : ""].filter((s) => s !== "").join(" / ");
+  const first = Math.min(...entries.map((e) => e.started));
+  const last = Math.max(...entries.map((e) => e.ended ?? e.started));
+  return tr(lang)("band.done", { counts, seconds: ((last - first) / 1000).toFixed(1) });
+}
+var summaryFile = (io, sessionId) => join(gateStatusDir(io), `summary.${sessionId}.txt`);
+var saveSummary = (io, sessionId, text) => io.writeFile(summaryFile(io, sessionId), text);
+var clearSummary = (io, sessionId) => io.removeFiles([summaryFile(io, sessionId)]);
+async function loadSummary(io, sessionId) {
+  const text = await io.readFile(summaryFile(io, sessionId));
+  return text === undefined || text === "" ? undefined : text;
+}
+
 // src/feedback-rules.ts
 function feedbackDir(io) {
   const override = io.env.CLAUDE_FEEDBACK_DIR;
   if (override)
     return override;
-  return join(io.env.HOME || "~", ".claude", "feedback");
+  return join(io.homeConfigDir, "feedback");
 }
-function projectFeedbackDir(io, projectDir) {
-  return join(projectDir || io.projectDir || io.cwd, ".claude", "feedback");
+function feedbackDirs(io) {
+  const override = io.env.CLAUDE_FEEDBACK_DIR;
+  if (override)
+    return [override];
+  return configPaths(io, io.env.HOME || "~", "feedback");
 }
+var projectFeedbackDirs = (io, projectDir) => configPaths(io, projectDir || io.projectDir || io.cwd, "feedback");
 var violationsLogPath = (io) => join(feedbackDir(io), ".violations.jsonl");
 var errorsLogPath = (io) => join(feedbackDir(io), ".errors.jsonl");
 var FRONTMATTER_RE = /^---\s*\n([\s\S]*?\n)---\s*\n?/;
@@ -871,6 +942,19 @@ async function loadBodyIntro(io, path) {
 
 `)[0] ?? "").trim();
 }
+async function listRulesInAll(io, dirs, broken) {
+  const out = [];
+  const seen = new Set;
+  for (const dir of dirs) {
+    for (const rule of await listRulesIn(io, dir, broken)) {
+      if (seen.has(rule.name))
+        continue;
+      seen.add(rule.name);
+      out.push(rule);
+    }
+  }
+  return out;
+}
 async function listRulesIn(io, d, broken) {
   const rules = [];
   const names = (await io.list(d)).map((e) => e.name).sort();
@@ -901,15 +985,12 @@ async function scanRules(io, feedbackDirPath) {
     const rules = await listRulesIn(io, feedbackDirPath, broken);
     return { rules, broken: [...broken, ...problemsOf(rules)] };
   }
-  const globalDir = feedbackDir(io);
-  const projectDir = projectFeedbackDir(io);
-  const globalRules = await listRulesIn(io, globalDir, broken);
-  let merged = globalRules;
-  if (projectDir !== globalDir) {
-    const projectRules = await listRulesIn(io, projectDir, broken);
-    const overridden = new Set(projectRules.map((r) => r.name));
-    merged = [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules];
-  }
+  const globalDirs = feedbackDirs(io);
+  const projectDirs = projectFeedbackDirs(io).filter((d) => !globalDirs.includes(d));
+  const globalRules = await listRulesInAll(io, globalDirs, broken);
+  const projectRules = await listRulesInAll(io, projectDirs, broken);
+  const overridden = new Set(projectRules.map((r) => r.name));
+  const merged = [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules];
   const active = [];
   for (const r of merged)
     if (await isRuleActive(io, r))
@@ -1285,13 +1366,12 @@ async function gitFallbackFiles(io, cwd) {
   return [...files].sort();
 }
 async function getChangedFiles(io, projectDir, sessionId, agentId) {
-  const claudeDir = join(projectDir, ".claude");
-  const stateDir = join(claudeDir, ".gate-status");
+  const stateDir = gateStatusDir(io);
   if (agentId) {
     const lines = await readLines(io, join(stateDir, `changed_files.${sessionId}--${agentId}.txt`));
     if (lines !== undefined)
       return lines;
-    const worktree = join(claudeDir, "worktrees", `agent-${agentId}`);
+    const worktree = join(projectDir, ".claude", "worktrees", `agent-${agentId}`);
     if ((await io.stat(worktree))?.kind === "dir") {
       return (await gitFallbackFiles(io, worktree)).map((f) => join(worktree, f));
     }
@@ -1381,7 +1461,7 @@ async function evalStopCheck(io, rules, projectDir, changedFiles) {
 
 // src/feedback-stop-check.ts
 var MAX_ATTEMPTS = 3;
-var attemptsPath = (projectDir, sessionId, agentId) => join(projectDir, ".claude", ".gate-status", `feedback_gate_attempts.${agentId ? `${sessionId}--${agentId}` : sessionId}.txt`);
+var attemptsPath = (io, sessionId, agentId) => join(gateStatusDir(io), `feedback_gate_attempts.${agentId ? `${sessionId}--${agentId}` : sessionId}.txt`);
 async function bumpAttempts(io, path) {
   let attempts = 0;
   const text = await io.readFile(path);
@@ -1397,7 +1477,7 @@ async function main(io, payload) {
   const projectDir = io.projectDir || io.cwd;
   const sessionId = truthy(payload.session_id) ? String(payload.session_id) : "unknown";
   const agentId = truthy(payload.agent_id) ? String(payload.agent_id) : null;
-  const ap = attemptsPath(projectDir, sessionId, agentId);
+  const ap = attemptsPath(io, sessionId, agentId);
   const files = await getChangedFiles(io, projectDir, sessionId, agentId);
   if (files.length === 0) {
     await io.removeFiles([ap]);
@@ -1599,62 +1679,6 @@ async function notification(io, type, payload) {
   return ok();
 }
 
-// src/running-registry.ts
-var MAX_RUN_MS = 600000;
-var STALE_MS = MAX_RUN_MS + 60000;
-var gateStatusDir = (io) => join(io.projectDir || io.cwd, ".claude", ".gate-status");
-var runningDir = (io) => join(gateStatusDir(io), "running");
-var ownerFile = (io, owner) => join(runningDir(io), `${owner}.json`);
-var publishRunning = (io, owner, entries) => io.writeFile(ownerFile(io, owner), JSON.stringify(entries));
-var withdrawRunning = (io, owner) => io.removeFiles([ownerFile(io, owner)]);
-function mergeRunning(texts, now) {
-  const groups = [];
-  for (const text of texts) {
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch {
-      continue;
-    }
-    const entries = (Array.isArray(parsed) ? parsed : []).filter(isDict);
-    if (entries.length === 0 || Math.max(...entries.map((e) => e.started)) < now - STALE_MS)
-      continue;
-    groups.push(entries);
-  }
-  groups.sort((a, b) => a[0].started - b[0].started);
-  return groups.flat();
-}
-var ownedBySession = (name, sessionId) => name.startsWith(`${sessionId}.`) || name.startsWith(`${sessionId}--`);
-async function listRunning(io, sessionId) {
-  const now = await io.now();
-  const texts = [];
-  for (const f of await io.list(runningDir(io))) {
-    if (f.kind !== "file" || !f.name.endsWith(".json") || !ownedBySession(f.name, sessionId))
-      continue;
-    const text = await io.readFile(join(runningDir(io), f.name));
-    if (text !== undefined)
-      texts.push(text);
-  }
-  return mergeRunning(texts, now);
-}
-function finishedSummary(entries, lang) {
-  if (entries.length === 0 || entries.some((e) => !e.result))
-    return;
-  const passed = entries.filter((e) => e.result === "ok").length;
-  const failed = entries.length - passed;
-  const counts = [passed > 0 ? `✓ ${passed}` : "", failed > 0 ? `✗ ${failed}` : ""].filter((s) => s !== "").join(" / ");
-  const first = Math.min(...entries.map((e) => e.started));
-  const last = Math.max(...entries.map((e) => e.ended ?? e.started));
-  return tr(lang)("band.done", { counts, seconds: ((last - first) / 1000).toFixed(1) });
-}
-var summaryFile = (io, sessionId) => join(gateStatusDir(io), `summary.${sessionId}.txt`);
-var saveSummary = (io, sessionId, text) => io.writeFile(summaryFile(io, sessionId), text);
-var clearSummary = (io, sessionId) => io.removeFiles([summaryFile(io, sessionId)]);
-async function loadSummary(io, sessionId) {
-  const text = await io.readFile(summaryFile(io, sessionId));
-  return text === undefined || text === "" ? undefined : text;
-}
-
 // src/shared-run.ts
 var GRACE_MS = 5000;
 var MAX_WAIT_MS = 600000;
@@ -1696,7 +1720,7 @@ function sharedDir(io) {
       const common = await ask(["--path-format=absolute"]) ?? await ask([]);
       const anchor = common ? normpath(isAbsolute(common) ? common : join(base, common)) : normpath(base);
       const label = (common && basename(anchor) === ".git" ? basename(dirname(anchor)) : basename(anchor)).replace(/[^A-Za-z0-9._-]/g, "_") || "project";
-      return join(home, ".claude", ".gate-status", "shared", `${label}-${hashKey(anchor)}`);
+      return join(io.homeConfigDir, ".gate-status", "shared", `${label}-${hashKey(anchor)}`);
     })();
     sharedDirCache.set(cacheKey, cached);
   }
@@ -2045,9 +2069,7 @@ class Gate {
   stateId;
   phase;
   stopHookActive;
-  claudeDir;
   action;
-  gateYml;
   stateDir;
   changed;
   count;
@@ -2082,9 +2104,7 @@ class Gate {
     this.stateId = this.agentId ? `${this.sessionId}--${this.agentId}` : this.sessionId;
     this.phase = (opts.phase || "checks").trim().toLowerCase();
     this.stopHookActive = opts.stopHookActive === true;
-    this.claudeDir = join(this.projectDir, ".claude");
-    this.action = join(this.claudeDir, "gate.yaml");
-    this.gateYml = join(this.claudeDir, "gate.yml");
+    this.action = join(io.projectConfigDir, "gate.yaml");
     this.stateDir = gateStatusDir(io);
     this.runningOwner = `${this.stateId}.${Math.random().toString(36).slice(2, 10)}`;
     this.changed = join(this.stateDir, `changed_files.${this.stateId}.txt`);
@@ -2623,8 +2643,8 @@ ${details}` : "");
     return { order, relsByRoot };
   }
   async loadRootCfg(root, mainCfg) {
-    const path = join(root, ".claude", "gate.yaml");
-    return await this.io.exists(path) ? await this.loadAction(path) : mainCfg;
+    const path = await findGateYaml(this.io, root);
+    return path ? await this.loadAction(path) : mainCfg;
   }
   async loadAction(path) {
     const text = await this.io.readFile(path);
@@ -3074,13 +3094,15 @@ ${summary.map((s) => `✗ ${s}`).join(`
   }
   async main() {
     await this.pruneLogs();
-    if (!await this.io.exists(this.action) && await this.io.exists(this.gateYml)) {
-      this.print({ systemMessage: this.t("gate.ymlTypo") });
-    }
-    if (!await this.io.exists(this.action)) {
+    const action = await findGateYaml(this.io, this.projectDir);
+    if (!action) {
+      const yml = await findConfigPath(this.io, this.projectDir, "gate.yml");
+      if (yml)
+        this.print({ systemMessage: this.t("gate.ymlTypo", { path: yml }) });
       await this.cleanup();
       return 0;
     }
+    this.action = action;
     return this.phase === "rules" ? this.runRulesPhase() : this.runChecksPhase();
   }
 }
@@ -3153,12 +3175,11 @@ ${e instanceof Error ? e.stack ?? e.message : String(e)}
 
 // src/stop-test-gate.ts
 async function stopTestGate(io, phase, payload) {
-  const projectDir = io.projectDir || io.cwd;
-  if (!await io.exists(join(projectDir, ".claude", "gate.yaml"))) {
-    if (await io.exists(join(projectDir, ".claude", "gate.yml"))) {
-      return ok(`${JSON.stringify({ systemMessage: tr(io.lang)("gate.ymlTypo") })}
+  if (!await findGateYaml(io)) {
+    const yml = await findConfigPath(io, io.projectDir || io.cwd, "gate.yml");
+    if (yml)
+      return ok(`${JSON.stringify({ systemMessage: tr(io.lang)("gate.ymlTypo", { path: yml }) })}
 `);
-    }
     return ok();
   }
   return runGate(io, {
@@ -3401,8 +3422,8 @@ var startedKey = (payload) => {
   const sessionId = jqStr(payload.session_id) || "unknown";
   return `${sessionId}--${toolUseId}`;
 };
-var hasGate = (io, projectDir) => io.exists(join(projectDir, ".claude", "gate.yaml"));
-var startedDir = (io, projectDir, gate) => gate ? join(projectDir, ".claude", STATE_DIR) : join(feedbackDir(io), ".bash_started");
+var hasGate = async (io, projectDir) => await findGateYaml(io, projectDir) !== undefined;
+var startedDir = (io, _projectDir, gate) => gate ? gateStatusDir(io) : join(feedbackDir(io), ".bash_started");
 var startedPath = (dir, payload) => join(dir, `bash_started.${startedKey(payload)}.json`);
 async function bashStarted(io, payload) {
   try {
@@ -3458,7 +3479,7 @@ async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
   if (SKIP_COMMAND_RE.test(command))
     return NONE;
   const threshold = saved.started - MTIME_SLACK_MS;
-  const stateDir = join(projectDir, ".claude", STATE_DIR);
+  const stateDir = gateStatusDir(io);
   const picked = new Set;
   for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd, command)) {
     for (const rel of await candidates(io, root, threshold)) {
@@ -3688,14 +3709,13 @@ var merge = (first, second) => {
 
 // src/record-changes.ts
 async function recordChanges(io, payload) {
-  const projectDir = io.projectDir || io.cwd;
-  if (!await io.exists(join(projectDir, ".claude", "gate.yaml")))
+  if (!await findGateYaml(io))
     return ok();
   const filePath = jqStr(isDict(payload.tool_input) ? payload.tool_input.file_path : undefined);
   const sessionId = jqStr(payload.session_id) || "unknown";
   const agentId = jqStr(payload.agent_id);
   const stateId = agentId ? `${sessionId}--${agentId}` : sessionId;
-  const memo = join(projectDir, ".claude", ".gate-status", `changed_files.${stateId}.txt`);
+  const memo = join(gateStatusDir(io), `changed_files.${stateId}.txt`);
   if (filePath) {
     const existing = await io.readFile(memo) ?? "";
     if (!existing.split(`
@@ -3725,9 +3745,8 @@ var STATE_FILES = [
 var DAY_MS2 = 1440 * 60 * 1000;
 var globMatch = (name, prefix, suffix) => name.length >= prefix.length + suffix.length && name.startsWith(prefix) && name.endsWith(suffix);
 async function resetGate(io, payload) {
-  const projectDir = io.projectDir || io.cwd;
-  const claudeDir = join(projectDir, ".claude");
-  const stateDir = join(claudeDir, ".gate-status");
+  const claudeDir = io.projectConfigDir;
+  const stateDir = gateStatusDir(io);
   const sessionId = jqStr(payload.session_id) || "unknown";
   const source = jqStr(payload.source);
   const now = await io.now();
@@ -3779,14 +3798,13 @@ async function resetGate(io, payload) {
 }
 
 // src/rules-file.ts
-var DEFAULT_RULES_FILE = "~/.claude/feedback-gate/feedback_rules.md";
 var bundledRulesName = (lang) => lang === "en" ? "feedback_rules.en.md" : "feedback_rules.md";
 async function loadRules(io, rulesFile) {
   const home = io.env.HOME;
-  const configured = typeof rulesFile === "string" && rulesFile !== "" ? rulesFile : DEFAULT_RULES_FILE;
-  const custom = configured.startsWith("~") ? home ? `${home}${configured.slice(1)}` : undefined : configured;
+  const expand = (p) => p.startsWith("~") ? home ? `${home}${p.slice(1)}` : undefined : p;
+  const configured = typeof rulesFile === "string" && rulesFile !== "" ? [expand(rulesFile)] : home ? configPaths(io, home, "feedback-gate", "feedback_rules.md") : [];
   const bundled = join(io.pluginRoot, "rules", bundledRulesName(io.lang));
-  for (const path of [custom, bundled]) {
+  for (const path of [...configured, bundled]) {
     if (path && await io.exists(path))
       return (await io.readFile(path) ?? "").trim();
   }
@@ -3794,7 +3812,7 @@ async function loadRules(io, rulesFile) {
 }
 
 // src/subagent-report.ts
-var reportPath = (io, sessionId, agentId) => join(io.projectDir || io.cwd, ".claude", ".gate-status", `subagent_report.${sessionId}--${agentId}.json`);
+var reportPath = (io, sessionId, agentId) => join(gateStatusDir(io), `subagent_report.${sessionId}--${agentId}.json`);
 var blockReason = (stdout) => {
   for (const line of stdout.split(`
 `)) {
@@ -3986,9 +4004,17 @@ function pickEnv(env) {
     LANG: env.LANG
   };
 }
+function pickConfigDirSync(names, base) {
+  for (const name of names)
+    if (fs.existsSync(join2(base, name)))
+      return join2(base, name);
+  return join2(base, names[0] ?? ".claude");
+}
 function makeNodeIo(init) {
   const env = pickEnv(init.env);
   const cwd = init.payloadCwd || process.cwd();
+  const projectDir = init.env.CLAUDE_PROJECT_DIR || cwd;
+  const configDirNames = init.configDirNames ?? CLAUDE_CONFIG_DIRS;
   const stat = async (p) => {
     try {
       const s = fs.statSync(p);
@@ -4001,9 +4027,12 @@ function makeNodeIo(init) {
     env,
     lang: resolveLang(env, init.language),
     ...init.autoCount !== undefined ? { autoCount: init.autoCount } : {},
-    projectDir: init.env.CLAUDE_PROJECT_DIR || cwd,
+    projectDir,
     cwd,
     pluginRoot: init.env.CLAUDE_PLUGIN_ROOT || process.cwd(),
+    configDirNames,
+    projectConfigDir: pickConfigDirSync(configDirNames, projectDir),
+    homeConfigDir: pickConfigDirSync(configDirNames, env.HOME || "~"),
     ...init.appName !== undefined ? { appName: init.appName } : {},
     readFile: async (p) => {
       try {
@@ -4146,7 +4175,14 @@ async function runCore(io, call, sessionId, options) {
 var str2 = (v) => typeof v === "string" ? v : "";
 async function runHostHook(host, event, payload, env) {
   const options = host.options(env);
-  const io = makeNodeIo({ env, payloadCwd: str2(payload.cwd), language: str2(options.language), autoCount: options.autoCount !== false, appName: host.appName });
+  const io = makeNodeIo({
+    env,
+    payloadCwd: str2(payload.cwd),
+    language: str2(options.language),
+    autoCount: options.autoCount !== false,
+    appName: host.appName,
+    configDirNames: host.configDirNames
+  });
   const sessionId = str2(payload.session_id) || "unknown";
   const { outcome, stderr } = await runCore(io, host.normalize(event, payload, io), sessionId, options);
   return host.render(event, outcome, stderr, io);
@@ -4236,9 +4272,8 @@ function parsePatch(text) {
 }
 var absolutePath = (p, base) => isAbsolute(p) ? p : join(base, p);
 function patchPayloads(payload, base) {
-  const files = parsePatch(patchText(payload.tool_input));
   const out = [];
-  for (const f of files) {
+  for (const f of parsePatch(patchText(payload.tool_input))) {
     if (f.op === "delete")
       continue;
     const filePath = absolutePath(f.movedTo ?? f.path, base);
@@ -4250,6 +4285,7 @@ function patchPayloads(payload, base) {
 
 // src/host-codex.ts
 var CODEX_EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "PermissionRequest", "Stop", "SubagentStop"];
+var CODEX_CONFIG_DIRS = [".agents", ".claude"];
 var str3 = (v) => typeof v === "string" ? v : "";
 function optionsFromEnv(env) {
   const pick = (codexKey, claudeKey) => env[`FEEDBACK_GATE_${codexKey}`] ?? env[`CLAUDE_PLUGIN_OPTION_${claudeKey}`];
@@ -4379,6 +4415,7 @@ ${tr(io.lang)("codex.askAsDeny")}`;
 var codexHost = {
   appName: "Codex",
   events: CODEX_EVENTS,
+  configDirNames: CODEX_CONFIG_DIRS,
   options: optionsFromEnv,
   normalize,
   render
