@@ -1,480 +1,3 @@
-// src/i18n.ts
-import i18next from "./vendor/i18next.js";
-import { parse } from "./vendor/yaml.js";
-
-// locales/en.yaml
-var en_default = `# Messages printed by the hooks (English). Has the same keys as ja.yaml (tests/i18n.spec.ts checks the key sets match).
-# {{name}} is i18next interpolation.
-nativeStop:
-  continued: "feedback-gate: sent Claude back to fix issues before it stops"
-  subagentBlocked: "feedback-gate: the check at the end of the subagent found issues (it cannot be sent back): {{reason}}"
-notify:
-  waiting: "Waiting for you"
-  waitingFallback: "Claude is waiting for your input"
-  done: "Done"
-  doneFallback: "The response has finished"
-
-inject:
-  header: "# Confirmed feedback rules (count >= 3)\\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\\n\\n"
-  ruleTitle: "■ {{name}} (pointed out {{count}} times so far)"
-  brokenRules: "# Unreadable feedback rules\\nThe following rule files could not be read and are disabled (where only an enforce entry is invalid, only that entry is disabled). Their enforcement does not work until they are fixed. Tell the user:"
-
-rules:
-  unreadable: "cannot read the file: {{error}}"
-  enforceNotList: "enforce is not a list ({{type}}). Write each entry as \`- event: ...\`"
-  enforceItemNotMapping: "enforce[{{index}}] is not a mapping ({{type}})"
-  badRegex: "enforce[{{index}}].{{key}} is not a usable regular expression: {{error}}"
-  evalError: "enforce[{{index}}] failed to evaluate: {{error}}"
-
-guard:
-  evaluating: "[feedback-guard] evaluating: {{rule}}"
-
-postEdit:
-  checking: "[feedback-post-edit] checking: {{rule}} ({{file}})"
-
-bashEdit:
-  header: "[feedback] Files rewritten by Bash violate feedback rules (the same checks as Edit / Write)."
-  preEditAfter: "Note: this is a pre_edit rule, but with Bash the content cannot be known before it runs, so it was detected after the command (the file is already written; fix it to follow the rule)."
-
-stopCheck:
-  checking: "[feedback-stop-check] checking: {{rule}} ({{file}})"
-  gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
-  fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
-
-subagentReport:
-  header: "[feedback-gate] Results of the hooks run when subagent {{agent}} stopped (gate checks and feedback stop_check). Use these instead of reading the gate logs or re-running the checks:"
-
-autoCount:
-  bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
-
-launch:
-  checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"
-  promptTo: "Prompt to send to {{agentType}}:"
-  messageTo: "Message to send to {{recipient}}:"
-  unknownRecipient: "unknown recipient"
-
-correct:
-  description: "Aggregate the feedback rules and the violation log, and propose count bumps and enforce additions"
-  enforceTemplate: |-
-    enforce:
-      - event: pre_bash
-        when: 'regex'
-        unless: 'regex'
-        message: 'instruction shown on violation'
-      - event: pre_edit
-        path: 'glob'
-        when: 'regex'
-        message: 'instruction shown on violation'
-      - event: post_edit
-        path: 'glob'
-        when: 'regex'
-        message: 'instruction shown on violation'
-      - event: stop_check
-        changed: 'glob'
-        check: 'shell cmd'
-        message: 'instruction shown on violation'
-  expired: "expires ({{date}}) has passed"
-  conditions: "the conditions"
-  notMatching: "{{what}} do not match this project, so the rule is inactive"
-  topDetail: ". Most frequent: {{detail}}"
-  bumpToConfirmed: "{{n}} violations in the last {{window}} ({{counts}}). Promote to a confirmed rule{{top}}"
-  bumpToDeny: "ask / block {{strong}} times in the last {{window}} ({{counts}}). Raise to deny{{top}}"
-  noEnforce: "Confirmed rule with count {{count}} but no enforce, so no hook can detect it (and it never appears in the violation log)"
-  stale: "Has enforce but has never appeared in the violation log. Check that the enforce works and that the rule is not out of date"
-  expiredAction: "{{reason}}. Consider deleting or updating it"
-  broken: "unreadable and disabled: {{reason}}. Fix the file"
-  reportHeader: "[correct] last {{window}}: {{rules}} rules / {{violations}} violations"
-  noProposals: "No proposals."
-  applyNone: "apply: no files were rewritten."
-  applyDone: "apply: count was rewritten."
-  applyHint: "\`/correct apply\` writes the count bumps of the bump proposals to the files (enforce is proposal only)."
-  context: |-
-    This is the result of /correct. Present the proposals above to the user.
-    - For an enforce addition, derive a regex / glob from the body of the rule and propose a concrete entry (template: the enforce section of rules/feedback_rules.md).
-    - Always ask the user before rewriting any file (as the rules in rules/feedback_rules.md say).
-    - For stale / expired, ask the user whether to keep, update or delete the rule.
-    - For broken, explain why the file cannot be read (YAML syntax, regex syntax and so on) and propose a fix (rewrite Python-only regex syntax into a form JavaScript accepts).
-  contextApplied: "- apply has already rewritten count in the following files. Tell the user so: {{list}}"
-
-band:
-  running: "[gate] running:"
-  waiting: "waiting"
-  done: "[gate] done: {{counts}} ({{seconds}}s)"
-
-dogwood:
-  notFound: "dogwood binary not found (check DOGWOOD_BIN / PATH / ~/.cargo/bin)"
-  runFailed: "failed to run dogwood: {{error}}"
-  exited: "dogwood replay exited abnormally (exit {{code}}): {{detail}}"
-  badJson: "could not parse the output of dogwood replay as JSON"
-  noVerdict: "dogwood replay returned no verdict"
-  badVerdict: "could not interpret the verdict of dogwood replay: {{verdict}}"
-
-gate:
-  headOmitted: "… (first {{n}} lines omitted)"
-  restOmitted: "… (rest omitted)"
-  failuresOmitted: "… ({{n}} more failures omitted; see the [gate] log path of each)"
-  policyNotFound: "=== [gate] The policy file was not found: {{policy}}. Running without policy evaluation. ==="
-  sharedResult: "[gate] The same run was in progress in another agent, so its result was taken over (log of the running side: {{logpath}})"
-  timeout: "[gate] Killed after the timeout ({{seconds}}s). The command may be in an infinite loop or hung."
-  failedOutputHeader: "--- output of the failed commands ---"
-  nestedParallel: "=== [gate] ({{label}}) parallel cannot be nested inside parallel. Treated as a failure. ==="
-  deferredNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Dropping this deferred entry. ==="
-  cannotReadYaml: "cannot read gate.yaml: {{path}}"
-  andMore: " and {{n}} more"
-  skipUnmatched: "[gate] skip: {{files}} (matches no rule)"
-  badPerFileDir: "=== [gate] Invalid per_file_dir value: {{value}} (use true / \\"file\\" / \\"pattern_root\\"). Skipping this rule. ==="
-  skipBadPerFileDir: "[skip: invalid per_file_dir]"
-  rootNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this root. ==="
-  ruleNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this rule. ==="
-  checkNoCwd: "=== [gate] (check:{{name}}) cwd does not exist: {{cwd}}. Skipping this check. ==="
-  skipNoCwd: "[skip: no cwd]"
-  noteNoCwd: "(cwd does not exist)"
-  worktreeNotFound: "=== [gate] worktree not found: {{root}}. Excluding it. ==="
-  rulesFailed: "[gate] Verification failed. Stopping (and reporting the work as done) is blocked until it is fixed. See the errors above and fix them now."
-  rulesPassed: "[gate] rules phase passed:\\n{{body}}"
-  checkNotFound: "=== [gate] \\"{{name}}\\" was not found in consistency_checks. Skipping. ==="
-  checkNotFoundSummary: "(check:{{name}}) not found, skipped"
-  skipCheckUndefined: "[gate] skip: check:{{name}} (not defined in consistency_checks)"
-  nothingToRun: "(nothing to run)"
-  allPassed: "[gate] All checks passed: {{labels}}. Report this result to the user and finish."
-  passedReport: "[gate] All checks passed: {{labels}}"
-  deferredTitle: "deferred verification commands"
-  checksPassed: "[gate] {{title}} passed:\\n{{body}}"
-  checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
-  checksGaveUp: "[gate] Gave up because consistency checks failed {{max}} times in a row. The target files were returned to CHANGED unverified. Please check them manually. To clear this now, start a new session or run /clear (reset-gate on SessionStart removes the state files)."
-  checksFailed: "[gate] Verification failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
-  ymlTypo: "[gate] .claude/gate.yaml was not found but .claude/gate.yml exists. Check whether the extension is yml instead of yaml."
-  policyUnevaluated: "=== [gate] ({{label}}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [{{reason}}] $ {{cmd}} ==="
-  policySkipped: "=== [gate] ({{label}}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ {{cmd}} ==="
-  notePolicySkipped: "(deferred by the policy verdict; queued to run automatically later)"
-  notePolicyUnevaluated: "(deferred because the policy could not be evaluated; queued to run automatically later: {{reason}})"
-  internalError: "[gate] An internal error occurred, so the checks were skipped (work continues). See stderr for details."
-`;
-
-// locales/ja.yaml
-var ja_default = `# hook が出すメッセージ（日本語）。en.yaml と同じキーを持つ（tests/i18n.spec.ts がキーの一致を検査する）。
-# {{name}} は i18next の補間。
-nativeStop:
-  continued: "feedback-gate: 止める前に直す点があったため、Claude に作業を続けさせます"
-  subagentBlocked: "feedback-gate: サブエージェントの終了時の検証で指摘がありました（続けさせることはできません）: {{reason}}"
-notify:
-  waiting: "確認待ち"
-  waitingFallback: "確認を待っています"
-  done: "完了"
-  doneFallback: "応答が完了しました"
-
-inject:
-  header: "# 確定フィードバックルール（count >= 3）\\nこれらは繰り返し指摘された確定ルール。違反すると hook がブロックする。\\n\\n"
-  ruleTitle: "■ {{name}} (これまで {{count}} 回指摘されています)"
-  brokenRules: "# 読めない feedback ルール\\n次のルールファイルが読めず無効になっています（enforce の要素だけが不正なものは、その要素だけが無効）。直すまで、その強制は効きません。ユーザーに伝えてください:"
-
-rules:
-  unreadable: "ファイルを読めません: {{error}}"
-  enforceNotList: "enforce がリストではありません（{{type}}）。各要素を \`- event: ...\` の形で書いてください"
-  enforceItemNotMapping: "enforce[{{index}}] が辞書ではありません（{{type}}）"
-  badRegex: "enforce[{{index}}].{{key}} の正規表現が使えません: {{error}}"
-  evalError: "enforce[{{index}}] の評価に失敗しました: {{error}}"
-
-guard:
-  evaluating: "[feedback-guard] 評価中: {{rule}}"
-
-postEdit:
-  checking: "[feedback-post-edit] 検査中: {{rule}} ({{file}})"
-
-bashEdit:
-  header: "[feedback] Bash が書き換えたファイルが feedback ルールに違反しています（Edit / Write と同じ検査）。"
-  preEditAfter: "※ pre_edit のルールですが、Bash では書かれる内容が事前に分からないため、実行後に検知しました（書き込みは済んでいます。ルールに沿って直してください）。"
-
-stopCheck:
-  checking: "[feedback-stop-check] 検査中: {{rule}} ({{file}})"
-  gaveUp: "[feedback-stop-check] {{max}} 回連続でブロックしました。ループを打ち切ります。手動確認を。"
-  fixAbove: "[feedback-stop-check] 上記を修正してください（試行 {{attempt}}/{{max}}）。"
-
-subagentReport:
-  header: "[feedback-gate] サブエージェント {{agent}} の停止時に実行された hook（gate の検証と feedback の stop_check）の結果です。gate のログを読んだり検証を再実行したりせず、これを使ってください:"
-
-autoCount:
-  bumped: "[feedback-gate] 違反を検出したため {{rule}} の count を {{from}} → {{to}} に上げました（{{path}}）。同じ違反を繰り返すと強制力（warn → ask/block → deny）が上がります。"
-
-launch:
-  checklist: "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件"
-  promptTo: "{{agentType}} に送るプロンプト:"
-  messageTo: "{{recipient}} に送るメッセージ:"
-  unknownRecipient: "宛先不明"
-
-correct:
-  description: "feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する"
-  enforceTemplate: |-
-    enforce:
-      - event: pre_bash
-        when: '正規表現'
-        unless: '正規表現'
-        message: '違反時に出す指示文'
-      - event: pre_edit
-        path: 'glob'
-        when: '正規表現'
-        message: '違反時に出す指示文'
-      - event: post_edit
-        path: 'glob'
-        when: '正規表現'
-        message: '違反時に出す指示文'
-      - event: stop_check
-        changed: 'glob'
-        check: 'shell cmd'
-        message: '違反時に出す指示文'
-  expired: "expires（{{date}}）を過ぎている"
-  conditions: "条件"
-  notMatching: "{{what}} がこのプロジェクトに一致せず無効"
-  topDetail: "。最多: {{detail}}"
-  bumpToConfirmed: "直近 {{window}} で {{n}} 回違反（{{counts}}）。確定ルールへ昇格{{top}}"
-  bumpToDeny: "直近 {{window}} で ask / block が {{strong}} 回（{{counts}}）。deny へ引き上げ{{top}}"
-  noEnforce: "count {{count}} の確定ルールだが enforce が無く、hook が検知できない（違反ログにも出ない）"
-  stale: "enforce ありで違反ログに一度も出ていない。enforce が効いているか、ルールが古くなっていないか確認"
-  expiredAction: "{{reason}}。削除または更新を検討"
-  broken: "読めず無効になっている: {{reason}}。ファイルを直す"
-  reportHeader: "[correct] 直近 {{window}}: ルール {{rules}} 件 / 違反 {{violations}} 件"
-  noProposals: "提案はありません。"
-  applyNone: "apply: 書き換えたファイルはありません。"
-  applyDone: "apply: count を書き換えました。"
-  applyHint: "\`/correct apply\` で bump の count 引き上げをファイルに書き込みます（enforce は提案のみ）。"
-  context: |-
-    /correct の結果です。ユーザーに上記の提案を提示してください。
-    - enforce の追加は、対象ルールの本文から正規表現 / glob を起こして具体案を提案する（雛形は rules/feedback_rules.md の enforce 節）。
-    - ファイルを書き換える前に、必ずユーザーに確認する（rules/feedback_rules.md のルールどおり）。
-    - stale / expired は、ルールを残すか更新・削除するかをユーザーに尋ねる。
-    - broken は、読めない理由（YAML の書き方・正規表現の書き方など）を説明し、直し方を提案する（Python 専用の正規表現の書き方は JavaScript で使える形に書き換える）。
-  contextApplied: "- apply により次のファイルの count をすでに書き換えた。その事実をユーザーに伝えること: {{list}}"
-
-band:
-  running: "[gate] 実行中:"
-  waiting: "待機中"
-  done: "[gate] 完了: {{counts}} ({{seconds}}s)"
-
-dogwood:
-  notFound: "dogwood バイナリが見つかりません（DOGWOOD_BIN / PATH / ~/.cargo/bin を確認してください）"
-  runFailed: "dogwood の実行に失敗しました: {{error}}"
-  exited: "dogwood replay が異常終了しました（exit {{code}}）: {{detail}}"
-  badJson: "dogwood replay の出力を JSON として読めませんでした"
-  noVerdict: "dogwood replay が verdict を返しませんでした"
-  badVerdict: "dogwood replay の verdict を解釈できませんでした: {{verdict}}"
-
-gate:
-  headOmitted: "…（先頭 {{n}} 行省略）"
-  restOmitted: "…（以降省略）"
-  failuresOmitted: "…（残り {{n}} 件の失敗は省略。各 [gate] log のパスを見てください）"
-  policyNotFound: "=== [gate] policy に指定されたファイルが見つかりません: {{policy}}。ポリシー判定を行わず実行します。 ==="
-  sharedResult: "[gate] 同じ実行が他のエージェントで走っていたため、その結果を受け取りました（実行側のログ: {{logpath}}）"
-  timeout: "[gate] タイムアウト（{{seconds}}秒）で強制終了しました。無限ループやハングの可能性があります。"
-  failedOutputHeader: "--- 失敗したコマンドの出力 ---"
-  nestedParallel: "=== [gate] ({{label}}) parallel の中に parallel はネストできません。失敗扱いにします。 ==="
-  deferredNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。この控えを破棄します。 ==="
-  cannotReadYaml: "gate.yaml を読めません: {{path}}"
-  andMore: " ほか{{n}}件"
-  skipUnmatched: "[gate] skip: {{files}} (どのルールにもマッチしません)"
-  badPerFileDir: "=== [gate] per_file_dir の値が不正です: {{value}}（true / \\"file\\" / \\"pattern_root\\" のいずれかを指定してください）。このルールをスキップします。 ==="
-  skipBadPerFileDir: "[skip: per_file_dir不正]"
-  rootNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルートをスキップします。 ==="
-  ruleNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルールをスキップします。 ==="
-  checkNoCwd: "=== [gate] (check:{{name}}) cwd が存在しません: {{cwd}}。このチェックをスキップします。 ==="
-  skipNoCwd: "[skip: cwd無し]"
-  noteNoCwd: "(cwd が存在しません)"
-  worktreeNotFound: "=== [gate] worktree が見つかりません: {{root}}。対象から外します。 ==="
-  rulesFailed: "[gate] 検証に失敗しました。直すまで終了（Stop）はブロックされ、完了報告もできません。上のエラーを見て、今ここで修正してください。"
-  rulesPassed: "[gate] rules フェーズ成功:\\n{{body}}"
-  checkNotFound: "=== [gate] consistency_checks に \\"{{name}}\\" が見つかりません。スキップします。 ==="
-  checkNotFoundSummary: "(check:{{name}}) 見つかりません、スキップ"
-  skipCheckUndefined: "[gate] skip: check:{{name}} (consistency_checks に定義がありません)"
-  nothingToRun: "（対象なし）"
-  allPassed: "[gate] 検証がすべて通りました: {{labels}}。この結果をユーザーに報告して終了してください。"
-  passedReport: "[gate] 検証がすべて通りました: {{labels}}"
-  deferredTitle: "後回しにした検証コマンド"
-  checksPassed: "[gate] {{title}} 成功:\\n{{body}}"
-  checksGaveUpStderr: "consistency checks が {{max}} 回連続失敗。ループを打ち切ります。手動確認を。"
-  checksGaveUp: "[gate] consistency checks が{{max}}回連続で失敗したため打ち切りました。対象ファイルは未検証のまま CHANGED へ戻しました。手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか /clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。"
-  checksFailed: "[gate] 検証に失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て修正を継続してください。"
-  ymlTypo: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
-  policyUnevaluated: "=== [gate] ({{label}}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［{{reason}}］ $ {{cmd}} ==="
-  policySkipped: "=== [gate] ({{label}}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ {{cmd}} ==="
-  notePolicySkipped: "(ポリシー判定で見送り。控えに積んだので後で自動実行)"
-  notePolicyUnevaluated: "(ポリシーを評価できず見送り。控えに積んだので後で自動実行: {{reason}})"
-  internalError: "[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。"
-`;
-
-// src/i18n.ts
-var LANGS = ["ja", "en"];
-var resources = {
-  ja: parse(ja_default),
-  en: parse(en_default)
-};
-var i18n = i18next.createInstance();
-i18n.init({
-  resources: { ja: { translation: resources.ja }, en: { translation: resources.en } },
-  lng: "en",
-  fallbackLng: "en",
-  supportedLngs: LANGS,
-  initAsync: false,
-  interpolation: { escapeValue: false },
-  returnNull: false
-});
-var tr = (lang) => i18n.getFixedT(lang);
-var isLang = (v) => v === "ja" || v === "en";
-function langOfLocale(locale) {
-  const v = (locale ?? "").trim();
-  if (v === "")
-    return;
-  return /^ja(?![a-z])/i.test(v) ? "ja" : "en";
-}
-function resolveLang(env, configured) {
-  if (isLang(configured))
-    return configured;
-  if (isLang(env.FEEDBACK_GATE_LANG))
-    return env.FEEDBACK_GATE_LANG;
-  for (const v of [env.FEEDBACK_GATE_LANG, env.LC_ALL, env.LC_MESSAGES, env.LANG]) {
-    const lang = langOfLocale(v);
-    if (lang)
-      return lang;
-  }
-  return "en";
-}
-
-// src/io.ts
-var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
-
-// src/pyutil.ts
-function truthy(v) {
-  if (Array.isArray(v))
-    return v.length > 0;
-  if (v !== null && typeof v === "object")
-    return Object.keys(v).length > 0;
-  return Boolean(v);
-}
-function pyRepr(v) {
-  if (v === null || v === undefined)
-    return "None";
-  if (v === true)
-    return "True";
-  if (v === false)
-    return "False";
-  if (typeof v === "number")
-    return String(v);
-  if (typeof v === "string") {
-    const quote = v.includes("'") && !v.includes('"') ? '"' : "'";
-    const body = v.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
-    return quote + (quote === "'" ? body.replace(/'/g, "\\'") : body) + quote;
-  }
-  if (Array.isArray(v))
-    return `[${v.map(pyRepr).join(", ")}]`;
-  if (typeof v === "object") {
-    return `{${Object.entries(v).map(([k, x]) => `${pyRepr(k)}: ${pyRepr(x)}`).join(", ")}}`;
-  }
-  return String(v);
-}
-function toCount(v) {
-  if (!truthy(v))
-    return 0;
-  if (typeof v === "number")
-    return Math.trunc(v);
-  if (v === true)
-    return 1;
-  if (typeof v === "string" && /^\s*[+-]?\d+\s*$/.test(v))
-    return Number.parseInt(v, 10);
-  return 0;
-}
-function pyRegExp(source, flags = "") {
-  let src = source;
-  let fl = flags;
-  const m = /^\(\?([aiLmsux]+)\)/.exec(src);
-  if (m) {
-    src = src.slice(m[0].length);
-    const pyFlags = m[1] ?? "";
-    if (pyFlags.includes("x"))
-      throw new Error(`unsupported Python inline flag (?x): ${source}`);
-    for (const c of pyFlags)
-      if ("ims".includes(c) && !fl.includes(c))
-        fl += c;
-  }
-  src = replaceAnchors(src).replace(/\(\?P<([A-Za-z_]\w*)>/g, "(?<$1>").replace(/\(\?P=([A-Za-z_]\w*)\)/g, "\\k<$1>");
-  return new RegExp(src, fl);
-}
-function replaceAnchors(src) {
-  let out = "";
-  let inClass = false;
-  for (let i = 0;i < src.length; i++) {
-    const c = src.charAt(i);
-    if (c === "\\") {
-      const next = src.charAt(i + 1);
-      if (!inClass && next === "A")
-        out += "(?<![\\s\\S])";
-      else if (!inClass && (next === "Z" || next === "z"))
-        out += "(?![\\s\\S])";
-      else
-        out += c + next;
-      i++;
-      continue;
-    }
-    if (c === "[" && !inClass) {
-      inClass = true;
-      out += c;
-      if (src.charAt(i + 1) === "^")
-        out += src.charAt(++i);
-      if (src.charAt(i + 1) === "]") {
-        i++;
-        out += "\\]";
-      }
-      continue;
-    }
-    if (c === "]" && inClass)
-      inClass = false;
-    out += c;
-  }
-  return out;
-}
-function jqStr(v) {
-  if (v === null || v === undefined || v === false)
-    return "";
-  return typeof v === "string" ? v : JSON.stringify(v);
-}
-var isDict = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
-
-// src/agent-launch-guard.ts
-var ASK_AGENT_TYPES = ["code-implementer"];
-var ALLOW_RECIPIENTS = ["git-operator"];
-var ask = (reason) => ok(`${JSON.stringify({
-  hookSpecificOutput: {
-    hookEventName: "PreToolUse",
-    permissionDecision: "ask",
-    permissionDecisionReason: reason
-  }
-})}
-`);
-function agentLaunchGuard(payload, lang) {
-  const t = tr(lang);
-  const tool = jqStr(payload.tool_name);
-  const input = isDict(payload.tool_input) ? payload.tool_input : {};
-  if (tool === "Agent") {
-    const agentType = jqStr(input.subagent_type);
-    if (agentType === "")
-      return ok();
-    if (ASK_AGENT_TYPES.includes(agentType)) {
-      return ask(`${t("launch.promptTo", { agentType })}
-
-${jqStr(input.prompt)}
-
-${t("launch.checklist")}`);
-    }
-  } else if (tool === "SendMessage") {
-    const recipient = jqStr(input.to);
-    if (!ALLOW_RECIPIENTS.includes(recipient)) {
-      return ask(`${t("launch.messageTo", { recipient: recipient || t("launch.unknownRecipient") })}
-
-${jqStr(input.message)}
-
-${t("launch.checklist")}`);
-    }
-  }
-  return ok();
-}
-
 // src/path.ts
 var isAbsolute = (p) => p.startsWith("/");
 function join(...parts) {
@@ -696,6 +219,339 @@ async function walk(io, dir, segs, i) {
   return false;
 }
 
+// src/i18n.ts
+import i18next from "./vendor/i18next.js";
+import { parse } from "./vendor/yaml.js";
+
+// locales/en.yaml
+var en_default = `# Messages printed by the hooks (English). Has the same keys as ja.yaml (tests/i18n.spec.ts checks the key sets match).
+# {{name}} is i18next interpolation.
+notify:
+  waiting: "Waiting for you"
+  waitingFallback: "Claude is waiting for your input"
+  done: "Done"
+  doneFallback: "The response has finished"
+
+inject:
+  header: "# Confirmed feedback rules (count >= 3)\\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\\n\\n"
+  ruleTitle: "■ {{name}} (pointed out {{count}} times so far)"
+  brokenRules: "# Unreadable feedback rules\\nThe following rule files could not be read and are disabled (where only an enforce entry is invalid, only that entry is disabled). Their enforcement does not work until they are fixed. Tell the user:"
+
+rules:
+  unreadable: "cannot read the file: {{error}}"
+  enforceNotList: "enforce is not a list ({{type}}). Write each entry as \`- event: ...\`"
+  enforceItemNotMapping: "enforce[{{index}}] is not a mapping ({{type}})"
+  badRegex: "enforce[{{index}}].{{key}} is not a usable regular expression: {{error}}"
+  evalError: "enforce[{{index}}] failed to evaluate: {{error}}"
+
+guard:
+  evaluating: "[feedback-guard] evaluating: {{rule}}"
+
+postEdit:
+  checking: "[feedback-post-edit] checking: {{rule}} ({{file}})"
+
+bashEdit:
+  header: "[feedback] Files rewritten by Bash violate feedback rules (the same checks as Edit / Write)."
+  preEditAfter: "Note: this is a pre_edit rule, but with Bash the content cannot be known before it runs, so it was detected after the command (the file is already written; fix it to follow the rule)."
+
+stopCheck:
+  checking: "[feedback-stop-check] checking: {{rule}} ({{file}})"
+  gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
+  fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
+
+subagentReport:
+  header: "[feedback-gate] Results of the hooks run when subagent {{agent}} stopped (gate checks and feedback stop_check). Use these instead of reading the gate logs or re-running the checks:"
+
+autoCount:
+  bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
+
+launch:
+  checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"
+  promptTo: "Prompt to send to {{agentType}}:"
+  messageTo: "Message to send to {{recipient}}:"
+  unknownRecipient: "unknown recipient"
+
+correct:
+  description: "Aggregate the feedback rules and the violation log, and propose count bumps and enforce additions"
+  enforceTemplate: |-
+    enforce:
+      - event: pre_bash
+        when: 'regex'
+        unless: 'regex'
+        message: 'instruction shown on violation'
+      - event: pre_edit
+        path: 'glob'
+        when: 'regex'
+        message: 'instruction shown on violation'
+      - event: post_edit
+        path: 'glob'
+        when: 'regex'
+        message: 'instruction shown on violation'
+      - event: stop_check
+        changed: 'glob'
+        check: 'shell cmd'
+        message: 'instruction shown on violation'
+  expired: "expires ({{date}}) has passed"
+  conditions: "the conditions"
+  notMatching: "{{what}} do not match this project, so the rule is inactive"
+  topDetail: ". Most frequent: {{detail}}"
+  bumpToConfirmed: "{{n}} violations in the last {{window}} ({{counts}}). Promote to a confirmed rule{{top}}"
+  bumpToDeny: "ask / block {{strong}} times in the last {{window}} ({{counts}}). Raise to deny{{top}}"
+  noEnforce: "Confirmed rule with count {{count}} but no enforce, so no hook can detect it (and it never appears in the violation log)"
+  stale: "Has enforce but has never appeared in the violation log. Check that the enforce works and that the rule is not out of date"
+  expiredAction: "{{reason}}. Consider deleting or updating it"
+  broken: "unreadable and disabled: {{reason}}. Fix the file"
+  reportHeader: "[correct] last {{window}}: {{rules}} rules / {{violations}} violations"
+  noProposals: "No proposals."
+  applyNone: "apply: no files were rewritten."
+  applyDone: "apply: count was rewritten."
+  applyHint: "\`/correct apply\` writes the count bumps of the bump proposals to the files (enforce is proposal only)."
+  context: |-
+    This is the result of /correct. Present the proposals above to the user.
+    - For an enforce addition, derive a regex / glob from the body of the rule and propose a concrete entry (template: the enforce section of rules/feedback_rules.md).
+    - Always ask the user before rewriting any file (as the rules in rules/feedback_rules.md say).
+    - For stale / expired, ask the user whether to keep, update or delete the rule.
+    - For broken, explain why the file cannot be read (YAML syntax, regex syntax and so on) and propose a fix (rewrite Python-only regex syntax into a form JavaScript accepts).
+  contextApplied: "- apply has already rewritten count in the following files. Tell the user so: {{list}}"
+
+band:
+  running: "[gate] running:"
+  waiting: "waiting"
+  done: "[gate] done: {{counts}} ({{seconds}}s)"
+
+dogwood:
+  notFound: "dogwood binary not found (check DOGWOOD_BIN / PATH / ~/.cargo/bin)"
+  runFailed: "failed to run dogwood: {{error}}"
+  exited: "dogwood replay exited abnormally (exit {{code}}): {{detail}}"
+  badJson: "could not parse the output of dogwood replay as JSON"
+  noVerdict: "dogwood replay returned no verdict"
+  badVerdict: "could not interpret the verdict of dogwood replay: {{verdict}}"
+
+gate:
+  headOmitted: "… (first {{n}} lines omitted)"
+  restOmitted: "… (rest omitted)"
+  failuresOmitted: "… ({{n}} more failures omitted; see the [gate] log path of each)"
+  policyNotFound: "=== [gate] The policy file was not found: {{policy}}. Running without policy evaluation. ==="
+  sharedResult: "[gate] The same run was in progress in another agent, so its result was taken over (log of the running side: {{logpath}})"
+  timeout: "[gate] Killed after the timeout ({{seconds}}s). The command may be in an infinite loop or hung."
+  failedOutputHeader: "--- output of the failed commands ---"
+  nestedParallel: "=== [gate] ({{label}}) parallel cannot be nested inside parallel. Treated as a failure. ==="
+  deferredNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Dropping this deferred entry. ==="
+  cannotReadYaml: "cannot read gate.yaml: {{path}}"
+  andMore: " and {{n}} more"
+  skipUnmatched: "[gate] skip: {{files}} (matches no rule)"
+  badPerFileDir: "=== [gate] Invalid per_file_dir value: {{value}} (use true / \\"file\\" / \\"pattern_root\\"). Skipping this rule. ==="
+  skipBadPerFileDir: "[skip: invalid per_file_dir]"
+  rootNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this root. ==="
+  ruleNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this rule. ==="
+  checkNoCwd: "=== [gate] (check:{{name}}) cwd does not exist: {{cwd}}. Skipping this check. ==="
+  skipNoCwd: "[skip: no cwd]"
+  noteNoCwd: "(cwd does not exist)"
+  worktreeNotFound: "=== [gate] worktree not found: {{root}}. Excluding it. ==="
+  rulesFailed: "[gate] Verification failed. Stopping (and reporting the work as done) is blocked until it is fixed. See the errors above and fix them now."
+  rulesPassed: "[gate] rules phase passed:\\n{{body}}"
+  checkNotFound: "=== [gate] \\"{{name}}\\" was not found in consistency_checks. Skipping. ==="
+  checkNotFoundSummary: "(check:{{name}}) not found, skipped"
+  skipCheckUndefined: "[gate] skip: check:{{name}} (not defined in consistency_checks)"
+  nothingToRun: "(nothing to run)"
+  allPassed: "[gate] All checks passed: {{labels}}. Report this result to the user and finish."
+  passedReport: "[gate] All checks passed: {{labels}}"
+  deferredTitle: "deferred verification commands"
+  checksPassed: "[gate] {{title}} passed:\\n{{body}}"
+  checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
+  checksGaveUp: "[gate] Gave up because consistency checks failed {{max}} times in a row. The target files were returned to CHANGED unverified. Please check them manually. To clear this now, start a new session or run /clear (reset-gate on SessionStart removes the state files)."
+  checksFailed: "[gate] Verification failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
+  ymlTypo: "[gate] .claude/gate.yaml was not found but .claude/gate.yml exists. Check whether the extension is yml instead of yaml."
+  policyUnevaluated: "=== [gate] ({{label}}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [{{reason}}] $ {{cmd}} ==="
+  policySkipped: "=== [gate] ({{label}}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ {{cmd}} ==="
+  notePolicySkipped: "(deferred by the policy verdict; queued to run automatically later)"
+  notePolicyUnevaluated: "(deferred because the policy could not be evaluated; queued to run automatically later: {{reason}})"
+  internalError: "[gate] An internal error occurred, so the checks were skipped (work continues). See stderr for details."
+`;
+
+// locales/ja.yaml
+var ja_default = `# hook が出すメッセージ（日本語）。en.yaml と同じキーを持つ（tests/i18n.spec.ts がキーの一致を検査する）。
+# {{name}} は i18next の補間。
+notify:
+  waiting: "確認待ち"
+  waitingFallback: "確認を待っています"
+  done: "完了"
+  doneFallback: "応答が完了しました"
+
+inject:
+  header: "# 確定フィードバックルール（count >= 3）\\nこれらは繰り返し指摘された確定ルール。違反すると hook がブロックする。\\n\\n"
+  ruleTitle: "■ {{name}} (これまで {{count}} 回指摘されています)"
+  brokenRules: "# 読めない feedback ルール\\n次のルールファイルが読めず無効になっています（enforce の要素だけが不正なものは、その要素だけが無効）。直すまで、その強制は効きません。ユーザーに伝えてください:"
+
+rules:
+  unreadable: "ファイルを読めません: {{error}}"
+  enforceNotList: "enforce がリストではありません（{{type}}）。各要素を \`- event: ...\` の形で書いてください"
+  enforceItemNotMapping: "enforce[{{index}}] が辞書ではありません（{{type}}）"
+  badRegex: "enforce[{{index}}].{{key}} の正規表現が使えません: {{error}}"
+  evalError: "enforce[{{index}}] の評価に失敗しました: {{error}}"
+
+guard:
+  evaluating: "[feedback-guard] 評価中: {{rule}}"
+
+postEdit:
+  checking: "[feedback-post-edit] 検査中: {{rule}} ({{file}})"
+
+bashEdit:
+  header: "[feedback] Bash が書き換えたファイルが feedback ルールに違反しています（Edit / Write と同じ検査）。"
+  preEditAfter: "※ pre_edit のルールですが、Bash では書かれる内容が事前に分からないため、実行後に検知しました（書き込みは済んでいます。ルールに沿って直してください）。"
+
+stopCheck:
+  checking: "[feedback-stop-check] 検査中: {{rule}} ({{file}})"
+  gaveUp: "[feedback-stop-check] {{max}} 回連続でブロックしました。ループを打ち切ります。手動確認を。"
+  fixAbove: "[feedback-stop-check] 上記を修正してください（試行 {{attempt}}/{{max}}）。"
+
+subagentReport:
+  header: "[feedback-gate] サブエージェント {{agent}} の停止時に実行された hook（gate の検証と feedback の stop_check）の結果です。gate のログを読んだり検証を再実行したりせず、これを使ってください:"
+
+autoCount:
+  bumped: "[feedback-gate] 違反を検出したため {{rule}} の count を {{from}} → {{to}} に上げました（{{path}}）。同じ違反を繰り返すと強制力（warn → ask/block → deny）が上がります。"
+
+launch:
+  checklist: "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件"
+  promptTo: "{{agentType}} に送るプロンプト:"
+  messageTo: "{{recipient}} に送るメッセージ:"
+  unknownRecipient: "宛先不明"
+
+correct:
+  description: "feedback ルールと違反ログを集計し、count の引き上げや enforce の追加を提案する"
+  enforceTemplate: |-
+    enforce:
+      - event: pre_bash
+        when: '正規表現'
+        unless: '正規表現'
+        message: '違反時に出す指示文'
+      - event: pre_edit
+        path: 'glob'
+        when: '正規表現'
+        message: '違反時に出す指示文'
+      - event: post_edit
+        path: 'glob'
+        when: '正規表現'
+        message: '違反時に出す指示文'
+      - event: stop_check
+        changed: 'glob'
+        check: 'shell cmd'
+        message: '違反時に出す指示文'
+  expired: "expires（{{date}}）を過ぎている"
+  conditions: "条件"
+  notMatching: "{{what}} がこのプロジェクトに一致せず無効"
+  topDetail: "。最多: {{detail}}"
+  bumpToConfirmed: "直近 {{window}} で {{n}} 回違反（{{counts}}）。確定ルールへ昇格{{top}}"
+  bumpToDeny: "直近 {{window}} で ask / block が {{strong}} 回（{{counts}}）。deny へ引き上げ{{top}}"
+  noEnforce: "count {{count}} の確定ルールだが enforce が無く、hook が検知できない（違反ログにも出ない）"
+  stale: "enforce ありで違反ログに一度も出ていない。enforce が効いているか、ルールが古くなっていないか確認"
+  expiredAction: "{{reason}}。削除または更新を検討"
+  broken: "読めず無効になっている: {{reason}}。ファイルを直す"
+  reportHeader: "[correct] 直近 {{window}}: ルール {{rules}} 件 / 違反 {{violations}} 件"
+  noProposals: "提案はありません。"
+  applyNone: "apply: 書き換えたファイルはありません。"
+  applyDone: "apply: count を書き換えました。"
+  applyHint: "\`/correct apply\` で bump の count 引き上げをファイルに書き込みます（enforce は提案のみ）。"
+  context: |-
+    /correct の結果です。ユーザーに上記の提案を提示してください。
+    - enforce の追加は、対象ルールの本文から正規表現 / glob を起こして具体案を提案する（雛形は rules/feedback_rules.md の enforce 節）。
+    - ファイルを書き換える前に、必ずユーザーに確認する（rules/feedback_rules.md のルールどおり）。
+    - stale / expired は、ルールを残すか更新・削除するかをユーザーに尋ねる。
+    - broken は、読めない理由（YAML の書き方・正規表現の書き方など）を説明し、直し方を提案する（Python 専用の正規表現の書き方は JavaScript で使える形に書き換える）。
+  contextApplied: "- apply により次のファイルの count をすでに書き換えた。その事実をユーザーに伝えること: {{list}}"
+
+band:
+  running: "[gate] 実行中:"
+  waiting: "待機中"
+  done: "[gate] 完了: {{counts}} ({{seconds}}s)"
+
+dogwood:
+  notFound: "dogwood バイナリが見つかりません（DOGWOOD_BIN / PATH / ~/.cargo/bin を確認してください）"
+  runFailed: "dogwood の実行に失敗しました: {{error}}"
+  exited: "dogwood replay が異常終了しました（exit {{code}}）: {{detail}}"
+  badJson: "dogwood replay の出力を JSON として読めませんでした"
+  noVerdict: "dogwood replay が verdict を返しませんでした"
+  badVerdict: "dogwood replay の verdict を解釈できませんでした: {{verdict}}"
+
+gate:
+  headOmitted: "…（先頭 {{n}} 行省略）"
+  restOmitted: "…（以降省略）"
+  failuresOmitted: "…（残り {{n}} 件の失敗は省略。各 [gate] log のパスを見てください）"
+  policyNotFound: "=== [gate] policy に指定されたファイルが見つかりません: {{policy}}。ポリシー判定を行わず実行します。 ==="
+  sharedResult: "[gate] 同じ実行が他のエージェントで走っていたため、その結果を受け取りました（実行側のログ: {{logpath}}）"
+  timeout: "[gate] タイムアウト（{{seconds}}秒）で強制終了しました。無限ループやハングの可能性があります。"
+  failedOutputHeader: "--- 失敗したコマンドの出力 ---"
+  nestedParallel: "=== [gate] ({{label}}) parallel の中に parallel はネストできません。失敗扱いにします。 ==="
+  deferredNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。この控えを破棄します。 ==="
+  cannotReadYaml: "gate.yaml を読めません: {{path}}"
+  andMore: " ほか{{n}}件"
+  skipUnmatched: "[gate] skip: {{files}} (どのルールにもマッチしません)"
+  badPerFileDir: "=== [gate] per_file_dir の値が不正です: {{value}}（true / \\"file\\" / \\"pattern_root\\" のいずれかを指定してください）。このルールをスキップします。 ==="
+  skipBadPerFileDir: "[skip: per_file_dir不正]"
+  rootNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルートをスキップします。 ==="
+  ruleNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。このルールをスキップします。 ==="
+  checkNoCwd: "=== [gate] (check:{{name}}) cwd が存在しません: {{cwd}}。このチェックをスキップします。 ==="
+  skipNoCwd: "[skip: cwd無し]"
+  noteNoCwd: "(cwd が存在しません)"
+  worktreeNotFound: "=== [gate] worktree が見つかりません: {{root}}。対象から外します。 ==="
+  rulesFailed: "[gate] 検証に失敗しました。直すまで終了（Stop）はブロックされ、完了報告もできません。上のエラーを見て、今ここで修正してください。"
+  rulesPassed: "[gate] rules フェーズ成功:\\n{{body}}"
+  checkNotFound: "=== [gate] consistency_checks に \\"{{name}}\\" が見つかりません。スキップします。 ==="
+  checkNotFoundSummary: "(check:{{name}}) 見つかりません、スキップ"
+  skipCheckUndefined: "[gate] skip: check:{{name}} (consistency_checks に定義がありません)"
+  nothingToRun: "（対象なし）"
+  allPassed: "[gate] 検証がすべて通りました: {{labels}}。この結果をユーザーに報告して終了してください。"
+  passedReport: "[gate] 検証がすべて通りました: {{labels}}"
+  deferredTitle: "後回しにした検証コマンド"
+  checksPassed: "[gate] {{title}} 成功:\\n{{body}}"
+  checksGaveUpStderr: "consistency checks が {{max}} 回連続失敗。ループを打ち切ります。手動確認を。"
+  checksGaveUp: "[gate] consistency checks が{{max}}回連続で失敗したため打ち切りました。対象ファイルは未検証のまま CHANGED へ戻しました。手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか /clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。"
+  checksFailed: "[gate] 検証に失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て修正を継続してください。"
+  ymlTypo: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
+  policyUnevaluated: "=== [gate] ({{label}}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［{{reason}}］ $ {{cmd}} ==="
+  policySkipped: "=== [gate] ({{label}}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ {{cmd}} ==="
+  notePolicySkipped: "(ポリシー判定で見送り。控えに積んだので後で自動実行)"
+  notePolicyUnevaluated: "(ポリシーを評価できず見送り。控えに積んだので後で自動実行: {{reason}})"
+  internalError: "[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。"
+`;
+
+// src/i18n.ts
+var LANGS = ["ja", "en"];
+var resources = {
+  ja: parse(ja_default),
+  en: parse(en_default)
+};
+var i18n = i18next.createInstance();
+i18n.init({
+  resources: { ja: { translation: resources.ja }, en: { translation: resources.en } },
+  lng: "en",
+  fallbackLng: "en",
+  supportedLngs: LANGS,
+  initAsync: false,
+  interpolation: { escapeValue: false },
+  returnNull: false
+});
+var tr = (lang) => i18n.getFixedT(lang);
+var isLang = (v) => v === "ja" || v === "en";
+function langOfLocale(locale) {
+  const v = (locale ?? "").trim();
+  if (v === "")
+    return;
+  return /^ja(?![a-z])/i.test(v) ? "ja" : "en";
+}
+function resolveLang(env, configured) {
+  if (isLang(configured))
+    return configured;
+  if (isLang(env.FEEDBACK_GATE_LANG))
+    return env.FEEDBACK_GATE_LANG;
+  for (const v of [env.FEEDBACK_GATE_LANG, env.LC_ALL, env.LC_MESSAGES, env.LANG]) {
+    const lang = langOfLocale(v);
+    if (lang)
+      return lang;
+  }
+  return "en";
+}
+
 // src/load-yaml.ts
 import { parse as parse2 } from "./vendor/yaml.js";
 var PY_TRUE = /^(?:yes|Yes|YES|true|True|TRUE|on|On|ON)$/;
@@ -711,6 +567,102 @@ var parseYaml = (text) => parse2(text, {
   logLevel: "error",
   customTags: (tags) => tags.map((t) => typeof t === "object" && ("tag" in t) && t.tag === "tag:yaml.org,2002:bool" ? pyBool(t) : t)
 });
+
+// src/pyutil.ts
+function truthy(v) {
+  if (Array.isArray(v))
+    return v.length > 0;
+  if (v !== null && typeof v === "object")
+    return Object.keys(v).length > 0;
+  return Boolean(v);
+}
+function pyRepr(v) {
+  if (v === null || v === undefined)
+    return "None";
+  if (v === true)
+    return "True";
+  if (v === false)
+    return "False";
+  if (typeof v === "number")
+    return String(v);
+  if (typeof v === "string") {
+    const quote = v.includes("'") && !v.includes('"') ? '"' : "'";
+    const body = v.replace(/\\/g, "\\\\").replace(/\n/g, "\\n").replace(/\r/g, "\\r").replace(/\t/g, "\\t");
+    return quote + (quote === "'" ? body.replace(/'/g, "\\'") : body) + quote;
+  }
+  if (Array.isArray(v))
+    return `[${v.map(pyRepr).join(", ")}]`;
+  if (typeof v === "object") {
+    return `{${Object.entries(v).map(([k, x]) => `${pyRepr(k)}: ${pyRepr(x)}`).join(", ")}}`;
+  }
+  return String(v);
+}
+function toCount(v) {
+  if (!truthy(v))
+    return 0;
+  if (typeof v === "number")
+    return Math.trunc(v);
+  if (v === true)
+    return 1;
+  if (typeof v === "string" && /^\s*[+-]?\d+\s*$/.test(v))
+    return Number.parseInt(v, 10);
+  return 0;
+}
+function pyRegExp(source, flags = "") {
+  let src = source;
+  let fl = flags;
+  const m = /^\(\?([aiLmsux]+)\)/.exec(src);
+  if (m) {
+    src = src.slice(m[0].length);
+    const pyFlags = m[1] ?? "";
+    if (pyFlags.includes("x"))
+      throw new Error(`unsupported Python inline flag (?x): ${source}`);
+    for (const c of pyFlags)
+      if ("ims".includes(c) && !fl.includes(c))
+        fl += c;
+  }
+  src = replaceAnchors(src).replace(/\(\?P<([A-Za-z_]\w*)>/g, "(?<$1>").replace(/\(\?P=([A-Za-z_]\w*)\)/g, "\\k<$1>");
+  return new RegExp(src, fl);
+}
+function replaceAnchors(src) {
+  let out = "";
+  let inClass = false;
+  for (let i = 0;i < src.length; i++) {
+    const c = src.charAt(i);
+    if (c === "\\") {
+      const next = src.charAt(i + 1);
+      if (!inClass && next === "A")
+        out += "(?<![\\s\\S])";
+      else if (!inClass && (next === "Z" || next === "z"))
+        out += "(?![\\s\\S])";
+      else
+        out += c + next;
+      i++;
+      continue;
+    }
+    if (c === "[" && !inClass) {
+      inClass = true;
+      out += c;
+      if (src.charAt(i + 1) === "^")
+        out += src.charAt(++i);
+      if (src.charAt(i + 1) === "]") {
+        i++;
+        out += "\\]";
+      }
+      continue;
+    }
+    if (c === "]" && inClass)
+      inClass = false;
+    out += c;
+  }
+  return out;
+}
+function jqStr(v) {
+  if (v === null || v === undefined || v === false)
+    return "";
+  return typeof v === "string" ? v : JSON.stringify(v);
+}
+var isDict = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 
 // src/roots.ts
 function relativize(p, projectDir) {
@@ -1378,6 +1330,9 @@ async function evalStopCheck(io, rules, projectDir, changedFiles) {
     };
   });
 }
+
+// src/io.ts
+var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
 
 // src/feedback-stop-check.ts
 var MAX_ATTEMPTS = 3;
@@ -3230,354 +3185,6 @@ async function allStop(io, payload) {
   return { exitCode: 0, stdout, stderr };
 }
 
-// src/feedback-guard.ts
-var SEVERITY_ORDER = { warn: 0, ask: 1, block: 2, deny: 3 };
-var decisionFor = (severity) => severity === "deny" || severity === "block" ? "deny" : "ask";
-var buildReason = (violations) => violations.map((v) => `${v.rule} (count: ${v.count}): ${v.message}`).join(`
-`);
-var askStatePath = (io, sessionId) => join(feedbackDir(io), ".ask_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
-async function loadAskedKeys(io, sessionId) {
-  try {
-    const text = await io.readFile(askStatePath(io, sessionId));
-    if (text === undefined)
-      return new Set;
-    const data = JSON.parse(text);
-    if (isDict(data) && Array.isArray(data.asked))
-      return new Set(data.asked.map(String));
-  } catch {}
-  return new Set;
-}
-async function saveAskedKeys(io, sessionId, askedKeys) {
-  try {
-    await io.writeFile(askStatePath(io, sessionId), JSON.stringify({ asked: [...askedKeys].sort() }));
-  } catch {}
-}
-function askKey(v, toolInput) {
-  const target = v.event === "pre_edit" ? truthy(toolInput.file_path) ? String(toolInput.file_path) : "" : "";
-  return `${v.rule}|${v.event}|${target}`;
-}
-async function downgradeRepeatedAsks(io, violations, sessionId, toolInput) {
-  if (!truthy(sessionId))
-    return;
-  const sid = String(sessionId);
-  const asked = await loadAskedKeys(io, sid);
-  const newlyAsked = new Set;
-  for (const v of violations) {
-    if (v.severity !== "ask")
-      continue;
-    const key = askKey(v, toolInput);
-    if (asked.has(key))
-      v.severity = "warn";
-    else
-      newlyAsked.add(key);
-  }
-  if (newlyAsked.size > 0)
-    await saveAskedKeys(io, sid, new Set([...asked, ...newlyAsked]));
-}
-async function main2(io, payload) {
-  const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
-  const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
-  const rules = await listRules(io);
-  let violations;
-  if (toolName === "Bash") {
-    violations = await evalPreBash(io, rules, truthy(toolInput.command) ? String(toolInput.command) : "");
-  } else if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit") {
-    const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : "";
-    if (!filePath)
-      return ok();
-    violations = await evalPreEdit(io, rules, filePath, extractPreEditContent(toolName, toolInput));
-  } else {
-    return ok();
-  }
-  if (violations.length === 0)
-    return ok();
-  await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
-  for (const v of violations)
-    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
-  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
-  const blocking = violations.filter((v) => v.severity !== "warn");
-  const warnings = violations.filter((v) => v.severity === "warn");
-  let stdout = "";
-  if (blocking.length > 0) {
-    const top = blocking.reduce((a, b) => (SEVERITY_ORDER[b.severity] ?? 0) > (SEVERITY_ORDER[a.severity] ?? 0) ? b : a);
-    stdout = `${JSON.stringify({
-      hookSpecificOutput: {
-        hookEventName: "PreToolUse",
-        permissionDecision: decisionFor(top.severity),
-        permissionDecisionReason: [buildReason(blocking), ...notes].join(`
-`)
-      }
-    })}
-`;
-  }
-  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}`), ...notes].map((l) => `${l}
-`).join("");
-  return ok(stdout, stderr);
-}
-async function feedbackGuard(io, payload) {
-  try {
-    return await main2(io, payload);
-  } catch (e) {
-    await logError(io, "feedback-guard", errorText(e));
-    return ok("", `[feedback-guard] internal error (ignored): ${errorText(e)}
-`);
-  }
-}
-
-// src/feedback-bash-edit.ts
-var EVENTS = new Set(["post_edit", "pre_edit"]);
-var wantsBashEdits = (rules) => rules.some((r) => r.enforce.some((e) => isDict(e) && EVENTS.has(String(e.event))));
-var hasPreEditContent = (rules) => rules.some((r) => r.enforce.some((e) => isDict(e) && e.event === "pre_edit" && truthy(e.when)));
-function addedLines(diff) {
-  const out = [];
-  let inHunk = false;
-  for (const line of diff.split(`
-`)) {
-    if (line.startsWith("diff --git "))
-      inHunk = false;
-    else if (line.startsWith("@@"))
-      inHunk = true;
-    else if (inHunk && line.startsWith("+"))
-      out.push(line.slice(1));
-  }
-  return out;
-}
-async function writtenContent(io, file, threshold) {
-  const dir = dirname(file);
-  const name = basename(file);
-  const opts = { timeoutMs: 1e4 };
-  const whole = async () => await io.readFile(file) ?? "";
-  const tracked = await io.run(["git", "-C", dir, "ls-files", "--error-unmatch", "--", name], opts);
-  if (tracked.exitCode !== 0)
-    return whole();
-  const diff = await io.run(["git", "-C", dir, "diff", "--no-color", "--no-ext-diff", "-U0", "HEAD", "--", name], opts);
-  if (diff.exitCode !== 0)
-    return whole();
-  let added = addedLines(diff.stdout);
-  if (added.length === 0) {
-    const since = `--since=@${Math.floor(threshold / 1000)}`;
-    const log = await io.run(["git", "-C", dir, "log", since, "--no-merges", "-p", "--no-color", "--no-ext-diff", "-U0", "--format=", "--", name], opts);
-    if (log.exitCode === 0)
-      added = addedLines(log.stdout);
-  }
-  return added.join(`
-`);
-}
-var label = (projectDir, file) => {
-  if (!isAbsolute(file))
-    return file;
-  const rel = relpath(file, projectDir);
-  return rel.startsWith("../") || rel === ".." ? file : rel;
-};
-async function main3(io, payload, files, threshold) {
-  const rules = await listRules(io);
-  if (!wantsBashEdits(rules))
-    return ok();
-  const projectDir = io.projectDir || io.cwd;
-  const needContent = hasPreEditContent(rules);
-  const found = [];
-  for (const file of [...files].sort()) {
-    const abs = isAbsolute(file) ? file : join(projectDir, file);
-    for (const v of await evalPostEdit(io, rules, abs))
-      found.push({ file: abs, v });
-    const content = needContent ? await writtenContent(io, abs, threshold) : "";
-    const pre = await evalPreEdit(io, rules, abs, content);
-    if (pre.length === 0)
-      continue;
-    await downgradeRepeatedAsks(io, pre, payload.session_id, { file_path: abs });
-    for (const v of pre)
-      found.push({ file: abs, v });
-  }
-  if (found.length === 0)
-    return ok();
-  for (const { v } of found)
-    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
-  const violations = found.map(({ v }) => v);
-  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
-  const t = tr(io.lang);
-  const tag = (v) => v.event === "pre_edit" ? "[feedback-guard]" : "[feedback-post-edit]";
-  const after = (v) => v.event === "pre_edit" ? ` ${t("bashEdit.preEditAfter")}` : "";
-  const warnings = found.filter(({ v }) => v.severity === "warn");
-  const blocking = found.filter(({ v }) => v.severity !== "warn");
-  let stderr = warnings.map(({ file, v }) => `${tag(v)} warn: ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)})${after(v)}
-`).join("");
-  if (blocking.length === 0)
-    return ok("", stderr + notes.map((l) => `${l}
-`).join(""));
-  const lines = blocking.map(({ file, v }) => `${tag(v)} ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)}: ${v.detail})${after(v)}`);
-  lines.unshift(t("bashEdit.header"));
-  lines.push(...notes);
-  stderr += lines.map((l) => `${l}
-`).join("");
-  return ok(`${JSON.stringify({ decision: "block", reason: lines.join(`
-`) })}
-`, stderr);
-}
-async function feedbackBashEdits(io, payload, files, threshold) {
-  try {
-    return await main3(io, payload, files, threshold);
-  } catch (e) {
-    await logError(io, "feedback-bash-edit", errorText(e));
-    return ok("", `[feedback-bash-edit] internal error (ignored): ${errorText(e)}
-`);
-  }
-}
-
-// src/bash-changes.ts
-var SKIP_COMMAND_RE = /\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?:=\S+)?))*\s+(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/;
-var MTIME_SLACK_MS = 2000;
-var STALE_STARTED_MS = 2 * 60 * 60 * 1000;
-var STATE_DIR = ".gate-status";
-var stateIdOf = (payload) => {
-  const sessionId = jqStr(payload.session_id) || "unknown";
-  const agentId = jqStr(payload.agent_id);
-  return agentId ? `${sessionId}--${agentId}` : sessionId;
-};
-var startedKey = (payload) => {
-  const toolUseId = jqStr(payload.tool_use_id).replace(/[^A-Za-z0-9_.-]/g, "_");
-  if (toolUseId === "")
-    return stateIdOf(payload);
-  const sessionId = jqStr(payload.session_id) || "unknown";
-  return `${sessionId}--${toolUseId}`;
-};
-var hasGate = (io, projectDir) => io.exists(join(projectDir, ".claude", "gate.yaml"));
-var startedDir = (io, projectDir, gate) => gate ? join(projectDir, ".claude", STATE_DIR) : join(feedbackDir(io), ".bash_started");
-var startedPath = (dir, payload) => join(dir, `bash_started.${startedKey(payload)}.json`);
-async function bashStarted(io, payload) {
-  try {
-    const projectDir = io.projectDir || io.cwd;
-    const gate = await hasGate(io, projectDir);
-    if (!gate && !wantsBashEdits(await listRules(io)))
-      return ok();
-    const dir = startedDir(io, projectDir, gate);
-    const started = await io.now();
-    await io.writeFile(startedPath(dir, payload), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}
-`);
-    await sweepStale(io, dir, jqStr(payload.session_id) || "unknown", started);
-  } catch {}
-  return ok();
-}
-async function sweepStale(io, stateDir, sessionId, now) {
-  const prefix = `bash_started.${sessionId}--`;
-  const stale = (await io.list(stateDir)).filter((e) => e.kind === "file" && e.name.startsWith(prefix) && e.name.endsWith(".json") && e.mtimeMs < now - STALE_STARTED_MS).map((e) => join(stateDir, e.name));
-  if (stale.length > 0)
-    await io.removeFiles(stale);
-}
-var NONE = { changed: [], recorded: [], threshold: 0, gate: false };
-async function detectBashChanges(io, payload) {
-  try {
-    const projectDir = io.projectDir || io.cwd;
-    const gate = await hasGate(io, projectDir);
-    const dir = startedDir(io, projectDir, gate);
-    const startedFile = startedPath(dir, payload);
-    const raw = await io.readFile(startedFile);
-    if (raw === undefined)
-      return NONE;
-    try {
-      return await detect(io, projectDir, gate, dir, raw, payload);
-    } finally {
-      await io.removeFiles([startedFile]);
-    }
-  } catch {
-    return NONE;
-  }
-}
-async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
-  let saved;
-  try {
-    saved = JSON.parse(raw);
-  } catch {
-    return NONE;
-  }
-  if (!isDict(saved) || typeof saved.started !== "number")
-    return NONE;
-  if (jqStr(saved.tool_use_id) !== jqStr(payload.tool_use_id))
-    return NONE;
-  const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
-  if (SKIP_COMMAND_RE.test(command))
-    return NONE;
-  const threshold = saved.started - MTIME_SLACK_MS;
-  const stateDir = join(projectDir, ".claude", STATE_DIR);
-  const picked = new Set;
-  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd, command)) {
-    for (const rel of await candidates(io, root, threshold)) {
-      const abs = join(root, rel);
-      if (abs.startsWith(`${stateDir}/`) || abs.startsWith(`${startedDirPath}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
-        continue;
-      const st = await io.stat(abs);
-      if (st?.kind === "file" && st.mtimeMs >= threshold)
-        picked.add(abs);
-    }
-  }
-  const changed = [...picked];
-  if (changed.length === 0 || !gate)
-    return { changed, recorded: [], threshold, gate };
-  const memo = join(stateDir, `changed_files.${stateIdOf(payload)}.txt`);
-  const existing = await io.readFile(memo) ?? "";
-  const have = new Set(existing.split(`
-`));
-  const recorded = changed.filter((p) => !have.has(p));
-  if (recorded.length > 0)
-    await io.writeFile(memo, `${existing}${recorded.map((p) => `${p}
-`).join("")}`);
-  return { changed, recorded, threshold, gate };
-}
-var gitTop = async (io, dir) => {
-  const top = await io.run(["git", "-C", dir, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 });
-  return top.exitCode === 0 ? top.stdout.replace(/\n+$/, "") : "";
-};
-var mentionsWorktree = (command, name) => {
-  const needle = `worktrees/${name}`;
-  for (let i = command.indexOf(needle);i >= 0; i = command.indexOf(needle, i + 1)) {
-    const next = command.charAt(i + needle.length);
-    if (!/[A-Za-z0-9._-]/.test(next))
-      return true;
-  }
-  return false;
-};
-async function scanRoots(io, projectDir, cwd, command) {
-  const roots = [];
-  const add = (top) => {
-    if (top !== "" && !roots.includes(top))
-      roots.push(top);
-  };
-  add(await gitTop(io, cwd));
-  const worktreesDir = join(projectDir, ".claude", "worktrees");
-  for (const e of await io.list(worktreesDir)) {
-    if (e.kind === "dir" && mentionsWorktree(command, e.name))
-      add(await gitTop(io, join(worktreesDir, e.name)));
-  }
-  return roots;
-}
-async function candidates(io, root, threshold) {
-  const out = new Set;
-  const listed = await io.run(["git", "-C", root, "ls-files", "-z", "--modified", "--others", "--exclude-standard", "--full-name"], { timeoutMs: 1e4 });
-  if (listed.exitCode === 0) {
-    for (const s of listed.stdout.split("\x00"))
-      if (s !== "" && !s.endsWith("/"))
-        out.add(s);
-  }
-  const since = `--since=@${Math.floor(threshold / 1000)}`;
-  const logged = await io.run(["git", "-C", root, "log", since, "--no-merges", "--name-only", "-z", "--format=", "HEAD"], { timeoutMs: 1e4 });
-  if (logged.exitCode === 0) {
-    for (const s of logged.stdout.split(/[\0\n]/))
-      if (s !== "")
-        out.add(s);
-  }
-  return [...out];
-}
-function bashChangeSteps(payload) {
-  let found = NONE;
-  return [
-    async (io) => {
-      found = await detectBashChanges(io, payload);
-      return ok();
-    },
-    (io) => found.changed.length > 0 ? feedbackBashEdits(io, payload, found.changed, found.threshold) : Promise.resolve(ok()),
-    (io) => found.recorded.length > 0 ? stopTestGate(io, "rules", payload) : Promise.resolve(ok())
-  ];
-}
-
 // src/correct.ts
 var HOUR_MS = 3600000;
 var DAY_MS2 = 86400000;
@@ -3972,6 +3579,393 @@ async function createIo($, options = {}) {
   };
 }
 
+// src/agent-launch-guard.ts
+var ASK_AGENT_TYPES = ["code-implementer"];
+var ALLOW_RECIPIENTS = ["git-operator"];
+var ask = (reason) => ok(`${JSON.stringify({
+  hookSpecificOutput: {
+    hookEventName: "PreToolUse",
+    permissionDecision: "ask",
+    permissionDecisionReason: reason
+  }
+})}
+`);
+function agentLaunchGuard(payload, lang) {
+  const t = tr(lang);
+  const tool = jqStr(payload.tool_name);
+  const input = isDict(payload.tool_input) ? payload.tool_input : {};
+  if (tool === "Agent") {
+    const agentType = jqStr(input.subagent_type);
+    if (agentType === "")
+      return ok();
+    if (ASK_AGENT_TYPES.includes(agentType)) {
+      return ask(`${t("launch.promptTo", { agentType })}
+
+${jqStr(input.prompt)}
+
+${t("launch.checklist")}`);
+    }
+  } else if (tool === "SendMessage") {
+    const recipient = jqStr(input.to);
+    if (!ALLOW_RECIPIENTS.includes(recipient)) {
+      return ask(`${t("launch.messageTo", { recipient: recipient || t("launch.unknownRecipient") })}
+
+${jqStr(input.message)}
+
+${t("launch.checklist")}`);
+    }
+  }
+  return ok();
+}
+
+// src/feedback-guard.ts
+var SEVERITY_ORDER = { warn: 0, ask: 1, block: 2, deny: 3 };
+var decisionFor = (severity) => severity === "deny" || severity === "block" ? "deny" : "ask";
+var buildReason = (violations) => violations.map((v) => `${v.rule} (count: ${v.count}): ${v.message}`).join(`
+`);
+var askStatePath = (io, sessionId) => join(feedbackDir(io), ".ask_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
+async function loadAskedKeys(io, sessionId) {
+  try {
+    const text = await io.readFile(askStatePath(io, sessionId));
+    if (text === undefined)
+      return new Set;
+    const data = JSON.parse(text);
+    if (isDict(data) && Array.isArray(data.asked))
+      return new Set(data.asked.map(String));
+  } catch {}
+  return new Set;
+}
+async function saveAskedKeys(io, sessionId, askedKeys) {
+  try {
+    await io.writeFile(askStatePath(io, sessionId), JSON.stringify({ asked: [...askedKeys].sort() }));
+  } catch {}
+}
+function askKey(v, toolInput) {
+  const target = v.event === "pre_edit" ? truthy(toolInput.file_path) ? String(toolInput.file_path) : "" : "";
+  return `${v.rule}|${v.event}|${target}`;
+}
+async function downgradeRepeatedAsks(io, violations, sessionId, toolInput) {
+  if (!truthy(sessionId))
+    return;
+  const sid = String(sessionId);
+  const asked = await loadAskedKeys(io, sid);
+  const newlyAsked = new Set;
+  for (const v of violations) {
+    if (v.severity !== "ask")
+      continue;
+    const key = askKey(v, toolInput);
+    if (asked.has(key))
+      v.severity = "warn";
+    else
+      newlyAsked.add(key);
+  }
+  if (newlyAsked.size > 0)
+    await saveAskedKeys(io, sid, new Set([...asked, ...newlyAsked]));
+}
+async function main2(io, payload) {
+  const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
+  const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
+  const rules = await listRules(io);
+  let violations;
+  if (toolName === "Bash") {
+    violations = await evalPreBash(io, rules, truthy(toolInput.command) ? String(toolInput.command) : "");
+  } else if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit") {
+    const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : "";
+    if (!filePath)
+      return ok();
+    violations = await evalPreEdit(io, rules, filePath, extractPreEditContent(toolName, toolInput));
+  } else {
+    return ok();
+  }
+  if (violations.length === 0)
+    return ok();
+  await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
+  for (const v of violations)
+    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
+  const blocking = violations.filter((v) => v.severity !== "warn");
+  const warnings = violations.filter((v) => v.severity === "warn");
+  let stdout = "";
+  if (blocking.length > 0) {
+    const top = blocking.reduce((a, b) => (SEVERITY_ORDER[b.severity] ?? 0) > (SEVERITY_ORDER[a.severity] ?? 0) ? b : a);
+    stdout = `${JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: decisionFor(top.severity),
+        permissionDecisionReason: [buildReason(blocking), ...notes].join(`
+`)
+      }
+    })}
+`;
+  }
+  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}`), ...notes].map((l) => `${l}
+`).join("");
+  return ok(stdout, stderr);
+}
+async function feedbackGuard(io, payload) {
+  try {
+    return await main2(io, payload);
+  } catch (e) {
+    await logError(io, "feedback-guard", errorText(e));
+    return ok("", `[feedback-guard] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+
+// src/feedback-bash-edit.ts
+var EVENTS = new Set(["post_edit", "pre_edit"]);
+var wantsBashEdits = (rules) => rules.some((r) => r.enforce.some((e) => isDict(e) && EVENTS.has(String(e.event))));
+var hasPreEditContent = (rules) => rules.some((r) => r.enforce.some((e) => isDict(e) && e.event === "pre_edit" && truthy(e.when)));
+function addedLines(diff) {
+  const out = [];
+  let inHunk = false;
+  for (const line of diff.split(`
+`)) {
+    if (line.startsWith("diff --git "))
+      inHunk = false;
+    else if (line.startsWith("@@"))
+      inHunk = true;
+    else if (inHunk && line.startsWith("+"))
+      out.push(line.slice(1));
+  }
+  return out;
+}
+async function writtenContent(io, file, threshold) {
+  const dir = dirname(file);
+  const name = basename(file);
+  const opts = { timeoutMs: 1e4 };
+  const whole = async () => await io.readFile(file) ?? "";
+  const tracked = await io.run(["git", "-C", dir, "ls-files", "--error-unmatch", "--", name], opts);
+  if (tracked.exitCode !== 0)
+    return whole();
+  const diff = await io.run(["git", "-C", dir, "diff", "--no-color", "--no-ext-diff", "-U0", "HEAD", "--", name], opts);
+  if (diff.exitCode !== 0)
+    return whole();
+  let added = addedLines(diff.stdout);
+  if (added.length === 0) {
+    const since = `--since=@${Math.floor(threshold / 1000)}`;
+    const log = await io.run(["git", "-C", dir, "log", since, "--no-merges", "-p", "--no-color", "--no-ext-diff", "-U0", "--format=", "--", name], opts);
+    if (log.exitCode === 0)
+      added = addedLines(log.stdout);
+  }
+  return added.join(`
+`);
+}
+var label = (projectDir, file) => {
+  if (!isAbsolute(file))
+    return file;
+  const rel = relpath(file, projectDir);
+  return rel.startsWith("../") || rel === ".." ? file : rel;
+};
+async function main3(io, payload, files, threshold) {
+  const rules = await listRules(io);
+  if (!wantsBashEdits(rules))
+    return ok();
+  const projectDir = io.projectDir || io.cwd;
+  const needContent = hasPreEditContent(rules);
+  const found = [];
+  for (const file of [...files].sort()) {
+    const abs = isAbsolute(file) ? file : join(projectDir, file);
+    for (const v of await evalPostEdit(io, rules, abs))
+      found.push({ file: abs, v });
+    const content = needContent ? await writtenContent(io, abs, threshold) : "";
+    const pre = await evalPreEdit(io, rules, abs, content);
+    if (pre.length === 0)
+      continue;
+    await downgradeRepeatedAsks(io, pre, payload.session_id, { file_path: abs });
+    for (const v of pre)
+      found.push({ file: abs, v });
+  }
+  if (found.length === 0)
+    return ok();
+  for (const { v } of found)
+    await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
+  const violations = found.map(({ v }) => v);
+  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
+  const t = tr(io.lang);
+  const tag = (v) => v.event === "pre_edit" ? "[feedback-guard]" : "[feedback-post-edit]";
+  const after = (v) => v.event === "pre_edit" ? ` ${t("bashEdit.preEditAfter")}` : "";
+  const warnings = found.filter(({ v }) => v.severity === "warn");
+  const blocking = found.filter(({ v }) => v.severity !== "warn");
+  let stderr = warnings.map(({ file, v }) => `${tag(v)} warn: ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)})${after(v)}
+`).join("");
+  if (blocking.length === 0)
+    return ok("", stderr + notes.map((l) => `${l}
+`).join(""));
+  const lines = blocking.map(({ file, v }) => `${tag(v)} ${v.rule} (count: ${v.count}): ${v.message} (${label(projectDir, file)}: ${v.detail})${after(v)}`);
+  lines.unshift(t("bashEdit.header"));
+  lines.push(...notes);
+  stderr += lines.map((l) => `${l}
+`).join("");
+  return ok(`${JSON.stringify({ decision: "block", reason: lines.join(`
+`) })}
+`, stderr);
+}
+async function feedbackBashEdits(io, payload, files, threshold) {
+  try {
+    return await main3(io, payload, files, threshold);
+  } catch (e) {
+    await logError(io, "feedback-bash-edit", errorText(e));
+    return ok("", `[feedback-bash-edit] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+
+// src/bash-changes.ts
+var SKIP_COMMAND_RE = /\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?:=\S+)?))*\s+(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/;
+var MTIME_SLACK_MS = 2000;
+var STALE_STARTED_MS = 2 * 60 * 60 * 1000;
+var STATE_DIR = ".gate-status";
+var stateIdOf = (payload) => {
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  const agentId = jqStr(payload.agent_id);
+  return agentId ? `${sessionId}--${agentId}` : sessionId;
+};
+var startedKey = (payload) => {
+  const toolUseId = jqStr(payload.tool_use_id).replace(/[^A-Za-z0-9_.-]/g, "_");
+  if (toolUseId === "")
+    return stateIdOf(payload);
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  return `${sessionId}--${toolUseId}`;
+};
+var hasGate = (io, projectDir) => io.exists(join(projectDir, ".claude", "gate.yaml"));
+var startedDir = (io, projectDir, gate) => gate ? join(projectDir, ".claude", STATE_DIR) : join(feedbackDir(io), ".bash_started");
+var startedPath = (dir, payload) => join(dir, `bash_started.${startedKey(payload)}.json`);
+async function bashStarted(io, payload) {
+  try {
+    const projectDir = io.projectDir || io.cwd;
+    const gate = await hasGate(io, projectDir);
+    if (!gate && !wantsBashEdits(await listRules(io)))
+      return ok();
+    const dir = startedDir(io, projectDir, gate);
+    const started = await io.now();
+    await io.writeFile(startedPath(dir, payload), `${JSON.stringify({ tool_use_id: jqStr(payload.tool_use_id), started })}
+`);
+    await sweepStale(io, dir, jqStr(payload.session_id) || "unknown", started);
+  } catch {}
+  return ok();
+}
+async function sweepStale(io, stateDir, sessionId, now) {
+  const prefix = `bash_started.${sessionId}--`;
+  const stale = (await io.list(stateDir)).filter((e) => e.kind === "file" && e.name.startsWith(prefix) && e.name.endsWith(".json") && e.mtimeMs < now - STALE_STARTED_MS).map((e) => join(stateDir, e.name));
+  if (stale.length > 0)
+    await io.removeFiles(stale);
+}
+var NONE = { changed: [], recorded: [], threshold: 0, gate: false };
+async function detectBashChanges(io, payload) {
+  try {
+    const projectDir = io.projectDir || io.cwd;
+    const gate = await hasGate(io, projectDir);
+    const dir = startedDir(io, projectDir, gate);
+    const startedFile = startedPath(dir, payload);
+    const raw = await io.readFile(startedFile);
+    if (raw === undefined)
+      return NONE;
+    try {
+      return await detect(io, projectDir, gate, dir, raw, payload);
+    } finally {
+      await io.removeFiles([startedFile]);
+    }
+  } catch {
+    return NONE;
+  }
+}
+async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
+  let saved;
+  try {
+    saved = JSON.parse(raw);
+  } catch {
+    return NONE;
+  }
+  if (!isDict(saved) || typeof saved.started !== "number")
+    return NONE;
+  if (jqStr(saved.tool_use_id) !== jqStr(payload.tool_use_id))
+    return NONE;
+  const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
+  if (SKIP_COMMAND_RE.test(command))
+    return NONE;
+  const threshold = saved.started - MTIME_SLACK_MS;
+  const stateDir = join(projectDir, ".claude", STATE_DIR);
+  const picked = new Set;
+  for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd, command)) {
+    for (const rel of await candidates(io, root, threshold)) {
+      const abs = join(root, rel);
+      if (abs.startsWith(`${stateDir}/`) || abs.startsWith(`${startedDirPath}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
+        continue;
+      const st = await io.stat(abs);
+      if (st?.kind === "file" && st.mtimeMs >= threshold)
+        picked.add(abs);
+    }
+  }
+  const changed = [...picked];
+  if (changed.length === 0 || !gate)
+    return { changed, recorded: [], threshold, gate };
+  const memo = join(stateDir, `changed_files.${stateIdOf(payload)}.txt`);
+  const existing = await io.readFile(memo) ?? "";
+  const have = new Set(existing.split(`
+`));
+  const recorded = changed.filter((p) => !have.has(p));
+  if (recorded.length > 0)
+    await io.writeFile(memo, `${existing}${recorded.map((p) => `${p}
+`).join("")}`);
+  return { changed, recorded, threshold, gate };
+}
+var gitTop = async (io, dir) => {
+  const top = await io.run(["git", "-C", dir, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 });
+  return top.exitCode === 0 ? top.stdout.replace(/\n+$/, "") : "";
+};
+var mentionsWorktree = (command, name) => {
+  const needle = `worktrees/${name}`;
+  for (let i = command.indexOf(needle);i >= 0; i = command.indexOf(needle, i + 1)) {
+    const next = command.charAt(i + needle.length);
+    if (!/[A-Za-z0-9._-]/.test(next))
+      return true;
+  }
+  return false;
+};
+async function scanRoots(io, projectDir, cwd, command) {
+  const roots = [];
+  const add = (top) => {
+    if (top !== "" && !roots.includes(top))
+      roots.push(top);
+  };
+  add(await gitTop(io, cwd));
+  const worktreesDir = join(projectDir, ".claude", "worktrees");
+  for (const e of await io.list(worktreesDir)) {
+    if (e.kind === "dir" && mentionsWorktree(command, e.name))
+      add(await gitTop(io, join(worktreesDir, e.name)));
+  }
+  return roots;
+}
+async function candidates(io, root, threshold) {
+  const out = new Set;
+  const listed = await io.run(["git", "-C", root, "ls-files", "-z", "--modified", "--others", "--exclude-standard", "--full-name"], { timeoutMs: 1e4 });
+  if (listed.exitCode === 0) {
+    for (const s of listed.stdout.split("\x00"))
+      if (s !== "" && !s.endsWith("/"))
+        out.add(s);
+  }
+  const since = `--since=@${Math.floor(threshold / 1000)}`;
+  const logged = await io.run(["git", "-C", root, "log", since, "--no-merges", "--name-only", "-z", "--format=", "HEAD"], { timeoutMs: 1e4 });
+  if (logged.exitCode === 0) {
+    for (const s of logged.stdout.split(/[\0\n]/))
+      if (s !== "")
+        out.add(s);
+  }
+  return [...out];
+}
+function bashChangeSteps(payload) {
+  let found = NONE;
+  return [
+    async (io) => {
+      found = await detectBashChanges(io, payload);
+      return ok();
+    },
+    (io) => found.changed.length > 0 ? feedbackBashEdits(io, payload, found.changed, found.threshold) : Promise.resolve(ok()),
+    (io) => found.recorded.length > 0 ? stopTestGate(io, "rules", payload) : Promise.resolve(ok())
+  ];
+}
+
 // src/feedback-inject.ts
 async function formatFull(io, rule) {
   const lines = [tr(io.lang)("inject.ruleTitle", { name: rule.name, count: rule.count }), rule.description];
@@ -4139,79 +4133,6 @@ async function recordChanges(io, payload) {
   return ok();
 }
 
-// src/reset-gate.ts
-var STATE_FILES = [
-  ["changed_files", ".txt"],
-  ["gate_attempts", ".txt"],
-  ["gate_passed", ".txt"],
-  ["gate_push_verified", ".txt"],
-  ["gate_reported", ".txt"],
-  ["gate_pending_checks", ".json"],
-  ["gate_trace", ".jsonl"],
-  ["gate_deferred", ".json"],
-  ["gate_failed", ".txt"],
-  ["bash_started", ".json"],
-  ["feedback_gate_attempts", ".txt"],
-  ["subagent_report", ".json"],
-  ["summary", ".txt"]
-];
-var DAY_MS3 = 1440 * 60 * 1000;
-var globMatch = (name, prefix, suffix) => name.length >= prefix.length + suffix.length && name.startsWith(prefix) && name.endsWith(suffix);
-async function resetGate(io, payload) {
-  const projectDir = io.projectDir || io.cwd;
-  const claudeDir = join(projectDir, ".claude");
-  const stateDir = join(claudeDir, ".gate-status");
-  const sessionId = jqStr(payload.session_id) || "unknown";
-  const source = jqStr(payload.source);
-  const now = await io.now();
-  if (source === "startup" || source === "clear") {
-    for (const dir of [stateDir, claudeDir]) {
-      const names = (await io.list(dir)).map((e) => e.name);
-      const doomed = [];
-      for (const [base, ext] of STATE_FILES) {
-        const exact = `${base}.${sessionId}${ext}`;
-        for (const name of names) {
-          if (name === exact || globMatch(name, `${base}.${sessionId}--`, ext))
-            doomed.push(join(dir, name));
-        }
-      }
-      await io.removeFiles(doomed);
-    }
-    for (const logRoot of [join(stateDir, "logs"), join(claudeDir, "hooks", "logs")]) {
-      for (const e of await io.list(logRoot)) {
-        if (e.name === sessionId || e.name.startsWith(`${sessionId}--`))
-          await io.removeTree(join(logRoot, e.name));
-      }
-    }
-  }
-  for (const dir of [stateDir, claudeDir]) {
-    const old = [];
-    for (const e of await io.list(dir)) {
-      if (e.kind !== "file" || e.mtimeMs >= now - DAY_MS3)
-        continue;
-      if (STATE_FILES.some(([base, ext]) => globMatch(e.name, `${base}.`, ext))) {
-        old.push(join(dir, e.name));
-      }
-    }
-    await io.removeFiles(old);
-  }
-  for (const logRoot of [join(stateDir, "logs"), join(claudeDir, "hooks", "logs")]) {
-    for (const e of await io.list(logRoot)) {
-      if (e.kind !== "dir")
-        continue;
-      const st = await io.stat(join(logRoot, e.name));
-      if (st && st.mtimeMs < now - DAY_MS3)
-        await io.removeTree(join(logRoot, e.name));
-    }
-  }
-  for (const dir of [join(feedbackDir(io), ".classic_seen"), join(feedbackDir(io), ".subagent_done")]) {
-    await io.removeFiles((await io.list(dir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS3).map((e) => join(dir, e.name)));
-  }
-  await io.removeDir(join(claudeDir, "hooks", "logs"));
-  await io.removeDir(join(claudeDir, "hooks"));
-  return ok();
-}
-
 // src/rules-file.ts
 var DEFAULT_RULES_FILE = "~/.claude/feedback-gate/feedback_rules.md";
 var bundledRulesName = (lang) => lang === "en" ? "feedback_rules.en.md" : "feedback_rules.md";
@@ -4291,13 +4212,11 @@ async function subagentReport(io, payload) {
 `);
 }
 
-// src/register.ts
+// src/hooks.ts
 var PROGRESS_DELAY_MS = 3000;
-var str = (v) => typeof v === "string" ? v : "";
-async function runSteps($, options, event, steps) {
+async function runStepsCollect(base, sessionId, event, steps) {
   let acc = {};
-  const base = await createIo($, options);
-  const sessionId = await $.session.id();
+  let stderr = "";
   let shown = false;
   let pending;
   let cancelDelay;
@@ -4328,67 +4247,25 @@ async function runSteps($, options, event, steps) {
       const ran = await step(io).catch(() => {
         return;
       });
-      if (ran)
-        acc = merge(acc, toOutcome(event, ran));
+      if (!ran)
+        continue;
+      acc = merge(acc, toOutcome(event, ran));
+      if (ran.exitCode === 0)
+        stderr += ran.stderr;
     }
   } finally {
     cancelDelay?.();
     if (shown)
       base.progress?.(await loadSummary(base, sessionId));
   }
-  return acc;
+  return { outcome: acc, stderr };
 }
-async function withNext(next, e, mine) {
-  const rest = await next(e);
-  return merge(mine, rest);
-}
-function preToolUsePayload(event, tool, sessionId, cwd) {
-  const { tool: _tool, tool_use_id, agentId, ...toolInput } = event;
-  const payload = {
-    session_id: sessionId,
-    cwd,
-    hook_event_name: "PreToolUse",
-    tool_name: tool,
-    tool_input: toolInput,
-    tool_use_id
-  };
-  if (typeof agentId === "string" && agentId !== "")
-    payload.agent_id = agentId;
-  return payload;
-}
-var CLASSIC_SEEN = { plugin: "feedback-gate", key: "classicSeen" };
-async function classicSeen($, memory) {
-  if (memory.classicSeen)
-    return true;
-  try {
-    const seen = (await $.state.get(CLASSIC_SEEN)).value;
-    memory.classicSeen = typeof seen === "string" && seen !== "" && seen === await $.session.id();
-  } catch {}
-  return memory.classicSeen;
-}
-async function markClassic($, options, memory, refresh = false) {
-  if (!await classicSeen($, memory)) {
-    memory.classicSeen = true;
-    try {
-      await $.state.set(CLASSIC_SEEN, await $.session.id());
-    } catch {}
-  }
-  try {
-    const sessionId = (await $.session.id()).replace(/[^A-Za-z0-9_-]/g, "");
-    if (sessionId === "")
-      return;
-    const io = await createIo($, options);
-    const marker = join(feedbackDir(io), ".classic_seen", sessionId);
-    if (refresh || !await io.exists(marker))
-      await io.writeFile(marker, `1
-`);
-  } catch {}
-}
+var runSteps = async (base, sessionId, event, steps) => (await runStepsCollect(base, sessionId, event, steps)).outcome;
 var guardsTool = (options, tool) => options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool) || /^(Bash|Edit|Write|MultiEdit)$/.test(tool);
-function preGuardSteps(options, tool, payload, trackStart) {
+function preGuardSteps(options, tool, payload) {
   const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
   const step = guardsAgents ? async (io) => agentLaunchGuard(payload, io.lang) : (io) => feedbackGuard(io, payload);
-  return trackStart && tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
+  return tool === "Bash" ? [(io) => bashStarted(io, payload), step] : [step];
 }
 function postToolSteps(tool, payload) {
   if (/^(Agent|Task)$/.test(tool))
@@ -4408,121 +4285,124 @@ function subagentStopSteps(payload) {
     (io) => saveSubagentReport(io, payload, gate, feedback)
   ];
 }
-async function promptOutcome($, options) {
+async function promptStepsResult(io, sessionId, options) {
   const mine = {};
-  const text = await createIo($, options).then((io) => loadRules(io, options.rulesFile));
+  const text = await loadRules(io, options.rulesFile);
   if (text !== "")
     mine.additionalContext = [text];
-  const inject = await runSteps($, options, "UserPromptSubmit", [(io) => feedbackInject(io)]);
-  return merge(mine, inject);
+  const inject = await runStepsCollect(io, sessionId, "UserPromptSubmit", [(i) => feedbackInject(i)]);
+  return { outcome: merge(mine, inject.outcome), stderr: inject.stderr };
 }
-var firstLine = (text) => (text.split(`
-`).find((l) => l.trim() !== "") ?? "").trim().slice(0, 200);
-async function tellClaude($, outcome) {
-  const notes = [...outcome.block ? [outcome.block] : [], ...outcome.additionalContext ?? []].filter((n) => n.trim() !== "");
-  if (notes.length === 0)
-    return;
-  try {
-    await $.session.append({ message: { type: "user", content: [{ type: "text", text: notes.join(`
+var promptOutcome = async (io, sessionId, options) => (await promptStepsResult(io, sessionId, options)).outcome;
 
-`) }] } });
-  } catch {
-    try {
-      $.ui.toast(firstLine(notes[0] ?? ""));
-    } catch {}
+// src/reset-gate.ts
+var STATE_FILES = [
+  ["changed_files", ".txt"],
+  ["gate_attempts", ".txt"],
+  ["gate_passed", ".txt"],
+  ["gate_push_verified", ".txt"],
+  ["gate_reported", ".txt"],
+  ["gate_pending_checks", ".json"],
+  ["gate_trace", ".jsonl"],
+  ["gate_deferred", ".json"],
+  ["gate_failed", ".txt"],
+  ["bash_started", ".json"],
+  ["feedback_gate_attempts", ".txt"],
+  ["subagent_report", ".json"],
+  ["summary", ".txt"]
+];
+var DAY_MS3 = 1440 * 60 * 1000;
+var globMatch = (name, prefix, suffix) => name.length >= prefix.length + suffix.length && name.startsWith(prefix) && name.endsWith(suffix);
+async function resetGate(io, payload) {
+  const projectDir = io.projectDir || io.cwd;
+  const claudeDir = join(projectDir, ".claude");
+  const stateDir = join(claudeDir, ".gate-status");
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  const source = jqStr(payload.source);
+  const now = await io.now();
+  if (source === "startup" || source === "clear") {
+    for (const dir of [stateDir, claudeDir]) {
+      const names = (await io.list(dir)).map((e) => e.name);
+      const doomed = [];
+      for (const [base, ext] of STATE_FILES) {
+        const exact = `${base}.${sessionId}${ext}`;
+        for (const name of names) {
+          if (name === exact || globMatch(name, `${base}.${sessionId}--`, ext))
+            doomed.push(join(dir, name));
+        }
+      }
+      await io.removeFiles(doomed);
+    }
+    for (const logRoot of [join(stateDir, "logs"), join(claudeDir, "hooks", "logs")]) {
+      for (const e of await io.list(logRoot)) {
+        if (e.name === sessionId || e.name.startsWith(`${sessionId}--`))
+          await io.removeTree(join(logRoot, e.name));
+      }
+    }
   }
-}
-async function checkOutcome($, options, event) {
-  const tool = str(event.tool);
-  if (!guardsTool(options, tool))
-    return {};
-  const input = isDict(event.input) ? event.input : {};
-  const payload = preToolUsePayload({ ...input, tool, agentId: event.agentId }, tool, await $.session.id(), await $.session.cwd());
-  return runSteps($, options, "PreToolUse", preGuardSteps(options, tool, payload, false));
-}
-async function toolCallStarted($, options, event) {
-  try {
-    const payload = preToolUsePayload(event, "Bash", await $.session.id(), await $.session.cwd());
-    await runSteps($, options, "PreToolUse", [(io) => bashStarted(io, payload)]);
-  } catch {}
-}
-var subagentDonePath = (io, sessionId, agentId) => join(feedbackDir(io), ".subagent_done", `${sessionId || "unknown"}--${agentId}`);
-var SUBAGENT_DONE_WAIT_MS = 2000;
-var SUBAGENT_DONE_POLL_MS = 50;
-async function awaitSubagentDone(io, sessionId, agentId) {
-  if (agentId === "")
-    return;
-  const marker = subagentDonePath(io, sessionId, agentId);
-  const start = await io.now();
-  while (!await io.exists(marker)) {
-    if (await io.now() - start >= SUBAGENT_DONE_WAIT_MS)
-      return;
-    if (!io.every)
-      return;
-    await new Promise((resolve) => {
-      const cancel = io.every?.(SUBAGENT_DONE_POLL_MS, () => {
-        cancel?.();
-        resolve();
-      });
-      if (!cancel)
-        resolve();
-    });
+  for (const dir of [stateDir, claudeDir]) {
+    const old = [];
+    for (const e of await io.list(dir)) {
+      if (e.kind !== "file" || e.mtimeMs >= now - DAY_MS3)
+        continue;
+      if (STATE_FILES.some(([base, ext]) => globMatch(e.name, `${base}.`, ext))) {
+        old.push(join(dir, e.name));
+      }
+    }
+    await io.removeFiles(old);
   }
-  await io.removeFiles([marker]);
-}
-async function toolCallDone($, options, event, ran) {
-  try {
-    if (ran.deny !== undefined || ran.isError === true)
-      return;
-    const tool = str(event.tool);
-    const base = preToolUsePayload(event, tool, await $.session.id(), await $.session.cwd());
-    const result = ran.result;
-    const payload = { ...base, hook_event_name: "PostToolUse", tool_response: isDict(result) ? result : { result } };
-    if (/^(Agent|Task)$/.test(tool))
-      await awaitSubagentDone(await createIo($, options), str(base.session_id), isDict(result) ? str(result.agentId) : "");
-    const steps = postToolSteps(tool, payload);
-    if (steps)
-      await tellClaude($, await runSteps($, options, "PostToolUse", steps));
-  } catch {}
-}
-function continueWork($, reason) {
-  const fallback = () => {
-    try {
-      $.ui.toast(firstLine(reason));
-    } catch {}
-  };
-  try {
-    $.prompt.submit({ text: reason }).catch(fallback);
-  } catch {
-    fallback();
+  for (const logRoot of [join(stateDir, "logs"), join(claudeDir, "hooks", "logs")]) {
+    for (const e of await io.list(logRoot)) {
+      if (e.kind !== "dir")
+        continue;
+      const st = await io.stat(join(logRoot, e.name));
+      if (st && st.mtimeMs < now - DAY_MS3)
+        await io.removeTree(join(logRoot, e.name));
+    }
   }
+  const seenDir = join(feedbackDir(io), ".classic_seen");
+  await io.removeFiles((await io.list(seenDir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS3).map((e) => join(seenDir, e.name)));
+  await io.removeDir(join(claudeDir, "hooks", "logs"));
+  await io.removeDir(join(claudeDir, "hooks"));
+  return ok();
 }
-async function turnComplete($, options, event, memory) {
-  const agentId = str(event.agentId);
-  const base = { session_id: await $.session.id(), cwd: await $.session.cwd(), last_assistant_message: str(event.answer) };
-  if (agentId !== "") {
-    const agentType = str(event.agentType);
-    const payload = { ...base, hook_event_name: "SubagentStop", agent_id: agentId, ...agentType !== "" ? { agent_type: agentType } : {} };
-    const mine = await runSteps($, options, "SubagentStop", subagentStopSteps(payload));
+
+// src/register.ts
+var str = (v) => typeof v === "string" ? v : "";
+async function runSteps2($, options, event, steps) {
+  return runSteps(await createIo($, options), await $.session.id(), event, steps);
+}
+async function withNext(next, e, mine) {
+  const rest = await next(e);
+  return merge(mine, rest);
+}
+async function markClassic($, options, refresh = false) {
+  try {
+    const sessionId = (await $.session.id()).replace(/[^A-Za-z0-9_-]/g, "");
+    if (sessionId === "")
+      return;
     const io = await createIo($, options);
-    await io.writeFile(subagentDonePath(io, str(base.session_id), agentId), `1
-`).catch(() => {
-      return;
-    });
-    return mine.block === undefined ? undefined : tr(io.lang)("nativeStop.subagentBlocked", { reason: firstLine(mine.block) });
-  }
-  const active = memory.stopContinued;
-  memory.stopContinued = false;
-  const payload = { ...base, hook_event_name: "Stop", stop_hook_active: active };
-  const mine = await runSteps($, options, "Stop", [(io) => allStop(io, payload)]);
-  if (mine.block === undefined)
-    return;
-  memory.stopContinued = true;
-  continueWork($, mine.block);
-  return tr((await createIo($, options)).lang)("nativeStop.continued");
+    const marker = join(feedbackDir(io), ".classic_seen", sessionId);
+    if (refresh || !await io.exists(marker))
+      await io.writeFile(marker, `1
+`);
+  } catch {}
+}
+function preToolUsePayload(event, tool, sessionId, cwd) {
+  const { tool: _tool, tool_use_id, agentId, ...toolInput } = event;
+  const payload = {
+    session_id: sessionId,
+    cwd,
+    hook_event_name: "PreToolUse",
+    tool_name: tool,
+    tool_input: toolInput,
+    tool_use_id
+  };
+  if (typeof agentId === "string" && agentId !== "")
+    payload.agent_id = agentId;
+  return payload;
 }
 export const register = (on, options) => {
-  const memory = { classicSeen: false, stopContinued: false };
   on("session.start", async ($, e, next) => {
     try {
       const io = await createIo($, options);
@@ -4532,102 +4412,53 @@ export const register = (on, options) => {
         argumentHint: "[--window 30d] [--min 2] [apply]"
       });
     } catch {}
-    if (!await classicSeen($, memory)) {
-      const payload = { session_id: await $.session.id(), cwd: str(e.cwd) };
-      await runSteps($, options, "SessionStart", [(io) => resetGate(io, payload)]);
-    }
-    return next(e);
-  });
-  on("session.end", async ($, e, next) => {
-    if (e.reason === "clear" && !await classicSeen($, memory)) {
-      const payload = { session_id: await $.session.id(), source: "clear" };
-      await runSteps($, options, "SessionStart", [(io) => resetGate(io, payload)]);
-    }
     return next(e);
   });
   on("command.run", { command: "correct" }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? "")));
   on("classic.SessionStart", async ($, e, next) => {
-    await markClassic($, options, memory);
-    const mine = await runSteps($, options, "SessionStart", [(io) => resetGate(io, e)]);
+    await markClassic($, options);
+    const mine = await runSteps2($, options, "SessionStart", [(io) => resetGate(io, e)]);
     return withNext(next, e, mine);
   });
-  on("prompt.submit", async ($, e, next) => {
-    if (await classicSeen($, memory))
-      return next(e);
-    const mine = await promptOutcome($, options);
-    if (mine.block !== undefined)
-      return { drop: mine.block };
-    const added = mine.additionalContext ?? [];
-    if (added.length === 0)
-      return next(e);
-    return next({ ...e, context: [...Array.isArray(e.context) ? e.context : [], ...added] });
-  });
   on("classic.UserPromptSubmit", async ($, e, next) => {
-    await markClassic($, options, memory);
-    return withNext(next, e, await promptOutcome($, options));
+    await markClassic($, options);
+    const mine = await promptOutcome(await createIo($, options), await $.session.id(), options);
+    return withNext(next, e, mine);
   });
   on("classic.PreToolUse", async ($guard, guardEvent, guardNext) => {
-    await markClassic($guard, options, memory);
+    await markClassic($guard, options);
     const tool = str(guardEvent.tool);
     if (!guardsTool(options, tool))
       return guardNext(guardEvent);
     const payload = preToolUsePayload(guardEvent, tool, await $guard.session.id(), await $guard.session.cwd());
-    const mine = await runSteps($guard, options, "PreToolUse", preGuardSteps(options, tool, payload, true));
+    const mine = await runSteps2($guard, options, "PreToolUse", preGuardSteps(options, tool, payload));
     if (mine.deny !== undefined)
       return { deny: mine.deny };
     if (mine.ask !== undefined)
       return { ask: mine.ask };
     return guardNext(guardEvent);
   });
-  on("tool.check", async ($check, checkEvent, checkNext) => {
-    if (await classicSeen($check, memory))
-      return checkNext(checkEvent);
-    const mine = await checkOutcome($check, options, checkEvent);
-    if (mine.deny !== undefined)
-      return { decision: "deny", reason: mine.deny };
-    const decided = await checkNext(checkEvent);
-    if (mine.ask !== undefined && decided.decision !== "deny")
-      return { decision: "ask", reason: mine.ask };
-    return decided;
-  });
-  on("tool.call", async ($call, callEvent, callNext) => {
-    if (await classicSeen($call, memory))
-      return callNext(callEvent);
-    if (str(callEvent.tool) === "Bash")
-      await toolCallStarted($call, options, callEvent);
-    const ran = await callNext(callEvent);
-    if (await classicSeen($call, memory))
-      return ran;
-    await toolCallDone($call, options, callEvent, ran);
-    return ran;
-  });
   on("classic.PostToolUse", async ($, e, next) => {
-    await markClassic($, options, memory);
+    await markClassic($, options);
     const steps = postToolSteps(str(e.tool_name), e);
     if (!steps)
       return next(e);
-    return withNext(next, e, await runSteps($, options, "PostToolUse", steps));
+    return withNext(next, e, await runSteps2($, options, "PostToolUse", steps));
   });
   on("classic.Notification", async ($, e, next) => {
-    await markClassic($, options, memory, true);
-    await runSteps($, options, "Notification", [(io) => notification(io, "notify", e)]);
+    await markClassic($, options, true);
+    await runSteps2($, options, "Notification", [(io) => notification(io, "notify", e)]);
     return next(e);
   });
   on("classic.Stop", async ($, e, next) => {
-    await markClassic($, options, memory);
-    const mine = await runSteps($, options, "Stop", [(io) => allStop(io, e)]);
+    await markClassic($, options);
+    const mine = await runSteps2($, options, "Stop", [(io) => allStop(io, e)]);
     return withNext(next, e, mine);
   });
   on("classic.SubagentStop", async ($, e, next) => {
-    await markClassic($, options, memory);
-    const mine = await runSteps($, options, "SubagentStop", subagentStopSteps(e));
+    await markClassic($, options);
+    const mine = await runSteps2($, options, "SubagentStop", subagentStopSteps(e));
     return withNext(next, e, mine);
-  });
-  on("turn.complete", async ($, e, next) => {
-    if (e.isAborted === true || await classicSeen($, memory))
-      return next(e);
-    const text = await turnComplete($, options, e, memory);
-    return text === undefined ? next(e) : { text };
   });
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     if (e.props.hasSurvey)
