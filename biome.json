@@ -14,6 +14,7 @@
       "!hooks/register.js",
       "!hooks/cli.js",
       "!hooks/vendor",
+      "!plugins/codex/hooks/cli.js",
       "!.release-please-manifest.json",
       "!CHANGELOG.md"
     ]

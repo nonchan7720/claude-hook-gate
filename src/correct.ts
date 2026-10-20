@@ -4,11 +4,11 @@
 
 import {
   type BrokenRule,
-  feedbackDir,
+  feedbackDirs,
   isRuleActive,
   listRules,
   logError,
-  projectFeedbackDir,
+  projectFeedbackDirs,
   type Rule,
   readCountLine,
   replaceCountLine,
@@ -330,7 +330,7 @@ export function buildContext(proposals: Proposal[], applied: Applied[], lang: La
 
 /** グローバル / プロジェクトの feedback ディレクトリを無加工で読み、isRuleActive が false のものを返す。 */
 async function listInactive(io: Io, active: Rule[]): Promise<Rule[]> {
-  const dirs = [...new Set([feedbackDir(io), projectFeedbackDir(io)])]
+  const dirs = [...new Set([...feedbackDirs(io), ...projectFeedbackDirs(io)])]
   const activeNames = new Set(active.map((r) => r.name))
   const seen = new Set<string>()
   const out: Rule[] = []

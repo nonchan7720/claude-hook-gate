@@ -51,6 +51,14 @@ export interface Io {
   readonly cwd: string
   /** プラグインの同梱ファイルのルート（scripts/dogwood/ などを探す起点）。 */
   readonly pluginRoot: string
+  /** 設定ディレクトリ名の候補（優先順）。Claude Code は ['.claude', '.agents']、Codex は ['.agents', '.claude']。 */
+  readonly configDirNames: readonly string[]
+  /** プロジェクトの設定ディレクトリ（候補のうち最初に存在するもの、無ければ先頭）。状態ファイル（.gate-status）の置き場所。 */
+  readonly projectConfigDir: string
+  /** HOME の設定ディレクトリ（同上）。feedback の状態ファイルの置き場所。 */
+  readonly homeConfigDir: string
+  /** デスクトップ通知の見出しに使うアプリ名。省略時は Claude Code（Codex プラグインは Codex）。 */
+  readonly appName?: string
   readFile(path: string): Promise<string | undefined>
   /** 親ディレクトリも作って書き込む。 */
   writeFile(path: string, text: string): Promise<void>

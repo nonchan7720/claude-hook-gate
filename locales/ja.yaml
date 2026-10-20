@@ -39,6 +39,9 @@ subagentReport:
 autoCount:
   bumped: "[feedback-gate] 違反を検出したため {{rule}} の count を {{from}} → {{to}} に上げました（{{path}}）。同じ違反を繰り返すと強制力（warn → ask/block → deny）が上がります。"
 
+codex:
+  askAsDeny: "[feedback-gate] Codex の PreToolUse には ask が無いので、このルールは呼び出しを拒否しました。上の理由を読んで呼び出しを直してください。同じセッション・同じ対象への同じルールは、次の呼び出しからは warn になります。"
+
 launch:
   checklist: "--- チェック: やること / 背景 / 既存コードの現状 / やらないこと / 完了条件"
   promptTo: "{{agentType}} に送るプロンプト:"
@@ -135,7 +138,7 @@ gate:
   checksGaveUpStderr: "consistency checks が {{max}} 回連続失敗。ループを打ち切ります。手動確認を。"
   checksGaveUp: "[gate] consistency checks が{{max}}回連続で失敗したため打ち切りました。対象ファイルは未検証のまま CHANGED へ戻しました。手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか /clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。"
   checksFailed: "[gate] 検証に失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て修正を継続してください。"
-  ymlTypo: "[gate] .claude/gate.yaml が見つかりませんが .claude/gate.yml があります。拡張子が yaml ではなく yml になっていないか確認してください。"
+  ymlTypo: "[gate] gate.yaml が見つかりませんが {{path}} があります。拡張子が yaml ではなく yml になっていないか確認してください。"
   policyUnevaluated: "=== [gate] ({{label}}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［{{reason}}］ $ {{cmd}} ==="
   policySkipped: "=== [gate] ({{label}}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ {{cmd}} ==="
   notePolicySkipped: "(ポリシー判定で見送り。控えに積んだので後で自動実行)"

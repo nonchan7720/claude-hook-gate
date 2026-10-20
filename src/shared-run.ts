@@ -83,7 +83,7 @@ export function sharedDir(io: Io): Promise<string> {
       const common = (await ask(['--path-format=absolute'])) ?? (await ask([]))
       const anchor = common ? normpath(isAbsolute(common) ? common : join(base, common)) : normpath(base)
       const label = (common && basename(anchor) === '.git' ? basename(dirname(anchor)) : basename(anchor)).replace(/[^A-Za-z0-9._-]/g, '_') || 'project'
-      return join(home, '.claude', '.gate-status', 'shared', `${label}-${hashKey(anchor)}`)
+      return join(io.homeConfigDir, '.gate-status', 'shared', `${label}-${hashKey(anchor)}`)
     })()
     sharedDirCache.set(cacheKey, cached)
   }

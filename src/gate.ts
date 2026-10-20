@@ -100,6 +100,7 @@
 //              名前一覧。実際に実行されるのは checks フェーズで、マッチしたルールが参照した名前だけが動く。
 // consistency_checks: name/dir/run を持つ名前付きチェック定義集（match は持たない）。checks フェーズでしか
 //              実行されない。
+import { findConfigPath, findGateYaml } from './config-dir.ts'
 import { matchPatterns, type PatternPair } from './glob.ts'
 import { type Lang, type Translate, tr } from './i18n.ts'
 import type { Io, ScriptResult } from './io.ts'
@@ -379,9 +380,7 @@ export class Gate {
   readonly stateId: string
   readonly phase: string
   readonly stopHookActive: boolean
-  readonly claudeDir: string
-  readonly action: string
-  readonly gateYml: string
+  action: string
   readonly stateDir: string
   readonly changed: string
   readonly count: string
@@ -427,9 +426,7 @@ export class Gate {
     // 未指定時は checks（この hook の唯一の呼び出し元が長らく Stop だったため）。
     this.phase = (opts.phase || 'checks').trim().toLowerCase()
     this.stopHookActive = opts.stopHookActive === true
-    this.claudeDir = join(this.projectDir, '.claude')
-    this.action = join(this.claudeDir, 'gate.yaml')
-    this.gateYml = join(this.claudeDir, 'gate.yml') // 拡張子 typo 検知用
+    this.action = join(io.projectConfigDir, 'gate.yaml')
     this.stateDir = gateStatusDir(io) // 状態ファイルとログの置き場所（gate.yaml は動かさない）
     this.runningOwner = `${this.stateId}.${Math.random().toString(36).slice(2, 10)}`
     this.changed = join(this.stateDir, `changed_files.${this.stateId}.txt`)
@@ -1073,10 +1070,10 @@ export class Gate {
     return { order, relsByRoot }
   }
 
-  /** root 自身の .claude/gate.yaml を読む。無ければメインの cfg にフォールバックする。 */
+  /** root 自身の gate.yaml を読む。無ければメインの cfg にフォールバックする。 */
   private async loadRootCfg(root: string, mainCfg: GateConfig | null): Promise<GateConfig | null> {
-    const path = join(root, '.claude', 'gate.yaml')
-    return (await this.io.exists(path)) ? await this.loadAction(path) : mainCfg
+    const path = await findGateYaml(this.io, root)
+    return path ? await this.loadAction(path) : mainCfg
   }
 
   async loadAction(path: string): Promise<GateConfig | null> {
@@ -1583,13 +1580,14 @@ export class Gate {
 
   async main(): Promise<number> {
     await this.pruneLogs()
-    if (!(await this.io.exists(this.action)) && (await this.io.exists(this.gateYml))) {
-      this.print({ systemMessage: this.t('gate.ymlTypo') })
-    }
-    if (!(await this.io.exists(this.action))) {
+    const action = await findGateYaml(this.io, this.projectDir)
+    if (!action) {
+      const yml = await findConfigPath(this.io, this.projectDir, 'gate.yml')
+      if (yml) this.print({ systemMessage: this.t('gate.ymlTypo', { path: yml }) })
       await this.cleanup()
       return 0
     }
+    this.action = action
     return this.phase === 'rules' ? this.runRulesPhase() : this.runChecksPhase()
   }
 }

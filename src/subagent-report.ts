@@ -18,11 +18,11 @@ import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, isDict, jqStr } from './pyutil.ts'
+import { gateStatusDir } from './running-registry.ts'
 
 type Report = { agentType?: string; gate?: string; feedback?: string }
 
-const reportPath = (io: Io, sessionId: string, agentId: string): string =>
-  join(io.projectDir || io.cwd, '.claude', '.gate-status', `subagent_report.${sessionId}--${agentId}.json`)
+const reportPath = (io: Io, sessionId: string, agentId: string): string => join(gateStatusDir(io), `subagent_report.${sessionId}--${agentId}.json`)
 
 const blockReason = (stdout: string): string => {
   for (const line of stdout.split('\n')) {

@@ -5,7 +5,7 @@
 # decision: block / additionalContext）が classic と同一なので、ここから hooks/cli.js（src/ の関数）を呼んで同じ処理をさせる。
 #
 # mod の classic.* が走る環境では二重に動かさない: mod は classic.* のどれかが走ると
-# <feedbackDir>/.classic_seen/<session_id> を書く（feedbackDir は CLAUDE_FEEDBACK_DIR か ~/.claude/feedback）。
+# <feedbackDir>/.classic_seen/<session_id> を書く（feedbackDir は CLAUDE_FEEDBACK_DIR か ~/{.claude,.agents}/feedback）。
 # そのマーカーがあれば何もせず exit 0。
 # cli.js には node（無ければ bun）が要る。どちらも無ければ何もせず exit 0。
 set -uo pipefail
@@ -21,8 +21,16 @@ if command -v jq >/dev/null 2>&1; then
 else
   SESSION_ID="$(printf '%s' "$PAYLOAD" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 | tr -cd 'A-Za-z0-9_-')"
 fi
-FEEDBACK_DIR="${CLAUDE_FEEDBACK_DIR:-${HOME:-~}/.claude/feedback}"
-[ -n "$SESSION_ID" ] && [ -e "$FEEDBACK_DIR/.classic_seen/$SESSION_ID" ] && exit 0
+if [ -n "$SESSION_ID" ]; then
+  if [ -n "${CLAUDE_FEEDBACK_DIR:-}" ]; then
+    [ -e "$CLAUDE_FEEDBACK_DIR/.classic_seen/$SESSION_ID" ] && exit 0
+  else
+    # mod は ~/.claude と ~/.agents のうち存在する方（.claude 優先）にマーカーを書く（src/config-dir.ts）。
+    for d in .claude .agents; do
+      [ -e "${HOME:-~}/$d/feedback/.classic_seen/$SESSION_ID" ] && exit 0
+    done
+  fi
+fi
 
 RUNTIME="$(command -v node 2>/dev/null || command -v bun 2>/dev/null || true)"
 [ -n "$RUNTIME" ] || exit 0

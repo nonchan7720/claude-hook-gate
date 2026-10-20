@@ -1,9 +1,11 @@
 // UserPromptSubmit で毎回注入するルールファイルの読み込み。
+import { configPaths } from './config-dir.ts'
 import type { Lang } from './i18n.ts'
 import type { Io } from './io.ts'
 import { join } from './path.ts'
 
-export const DEFAULT_RULES_FILE = '~/.claude/feedback-gate/feedback_rules.md'
+/** rulesFile 未設定のときに探す場所: ~/<設定ディレクトリ>/feedback-gate/feedback_rules.md。 */
+export const DEFAULT_RULES_FILE = '~/{.claude,.agents}/feedback-gate/feedback_rules.md'
 
 /** プラグイン同梱のルールファイル名。英語のときは feedback_rules.en.md。 */
 export const bundledRulesName = (lang: Lang): string => (lang === 'en' ? 'feedback_rules.en.md' : 'feedback_rules.md')
@@ -14,10 +16,11 @@ export const bundledRulesName = (lang: Lang): string => (lang === 'en' ? 'feedba
  */
 export async function loadRules(io: Io, rulesFile: unknown): Promise<string> {
   const home = io.env.HOME
-  const configured = typeof rulesFile === 'string' && rulesFile !== '' ? rulesFile : DEFAULT_RULES_FILE
-  const custom = configured.startsWith('~') ? (home ? `${home}${configured.slice(1)}` : undefined) : configured
+  const expand = (p: string): string | undefined => (p.startsWith('~') ? (home ? `${home}${p.slice(1)}` : undefined) : p)
+  const configured =
+    typeof rulesFile === 'string' && rulesFile !== '' ? [expand(rulesFile)] : home ? configPaths(io, home, 'feedback-gate', 'feedback_rules.md') : []
   const bundled = join(io.pluginRoot, 'rules', bundledRulesName(io.lang))
-  for (const path of [custom, bundled]) {
+  for (const path of [...configured, bundled]) {
     if (path && (await io.exists(path))) return ((await io.readFile(path)) ?? '').trim()
   }
   return ''

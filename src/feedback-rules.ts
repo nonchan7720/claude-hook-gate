@@ -83,6 +83,8 @@
 //   - 評価中に例外になった要素は、その要素だけを飛ばす
 // いずれも、ファイルと理由を ~/.claude/feedback/.errors.jsonl に残し（BrokenRule）、UserPromptSubmit の注入と
 // /correct で知らせる。
+
+import { configPaths } from './config-dir.ts'
 import { asList, compileGlobs, expandBraces, globExists } from './glob.ts'
 import { type Lang, tr } from './i18n.ts'
 import type { Io } from './io.ts'
@@ -90,6 +92,7 @@ import { parseYaml } from './load-yaml.ts'
 import { basename, dirname, isAbsolute, join, splitext } from './path.ts'
 import { type Dict, isDict, pyRegExp, toCount, truthy } from './pyutil.ts'
 import { splitRoot } from './roots.ts'
+import { gateStatusDir } from './running-registry.ts'
 
 export type Rule = {
   name: string
@@ -117,17 +120,27 @@ export type Violation = {
   detail: string
 }
 
-/** ~/.claude/feedback を返す。CLAUDE_FEEDBACK_DIR でテスト時に差し替え可能。 */
+/** グローバルの feedback の状態ファイル（.violations.jsonl、.ask_state など）の置き場所: ~/<設定ディレクトリ>/feedback。CLAUDE_FEEDBACK_DIR で差し替え可能。 */
 export function feedbackDir(io: Io): string {
   const override = io.env.CLAUDE_FEEDBACK_DIR
   if (override) return override
-  return join(io.env.HOME || '~', '.claude', 'feedback')
+  return join(io.homeConfigDir, 'feedback')
 }
 
-/** プロジェクト固有の feedback ディレクトリ（<projectDir>/.claude/feedback）を返す。 */
-export function projectFeedbackDir(io: Io, projectDir?: string): string {
-  return join(projectDir || io.projectDir || io.cwd, '.claude', 'feedback')
+/** グローバルのルールを読むディレクトリ（優先順）。CLAUDE_FEEDBACK_DIR があればそれだけ。 */
+export function feedbackDirs(io: Io): string[] {
+  const override = io.env.CLAUDE_FEEDBACK_DIR
+  if (override) return [override]
+  return configPaths(io, io.env.HOME || '~', 'feedback')
 }
+
+/** プロジェクトの feedback の置き場所（<projectDir>/<設定ディレクトリ>/feedback）。 */
+export function projectFeedbackDir(io: Io, projectDir?: string): string {
+  return projectDir ? join(projectDir, io.configDirNames[0] ?? '.claude', 'feedback') : join(io.projectConfigDir, 'feedback')
+}
+
+/** プロジェクトのルールを読むディレクトリ（優先順）。 */
+export const projectFeedbackDirs = (io: Io, projectDir?: string): string[] => configPaths(io, projectDir || io.projectDir || io.cwd, 'feedback')
 
 export const violationsLogPath = (io: Io): string => join(feedbackDir(io), '.violations.jsonl')
 
@@ -281,6 +294,20 @@ export async function loadBodyIntro(io: Io, path: string): Promise<string> {
 }
 
 /** 1つのディレクトリ直下の *.md を名前順に走査し、frontmatter を持つものだけ返す。読めないファイルは broken に入れて飛ばす。 */
+/** 候補ディレクトリを優先順に読み、同名のルールは先の候補を採る（.claude と .agents が同じ実体を指すときに二重に読まないため）。 */
+async function listRulesInAll(io: Io, dirs: readonly string[], broken: BrokenRule[]): Promise<Rule[]> {
+  const out: Rule[] = []
+  const seen = new Set<string>()
+  for (const dir of dirs) {
+    for (const rule of await listRulesIn(io, dir, broken)) {
+      if (seen.has(rule.name)) continue
+      seen.add(rule.name)
+      out.push(rule)
+    }
+  }
+  return out
+}
+
 async function listRulesIn(io: Io, d: string, broken: BrokenRule[]): Promise<Rule[]> {
   const rules: Rule[] = []
   const names = (await io.list(d)).map((e) => e.name).sort()
@@ -323,16 +350,13 @@ export async function scanRules(io: Io, feedbackDirPath?: string): Promise<{ rul
     const rules = await listRulesIn(io, feedbackDirPath, broken)
     return { rules, broken: [...broken, ...problemsOf(rules)] }
   }
-  const globalDir = feedbackDir(io)
-  const projectDir = projectFeedbackDir(io)
-  const globalRules = await listRulesIn(io, globalDir, broken)
-  // 両方が同じパスを指す場合は一度しか読まない
-  let merged = globalRules
-  if (projectDir !== globalDir) {
-    const projectRules = await listRulesIn(io, projectDir, broken)
-    const overridden = new Set(projectRules.map((r) => r.name))
-    merged = [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules]
-  }
+  const globalDirs = feedbackDirs(io)
+  // グローバルと同じディレクトリをプロジェクト側でも読まない（CLAUDE_FEEDBACK_DIR をプロジェクトに向けるテスト）。
+  const projectDirs = projectFeedbackDirs(io).filter((d) => !globalDirs.includes(d))
+  const globalRules = await listRulesInAll(io, globalDirs, broken)
+  const projectRules = await listRulesInAll(io, projectDirs, broken)
+  const overridden = new Set(projectRules.map((r) => r.name))
+  const merged = [...globalRules.filter((r) => !overridden.has(r.name)), ...projectRules]
   const active: Rule[] = []
   for (const r of merged) if (await isRuleActive(io, r)) active.push(r)
   return { rules: active, broken: [...broken, ...problemsOf(active)] }
@@ -766,13 +790,12 @@ async function gitFallbackFiles(io: Io, cwd: string): Promise<string[]> {
  * 全部読んで順序を保ってマージ・重複排除する。メモが1つも無いときだけ projectDir で git フォールバックする。
  */
 export async function getChangedFiles(io: Io, projectDir: string, sessionId: string, agentId?: string | null): Promise<string[]> {
-  const claudeDir = join(projectDir, '.claude')
-  const stateDir = join(claudeDir, '.gate-status')
+  const stateDir = gateStatusDir(io)
 
   if (agentId) {
     const lines = await readLines(io, join(stateDir, `changed_files.${sessionId}--${agentId}.txt`))
     if (lines !== undefined) return lines
-    const worktree = join(claudeDir, 'worktrees', `agent-${agentId}`)
+    const worktree = join(projectDir, '.claude', 'worktrees', `agent-${agentId}`)
     if ((await io.stat(worktree))?.kind === 'dir') {
       return (await gitFallbackFiles(io, worktree)).map((f) => join(worktree, f))
     }
