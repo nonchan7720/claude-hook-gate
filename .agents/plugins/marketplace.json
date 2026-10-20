@@ -1,7 +1,7 @@
 {
-  "name": "claude-hook-gate",
+  "name": "hook-gate",
   "interface": {
-    "displayName": "claude-hook-gate"
+    "displayName": "hook-gate"
   },
   "plugins": [
     {

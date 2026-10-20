@@ -16,9 +16,9 @@ The checking logic (`src/hooks.ts` and the modules it calls) is shared with the 
 codex plugin marketplace add nonchan7720/claude-hook-gate
 ```
 
-This registers the repository as the `claude-hook-gate` marketplace (its catalog is `.agents/plugins/marketplace.json`, which points at this directory). Then install `feedback-gate` from the plugin list in Codex (`/plugins`), and when Codex reports "Hooks need review", trust the hooks of the plugin (`/hooks`); plugin hooks do not run until they are trusted.
+This registers the repository as the `hook-gate` marketplace (its catalog is `.agents/plugins/marketplace.json`, which points at this directory). Then install `feedback-gate` from the plugin list in Codex (`/plugins`), and when Codex reports "Hooks need review", trust the hooks of the plugin (`/hooks`); plugin hooks do not run until they are trusted.
 
-Codex loads the hooks of an installed plugin from `hooks/hooks.json`. If your Codex build does not run plugin-bundled hooks yet (see [openai/codex#16430](https://github.com/openai/codex/issues/16430)), point your own `~/.codex/hooks.json` (or `.codex/hooks.json` in the project) at the installed copy instead. The hook commands take the plugin root from `CLAUDE_PLUGIN_ROOT` (also `PLUGIN_ROOT`), and `scripts/hook.sh` finds it from its own location when neither is set, so the same `hooks/hooks.json` works with the variable replaced by the path of the plugin, e.g. `~/.codex/plugins/cache/claude-hook-gate/feedback-gate/<version>` or a checkout of this repository:
+Codex loads the hooks of an installed plugin from `hooks/hooks.json`. If your Codex build does not run plugin-bundled hooks yet (see [openai/codex#16430](https://github.com/openai/codex/issues/16430)), point your own `~/.codex/hooks.json` (or `.codex/hooks.json` in the project) at the installed copy instead. The hook commands take the plugin root from `CLAUDE_PLUGIN_ROOT` (also `PLUGIN_ROOT`), and `scripts/hook.sh` finds it from its own location when neither is set, so the same `hooks/hooks.json` works with the variable replaced by the path of the plugin, e.g. `~/.codex/plugins/cache/hook-gate/feedback-gate/<version>` or a checkout of this repository:
 
 ```json
 {

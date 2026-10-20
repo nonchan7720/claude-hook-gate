@@ -16,9 +16,9 @@
 codex plugin marketplace add nonchan7720/claude-hook-gate
 ```
 
-これでこのリポジトリが `claude-hook-gate` マーケットプレイスとして登録されます（カタログは `.agents/plugins/marketplace.json` で、このディレクトリを指しています）。続けて Codex のプラグイン一覧（`/plugins`）から `feedback-gate` をインストールし、起動時に「Hooks need review」と出たらプラグインのフックを信頼してください（`/hooks`）。信頼するまでプラグインのフックは動きません。
+これでこのリポジトリが `hook-gate` マーケットプレイスとして登録されます（カタログは `.agents/plugins/marketplace.json` で、このディレクトリを指しています）。続けて Codex のプラグイン一覧（`/plugins`）から `feedback-gate` をインストールし、起動時に「Hooks need review」と出たらプラグインのフックを信頼してください（`/hooks`）。信頼するまでプラグインのフックは動きません。
 
-Codex はインストールしたプラグインの `hooks/hooks.json` を読みます。お使いの Codex がプラグイン同梱のフックをまだ走らせない場合（[openai/codex#16430](https://github.com/openai/codex/issues/16430)）は、代わりに `~/.codex/hooks.json`（またはプロジェクトの `.codex/hooks.json`）からインストール先を直接指してください。フックのコマンドはプラグインのルートを `CLAUDE_PLUGIN_ROOT`（`PLUGIN_ROOT` も可）から取り、どちらも無ければ `scripts/hook.sh` が自分の場所から求めるので、`hooks/hooks.json` の変数をプラグインのパス（`~/.codex/plugins/cache/claude-hook-gate/feedback-gate/<version>` や、このリポジトリのチェックアウト）に置き換えればそのまま使えます。
+Codex はインストールしたプラグインの `hooks/hooks.json` を読みます。お使いの Codex がプラグイン同梱のフックをまだ走らせない場合（[openai/codex#16430](https://github.com/openai/codex/issues/16430)）は、代わりに `~/.codex/hooks.json`（またはプロジェクトの `.codex/hooks.json`）からインストール先を直接指してください。フックのコマンドはプラグインのルートを `CLAUDE_PLUGIN_ROOT`（`PLUGIN_ROOT` も可）から取り、どちらも無ければ `scripts/hook.sh` が自分の場所から求めるので、`hooks/hooks.json` の変数をプラグインのパス（`~/.codex/plugins/cache/hook-gate/feedback-gate/<version>` や、このリポジトリのチェックアウト）に置き換えればそのまま使えます。
 
 ```json
 {
