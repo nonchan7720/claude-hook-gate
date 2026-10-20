@@ -9,7 +9,12 @@
   "homepage": "https://github.com/nonchan7720/claude-hook-gate",
   "repository": "https://github.com/nonchan7720/claude-hook-gate",
   "license": "MIT",
-  "keywords": ["codex", "hooks", "feedback", "quality-gate"],
+  "keywords": [
+    "codex",
+    "hooks",
+    "feedback",
+    "quality-gate"
+  ],
   "extensions": {
     "com.openai": {
       "hooks": "./plugins/codex/hooks/hooks.json"
