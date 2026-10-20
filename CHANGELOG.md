@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.5...v0.8.0) (2026-10-20)
+
+
+### Features
+
+* run the classic hooks as settings hooks where an organization's guard skips classic.* ([#58](https://github.com/nonchan7720/claude-hook-gate/issues/58)) ([f4477a9](https://github.com/nonchan7720/claude-hook-gate/commit/f4477a92acf80ebc3cca4c557bbaa10220beae18))
+
+
+### Bug Fixes
+
+* skip changed files that no longer exist in stop_check ([#54](https://github.com/nonchan7720/claude-hook-gate/issues/54)) ([5f157f8](https://github.com/nonchan7720/claude-hook-gate/commit/5f157f823d77b3bfafdb2b149d6d396e260300af))
+
 ## [0.7.5](https://github.com/nonchan7720/claude-hook-gate/compare/v0.7.4...v0.7.5) (2026-10-17)
 
 
