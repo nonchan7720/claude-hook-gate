@@ -1,8 +1,9 @@
-// settings hook の CLI（src/cli.ts）: `bun src/cli.ts <Event>` を子プロセスで起動し、classic の規約（stdin の JSON → stdout の JSON / stderr / 終了コード）を確かめる。
+// settings hook の CLI（Go 製の feedback-gate バイナリ、cmd/feedback-gate）: `feedback-gate claude <Event>` を子プロセスで起動し、classic の規約（stdin の JSON → stdout の JSON / stderr / 終了コード）を確かめる。
 import { describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { exists, writeGateYaml } from './helpers/gate.ts'
+import { feedbackGateBin } from './helpers/go-binary.ts'
 import { MISSING_DOGWOOD_BIN, REPO_ROOT, rmTree, tmpDir } from './helpers/node-io.ts'
 
 type Out = Record<string, unknown>
@@ -29,7 +30,7 @@ async function withEnv<T>(body: (env: Env) => Promise<T>): Promise<T> {
 /** CLI を子プロセスで走らせる。session_id と cwd は既定で補う。extra はプラグイン設定などの環境変数。 */
 async function hook(env: Env, event: string, payload: Out, extra: Record<string, string> = {}): Promise<Result> {
   const { LANG: _l, LC_ALL: _a, LC_MESSAGES: _m, FEEDBACK_GATE_LANG: _f, CLAUDE_AGENT_ID: _g, ...base } = process.env as Record<string, string>
-  const proc = Bun.spawn([process.execPath, path.join(REPO_ROOT, 'src', 'cli.ts'), event], {
+  const proc = Bun.spawn([feedbackGateBin(), 'claude', event], {
     cwd: env.proj,
     env: {
       ...base,
@@ -207,7 +208,7 @@ describe('SessionStart / Notification', () => {
   test('an unknown event is a usage error; broken stdin still exits 0', async () => {
     await withEnv(async (env) => {
       expect((await hook(env, 'Bogus', {})).exitCode).toBe(1)
-      const proc = Bun.spawn([process.execPath, path.join(REPO_ROOT, 'src', 'cli.ts'), 'Stop'], {
+      const proc = Bun.spawn([feedbackGateBin(), 'claude', 'Stop'], {
         cwd: env.proj,
         env: { ...process.env, HOME: env.home, CLAUDE_FEEDBACK_DIR: env.feedback, CLAUDE_PROJECT_DIR: env.proj, CLAUDE_PLUGIN_ROOT: REPO_ROOT },
         stdin: new TextEncoder().encode('not json'),
