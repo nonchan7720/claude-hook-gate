@@ -12,8 +12,10 @@ import (
 	"github.com/nonchan7720/claude-hook-gate/internal/hookgate"
 )
 
-// version is set with -ldflags "-X main.version=...".
-var version = "dev"
+// version is the plugin version (release-please rewrites the line marked x-release-please-version together with
+// .claude-plugin/plugin.json); GoReleaser overrides it with -ldflags "-X main.version=<tag>" so a release build and the
+// manifest always agree.
+var version = "0.9.0" // x-release-please-version
 
 func main() {
 	os.Exit(run(os.Args[1:]))
