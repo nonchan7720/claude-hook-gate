@@ -10,9 +10,9 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 
 ## フック
 
-フックは `src/register.ts` で登録され（CI が `hooks/register.js` にバンドルし、それを Claude Code が読み込みます）、`src/` の TypeScript モジュールを呼びます。組織のガードが mod のフックを飛ばす環境のために、同じモジュールを `hooks/hooks.json` の command hook（`src/cli.ts` を `hooks/cli.js` にバンドル）でも動かします。[組織管理の環境向けの settings hook](#組織管理の環境向けの-settings-hook)を参照。
+フックは `src/register.ts` で登録され（CI が `hooks/register.js` にバンドルし、それを Claude Code が読み込みます）、`src/` の TypeScript モジュールを呼びます。組織のガードが mod のフックを飛ばす環境のために、同じ検査を `hooks/hooks.json` の command hook（Go 製のバイナリ `feedback-gate`。後述）でも動かします。[組織管理の環境向けの settings hook](#組織管理の環境向けの-settings-hook)を参照。
 
-| イベント | モジュール | 役割 | command hook |
+| イベント | モジュール | 役割 | settings hook |
 | --- | --- | --- | --- |
 | SessionStart | `src/reset-gate.ts` | `startup` / `clear` のときだけ自セッションのゲート状態を消す。resume / compact では消さない。 | 同じ（下記） |
 | UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | ルールファイル（`rulesFile` のファイルがあればそれ、無ければ同梱の `rules/feedback_rules.md`。言語が英語なら `rules/feedback_rules.en.md`）と確定済みフィードバックルール（`count >= 3`）をコンテキストに追加する。 | 同じ（下記） |
@@ -30,10 +30,11 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 
 Claude Code を組織が管理している環境（Team / Enterprise ログイン、または managed settings）では、組み込みのガード `cc-plugin-sec-default` が最初に走り、`classic.*` イベントをインストールしたプラグインすべてに対して飛ばします（`/plugin` に「Its hooks on classic.SessionStart, ... do not run here」と出ます）。そこでは上の mod のフックが一つも走りません。`hooks/hooks.json` の `command` hook（settings hook）はガードに飛ばされず、同じ classic イベントを、同じ stdin の JSON と同じ戻り値の規約（exit 2 で block、`permissionDecision`、`decision: block`、`additionalContext`）で受け取ります。そこで `hooks/hooks.json` に、SessionStart・UserPromptSubmit・PreToolUse（`Bash|Edit|Write|MultiEdit|Agent|SendMessage`）・PostToolUse（`Bash|Edit|Write|MultiEdit|Agent|Task`）・Notification・Stop・SubagentStop の command hook を登録しています。上の表の各行は、command hook 経由でも同じ挙動です。
 
-- **動き方。** 各 hook は `bash "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh" <Event>` で、`scripts/hook.sh` が `node`（無ければ `bun`）で `hooks/cli.js <Event>` を実行します。`hooks/cli.js` は `src/cli.ts` から作るもので、stdin の classic の JSON を読み、mod のフックと同じ `src/` の関数（`src/hooks.ts` で共有）を呼び、classic の command hook と同じ形で結果を出力します。PostToolUse・Stop・SubagentStop は gate のコマンドが長くなりうるので `timeout` を 600 秒にしています。
-- **`node` か `bun` が必要です。** どちらも `PATH` に無ければ、command hook は何もしません（exit 0）。その場合に動くのは mod のフックだけなので、ガードに飛ばされる環境では何も動きません。
+- **動き方。** 各 hook は `bash "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh" <Event>` で、`scripts/hook.sh` が `feedback-gate claude <Event>` を実行します。これは、このリポジトリの GitHub Releases で配布している Go 製の単一バイナリ（`cmd/feedback-gate`。検査は `internal/hookgate`）です。stdin の classic の JSON を読み、mod のフックと同じ検査を行い、classic の command hook と同じ形で結果を出力します。PostToolUse・Stop・SubagentStop は gate のコマンドが長くなりうるので `timeout` を 600 秒にしています。
+- **バイナリの入手先。** `scripts/hook.sh` は次の順に探します。まず `FEEDBACK_GATE_BIN`（実行できるファイルのパス。開発とテスト用）、次に `${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate` です。`<version>` は `.claude-plugin/plugin.json` の `version` です。どちらにも無ければ、`https://github.com/nonchan7720/claude-hook-gate/releases/download/v<version>/feedback-gate_<os>_<arch>.tar.gz`（`os` は `linux` / `darwin`、`arch` は `amd64` / `arm64`）を `checksums.txt` と一緒にダウンロードし、SHA-256（`sha256sum` か `shasum`）を照合し、展開して、バイナリをキャッシュへ原子的に移します（キャッシュにある古いバージョンは削除します）。`FEEDBACK_GATE_RELEASE_BASE_URL` で `https://github.com/nonchan7720/claude-hook-gate/releases/download` の部分を差し替えられます（`file://` のディレクトリならオフラインで動きます）。バイナリは常にインストール済みのプラグインのバージョンと一致します。ダウンロードは、インストールや更新のあとの最初のフック（SessionStart）で、バージョンごとに 1 回だけ行います。
+- **初回は `curl` か `wget` が必要です。** バイナリがまだキャッシュに無く、ダウンロードもできない場合（`curl` も `wget` も無い、ネットワークが無い、チェックサムの不一致、未対応の OS や CPU）、command hook は何もしません（exit 0）。その場合に動くのは mod のフックだけなので、ガードに飛ばされる環境では何も動きません。バイナリがキャッシュに入れば、ほかに必要なものはありません。
 - **二重に動かさない。** `classic.*` の mod のフックは、走るたびにマーカーファイル `~/{.claude,.agents}/feedback/.classic_seen/<session>` を書きます（`CLAUDE_FEEDBACK_DIR` を尊重。`classic.Notification` では毎回書き直し、24 時間より古いものは掃除されます）。`scripts/hook.sh` はそのセッションのマーカーがあれば exit 0 で黙るので、mod のフックが走る環境では command hook は何もしません。ガードに飛ばされる環境ではマーカーが書かれず、command hook が処理します。（同じイベントの mod のフックと command hook は同時に始まるので、セッションの最初のイベントである SessionStart は両方が走りうる場合があります。リセットは何度走っても同じ結果になり、以降はマーカーがあります。）
-- **プラグイン設定。** `language`・`agentLaunchGuard`・`autoCount`・`rulesFile` は、環境変数 `CLAUDE_PLUGIN_OPTION_language`・`CLAUDE_PLUGIN_OPTION_agentLaunchGuard`（`true` / `false`）・`CLAUDE_PLUGIN_OPTION_autoCount`・`CLAUDE_PLUGIN_OPTION_rulesFile` として command hook に渡され、`hooks/cli.js` が読みます。
+- **プラグイン設定。** `language`・`agentLaunchGuard`・`autoCount`・`rulesFile` は、環境変数 `CLAUDE_PLUGIN_OPTION_language`・`CLAUDE_PLUGIN_OPTION_agentLaunchGuard`（`true` / `false`）・`CLAUDE_PLUGIN_OPTION_autoCount`・`CLAUDE_PLUGIN_OPTION_rulesFile` として command hook に渡され、`feedback-gate` が読みます。
 - **違い。** 評価中にステータス行に出す表示（`$.ui.status`）は mod の機能で、command hook は出しません。プロンプトの上の帯（実行中の gate コマンド）は mod の `ui.render` が `.claude/.gate-status/running/` の同じファイルから描き、command hook もそのファイルを従来どおり書きます。描き直しは mod が次に描画するときです。
 
 ### Bash で書いたファイル
@@ -146,13 +147,13 @@ flowchart LR
 codex plugin marketplace add nonchan7720/claude-hook-gate
 ```
 
-続けて `/plugins` から `feedback-gate` をインストールし、`/hooks` でそのフックを信頼してください。プラグインのルートはこのリポジトリです（ルートの Codex 用マニフェスト `.codex-plugin/plugin.json` と `plugin.json` が `plugins/codex/hooks/hooks.json` を指します）。そのため `rules/`、`scripts/dogwood/`、`hooks/vendor/` はコピーせず共有します。検査のロジックは共有で、ホストごとの違い（Codex は `apply_patch` でファイルを編集する、`Notification` の代わりに `PermissionRequest` がある、`ask` が無い）は `src/host.ts` の `Host` インターフェース（`src/host-claude.ts`、`src/host-codex.ts`）の後ろに閉じ込めています。違いと、プラグイン設定の代わりになる環境変数は[プラグインの README](plugins/codex/README_ja.md) を参照。
+続けて `/plugins` から `feedback-gate` をインストールし、`/hooks` でそのフックを信頼してください。プラグインのルートはこのリポジトリです（ルートの Codex 用マニフェスト `.codex-plugin/plugin.json` と `plugin.json` が `plugins/codex/hooks/hooks.json` を指します）。そのため `rules/`、`scripts/dogwood/`、`scripts/install-binary.sh`（バイナリのダウンローダ）はコピーせず共有します。検査のロジックは共有で、ホストごとの違い（Codex は `apply_patch` でファイルを編集する、`Notification` の代わりに `PermissionRequest` がある、`ask` が無い）は Go バイナリの `Host` インターフェース（`internal/hookgate/host.go` の `Host`。`feedback-gate claude` / `feedback-gate codex` に対応する実装が `host_claude.go` と `host_codex.go`、パッチの分割は `apply_patch.go`）の後ろに閉じ込めています。TypeScript の mod（`src/register.ts`）は Claude Code 専用で、変わりません。違いと、プラグイン設定の代わりになる環境変数は[プラグインの README](plugins/codex/README_ja.md) を参照。
 
 ## 前提
 
 mod のフックにはインストールするものはありません。フックは素の TypeScript で、1 つの JavaScript にバンドルして Claude Code が直接実行します（Python・bash・jq は不要）。
 
-- `node`（または `bun`）が `PATH` に必要（任意）: settings hook（`hooks/hooks.json`）だけが必要とします。`hooks/cli.js` を実行し、`bash` を使います。無ければ何もしません。`jq` は必須ではありません（あれば使います）。
+- `curl` または `wget` と `bash`（任意）: settings hook（`hooks/hooks.json`）だけが、プラグインのバージョンごとに 1 回、`feedback-gate` バイナリをダウンロードするために必要とします（`tar` と `sha256sum` / `shasum` も使います）。無く、かつバイナリがキャッシュに無ければ、settings hook は何もしません。`jq` は必須ではありません（あれば使います）。
 
 - `terminal-notifier`（任意、macOS）: デスクトップ通知にだけ必要です。
 - `dogwood`（任意。AWS のツールで、ソースは <https://github.com/dogwood-policy/dogwood>）。`cargo install --git https://github.com/dogwood-policy/dogwood amzn-dogwood-cli` でビルド・インストールできます（crate 名は `amzn-dogwood-cli`、バイナリ名は `dogwood`）。`{.claude,.agents}/gate.yaml` の各コマンドを今実行するか後回しにするかの判定に使います。`DOGWOOD_BIN`、`PATH`、`~/.cargo/bin/dogwood`、`~/.local/share/mise/shims/dogwood` の順に探します。見つからない場合、同梱の既定ポリシーが適用されるコマンドは毎回実行され、`policy:` を指定したコマンドは実行されずに後回しになります。
@@ -232,30 +233,39 @@ checks フェーズ（Stop / SubagentStop）で 1 件以上のコマンドが実
   - 設定ファイル、`CLAUDE.md`、ビルドや起動のファイル、フックの設定は書きません。
 - **権限の判定**（PreToolUse）: 返すのは `deny` か `ask` だけで、`allow` は返しません。呼び出しを厳しくすることはあっても、あなた自身の権限確認を飛ばすことはありません。判定するのは、Bash / Edit / Write / MultiEdit でフィードバックルールに一致したとき（ルールの `count` / `severity` により `deny` か `ask`）と、`agentLaunchGuard` が有効なときの `Agent` / `SendMessage`（全文を見せて `ask`）だけです。それ以外はイベントをそのまま次へ渡します。権限モード、設定、エージェント、Remote Control は変えません。
 - **追加するコンテキスト**: UserPromptSubmit で、ルールファイルと確定したフィードバックルール（`count >= 3`）をコンテキストに加えます。PostToolUse・Stop・SubagentStop では、gate の結果とルール違反を Claude に返します（フィードバックかブロックの理由として）。PostToolUse(Agent) では、終わったサブエージェントの結果を呼び出し元のコンテキストに加えます。
-- **settings hook**: `hooks/hooks.json` はイベントごとに `command` hook を登録しており、`scripts/hook.sh` を経由して、イベントの JSON を stdin で渡した `node hooks/cli.js <Event>`（無ければ `bun`）を実行します。mod のフックと同じ検査を行い、同じもの（deny / ask、block、追加する context）を返すので、上の各点はこちらにも当てはまります。セッションの mod のマーカーがあるとき、または `node` も `bun` も無いときは、何もせずに終わります。プラグイン設定は環境変数 `CLAUDE_PLUGIN_OPTION_*` から読みます。
+- **settings hook**: `hooks/hooks.json` はイベントごとに `command` hook を登録しており、`scripts/hook.sh` を経由して、イベントの JSON を stdin で渡した `feedback-gate claude <Event>`（Go 製のバイナリ）を実行します。mod のフックと同じ検査を行い、同じもの（deny / ask、block、追加する context）を返すので、上の各点はこちらにも当てはまります。セッションの mod のマーカーがあるとき、またはバイナリがキャッシュにも無くダウンロードもできないときは、何もせずに終わります。プラグイン設定は環境変数 `CLAUDE_PLUGIN_OPTION_*` から読みます。
 - **コマンド**: セッション開始時に `/correct` を登録し、`command.run` のフックはこのコマンドにだけ応答します。
-- **同梱ファイル**: `hooks/register.js` と `hooks/cli.js` は `src/` から `scripts/build.ts` で作るもので、minify していません。`hooks/vendor/yaml.js` と `hooks/vendor/i18next.js` は npm パッケージの [`yaml`](https://www.npmjs.com/package/yaml) と [`i18next`](https://www.npmjs.com/package/i18next)（`package.json` / `bun.lock` で固定した版）で、ファイルを小さくするためだけに minify しています。検査で報告される getter、`Object.defineProperty`、Promise の判定（`typeof x.then === "function"`）は、この 2 つのライブラリ側のコードです（yaml のドキュメントのクラス、i18next の非同期読み込み）。プラグイン自身のコードは `Proxy`、`eval`、`new Function` を使っていません。
+- **同梱ファイル**: `hooks/register.js` は `src/` から `scripts/build.ts` で作るもので、minify していません。`hooks/vendor/yaml.js` と `hooks/vendor/i18next.js` は npm パッケージの [`yaml`](https://www.npmjs.com/package/yaml) と [`i18next`](https://www.npmjs.com/package/i18next)（`package.json` / `bun.lock` で固定した版）で、ファイルを小さくするためだけに minify しています。検査で報告される getter、`Object.defineProperty`、Promise の判定（`typeof x.then === "function"`）は、この 2 つのライブラリ側のコードです（yaml のドキュメントのクラス、i18next の非同期読み込み）。プラグイン自身のコードは `Proxy`、`eval`、`new Function` を使っていません。
 
 ## 開発
 
-[Bun](https://bun.sh) が必要です。フックのモジュールは Claude Code の中で動き、相対 import と `claude-code` しか解決できないため、`src/` のソース（と `yaml`・`i18next` パッケージ、文字列として取り込む `locales/*.yaml`）を `hooks/register.js` にバンドルします。`yaml` と `i18next` は minify して `hooks/vendor/*.js` に切り出し、バンドルから相対パスで import します。Claude のプラグインディレクトリの「1 ファイル 256 KiB 未満」という制限に余裕を持って収めつつ、プラグイン自身のコードは読める形で残すためです。`hooks/hooks.json` はこのバンドルを指します。ファイルやプロセスへのアクセスはすべてエンジンの `$` API（`$.fs`、`$.process`、`$.env`、`$.session`）を、`src/io.ts` の `Io` インターフェース越しに使います。テストは同じコードを Node の `fs` / `child_process` の上で動かします。
+[Bun](https://bun.sh) と [Go](https://go.dev)（1.24 以上）が必要です。[mise](https://mise.jdx.dev/) を使うなら、`mise install` で `mise.toml` に書いた道具（bun、node、go、golangci-lint、goreleaser）がすべて入り、`mise run lint|fmt|test|build` が入口になります（下記）。フックのモジュールは Claude Code の中で動き、相対 import と `claude-code` しか解決できないため、`src/` のソース（と `yaml`・`i18next` パッケージ、文字列として取り込む `locales/*.yaml`）を `hooks/register.js` にバンドルします。`yaml` と `i18next` は minify して `hooks/vendor/*.js` に切り出し、バンドルから相対パスで import します。Claude のプラグインディレクトリの「1 ファイル 256 KiB 未満」という制限に余裕を持って収めつつ、プラグイン自身のコードは読める形で残すためです。`hooks/hooks.json` はこのバンドルを指します。ファイルやプロセスへのアクセスはすべてエンジンの `$` API（`$.fs`、`$.process`、`$.env`、`$.session`）を、`src/io.ts` の `Io` インターフェース越しに使います。テストは同じコードを Node の `fs` / `child_process` の上で動かします。
 
-コードは、検査が「それを動かすホスト」に依存しないように層を分けています。中核（`src/hooks.ts` とそこから呼ぶモジュール）は classic コマンド hook の JSON を入力に取り、`Outcome`（`src/outcome.ts`）を返します。mod（`src/register.ts`）と command hook の CLI はこれを呼びます。command hook の CLI は `src/host.ts` の `cliMain(host)` に `Host`（`appName`、`events`、環境変数からの `options`、ホストの JSON → 中核のイベントと payload の `normalize`、中核の `Outcome` → ホストの出力の `render`）を渡したもので、Claude Code 向けが `src/host-claude.ts`（`src/cli.ts` → `hooks/cli.js`）、Codex 向けが `src/host-codex.ts`（`src/codex-cli.ts` → `plugins/codex/hooks/cli.js`）です。1 回で複数ファイルを編集するツール（Codex の `apply_patch`）はファイルごとの payload に正規化し、中核はそのために `preToolUseEdits` / `postToolUseEdits` を用意しています。
+コードは、検査が「それを動かすホスト」に依存しないように層を分けています。中核は classic コマンド hook の JSON を入力に取り、`Outcome` を返します。mod（`src/register.ts`）と command hook の CLI はこれを呼びます。command hook の CLI は Go 製のバイナリ `feedback-gate`（`cmd/feedback-gate`。`feedback-gate claude <Event>` / `feedback-gate codex <Event>` / `feedback-gate version` の 3 つのコマンド）で、検査は `internal/hookgate`（`src/` のモジュール 1 つにつき Go のファイル 1 つ）にあり、`locales/` のメッセージファイルは埋め込んでいます。Claude Code と Codex で違うのは `Host`（環境変数からの `options`、ホストの JSON → 中核のイベントと payload の `normalize`、中核の `Outcome` → ホストの出力の `render`）です。1 回で複数ファイルを編集するツール（Codex の `apply_patch`）はファイルごとの payload に正規化し、中核はそのために `preToolUseEdits` / `postToolUseEdits` を用意しています。
 
 ```
+mise install         # mise.toml の道具（bun、node、go、golangci-lint、goreleaser）を入れる
 bun install          # 開発用の依存を入れる
+mise run build       # go build -o bin/feedback-gate ./cmd/feedback-gate
+mise run lint        # golangci-lint run ./... && bun run lint
+mise run fmt         # golangci-lint fmt ./... && bun run format
+mise run test        # go test ./... && bun run test
+
+go test ./...        # Go の単体テスト（internal/hookgate。tests/*.spec.ts を移植したもの）
 bun run lint         # Biome（lint とフォーマットの検査）。`bun run format` で自動修正
 bun run typecheck    # tsc --noEmit
 bun run test         # bun test（tests/*.spec.ts）
-bun run build        # src/register.ts を hooks/register.js に、src/cli.ts を hooks/cli.js に、src/codex-cli.ts を plugins/codex/hooks/cli.js にバンドル（+ hooks/vendor/*.js）
+bun run build        # src/register.ts を hooks/register.js にバンドル（+ hooks/vendor/*.js）
 bun run test:plugin  # ビルドしてから、実エンジンで hooks/register.test.ts を実行
 bun run validate:plugin  # claude plugin validate . --strict
 ```
 
-バンドル（`hooks/register.js`、`hooks/cli.js`、`plugins/codex/hooks/cli.js`、`hooks/vendor/`）は、プルリクエスト上で CI が生成してコミットします。貢献者がコミットする必要はありません（CI が追加するまでリポジトリには入っていません）。「Build bundle」ワークフローが、プルリクエスト（同一リポジトリのブランチ）ごとにバンドルを作り、ファイルの追加または変更があれば `chore: build bundle` コミットをそのブランチへ push します。ローカルで必要なとき（`bun run test:plugin` など）は `bun run build` で作れますが、コミットしないでください。手で編集もしないでください。`scripts/build.ts` は、バンドルが相対パスと `claude-code` 以外を import していたとき、または出力ファイルのどれか（`hooks/cli.js` を含む）が 200 KiB 以上になったときにビルドを失敗させます（`hooks/cli.js` は Node のプログラムなので、`node:` の組み込みモジュールは import できます）。また、出力に含まれる見えない文字を `\uXXXX` のエスケープに書き換えます。`classic.PreToolUse` フックの引数名が `hooks/register.js` のほかの場所に出てくるときも失敗させます（プラグインディレクトリは、`next` に渡るイベントを追えない権限フックを受け付けないため）。CI ワークフローは、作ったバンドルに対して `claude plugin validate . --strict` と `claude plugin test .` を実行します。Claude Code の CLI は `devDependencies` の `@anthropic-ai/claude-code` を使います（`bun.lock` で版を固定し、Dependabot が更新します）。
+TypeScript の統合テスト（`tests/cli.spec.ts`、`tests/codex-cli.spec.ts`）は Go のバイナリを子プロセスとして起動し、stdin / stdout / stderr / 終了コードを確かめます。`tests/hook-script.spec.ts` と `tests/codex-hook-script.spec.ts` は、偽のバイナリと偽のリリースのディレクトリ（`FEEDBACK_GATE_RELEASE_BASE_URL=file://...`）で `scripts/hook.sh` を確かめます。バイナリは、`FEEDBACK_GATE_BIN` があればそれを使い（CI が先に 1 度ビルドします）、無ければテストが `go build` で `node_modules/.cache/feedback-gate/feedback-gate` に作ります。
+
+バンドル（`hooks/register.js` と `hooks/vendor/`）は、プルリクエスト上で CI が生成してコミットします。貢献者がコミットする必要はありません（CI が追加するまでリポジトリには入っていません）。「Build bundle」ワークフローが、プルリクエスト（同一リポジトリのブランチ）ごとにバンドルを作り、ファイルの追加または変更があれば `chore: build bundle` コミットをそのブランチへ push します。ローカルで必要なとき（`bun run test:plugin` など）は `bun run build` で作れますが、コミットしないでください。手で編集もしないでください。`scripts/build.ts` は、バンドルが相対パスと `claude-code` 以外を import していたとき、または出力ファイルのどれかが 200 KiB 以上になったときにビルドを失敗させます。また、出力に含まれる見えない文字を `\uXXXX` のエスケープに書き換えます。`classic.PreToolUse` フックの引数名が `hooks/register.js` のほかの場所に出てくるときも失敗させます（プラグインディレクトリは、`next` に渡るイベントを追えない権限フックを受け付けないため）。CI ワークフローは、作ったバンドルに対して `claude plugin validate . --strict` と `claude plugin test .` を実行します。Claude Code の CLI は `devDependencies` の `@anthropic-ai/claude-code` を使います（`bun.lock` で版を固定し、Dependabot が更新します）。
 
 依存には 7 日間のフリーズ期間を設けています。`bunfig.toml` の `minimumReleaseAge` により、`bun install` は公開から 7 日以上経ったバージョンだけを解決します。Dependabot（`.github/dependabot.yml`）も `cooldown` で、npm と GitHub Actions の更新を公開から 7 日経つまで提案しません。Actions はコミット SHA で固定しています。
 
 ### リリース
 
-バージョンは [release-please](https://github.com/googleapis/release-please) で管理します。コミットメッセージ（と PR タイトル）は [Conventional Commits](https://www.conventionalcommits.org/ja/)（`feat:`、`fix:`、`refactor:`、`chore:` など）で書いてください。`main` への push ごとに「Release Please」ワークフローがリリース PR を作成・更新し、`package.json`、`.claude-plugin/plugin.json`、`.claude-plugin/marketplace.json`、`.codex-plugin/plugin.json`、`plugin.json` のバージョンを上げて `CHANGELOG.md` を更新します。それをマージするとリリースのタグが付きます。どちらのワークフローも既定の `GITHUB_TOKEN`（PAT は使いません）を使うため、bot が作ったコミットや release-please の PR では CI が自動では起動しません。必須ステータスチェックを設定している場合は、再実行するか空コミットを手で push してください。
+バージョンは [release-please](https://github.com/googleapis/release-please) で管理します。コミットメッセージ（と PR タイトル）は [Conventional Commits](https://www.conventionalcommits.org/ja/)（`feat:`、`fix:`、`refactor:`、`chore:` など）で書いてください。`main` への push ごとに「Release Please」ワークフローがリリース PR を作成・更新し、`package.json`、`.claude-plugin/plugin.json`、`.claude-plugin/marketplace.json`、`.codex-plugin/plugin.json`、`plugin.json` のバージョンを上げて `CHANGELOG.md` を更新します。それをマージするとリリースのタグ（`vX.Y.Z`）が付き、GitHub のリリースが作られます。同じワークフローが続けてそのタグで [GoReleaser](https://goreleaser.com/)（`.goreleaser.yaml`）を実行し、`feedback-gate` を linux / darwin / windows × amd64 / arm64 向けにビルドして、`feedback-gate_<os>_<arch>.tar.gz`（windows は `.zip`）と `checksums.txt` をそのリリースに添付します（リリースノートは release-please が持つので `release.mode: keep-existing` です）。`scripts/hook.sh` はプラグインのバージョンに対応するこれらのファイルをダウンロードするので、リリースにバイナリが付いて初めて、そのバージョンのプラグインが使えます。どちらのワークフローも既定の `GITHUB_TOKEN`（PAT は使いません）を使うため、bot が作ったコミットや release-please の PR では CI が自動では起動しません。必須ステータスチェックを設定している場合は、再実行するか空コミットを手で push してください。

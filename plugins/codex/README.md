@@ -37,20 +37,20 @@ If your Codex build does not run plugin-bundled hooks (see [openai/codex#16430](
 
 ## Requirements
 
-- `node` (or `bun`) on `PATH` and `bash`: the hooks run `plugins/codex/hooks/cli.js`. Without a runtime they do nothing (exit 0).
+- `bash`, and `curl` or `wget` on the first run: the hooks run the Go binary `feedback-gate`, which `scripts/hook.sh` downloads from this repository's GitHub Releases (`feedback-gate_<os>_<arch>.tar.gz` for the plugin version, SHA-256 checked against `checksums.txt`; `tar` and `sha256sum` / `shasum` are used too) into `${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate`. The download happens on the first hook after an install or an update (SessionStart), once per version; after that nothing is needed. If the binary is not cached and cannot be downloaded, the hooks do nothing (exit 0). `FEEDBACK_GATE_BIN` (path of an executable) skips the lookup and `FEEDBACK_GATE_RELEASE_BASE_URL` replaces the download location (a `file://` directory works offline). Linux and macOS, amd64 and arm64.
 - `terminal-notifier` (optional, macOS): desktop notifications.
 - `dogwood` (optional): the gate's policy engine; see the [main README](../../README.md#requirements).
 
 ## Hooks
 
-Every event is a command hook `bash "${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh" <Event>` in `hooks/hooks.json`, which runs `hooks/cli.js <Event>` (built from `src/codex-cli.ts`). Codex sends the same event names and stdin JSON as Claude Code's command hooks and reads the same output (`permissionDecision`, `decision: block`, `additionalContext`, exit code 2), so the table of the [main README](../../README.md#hooks) applies, with these differences:
+Every event is a command hook `bash "${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh" <Event>` in `hooks/hooks.json`, which runs `feedback-gate codex <Event>` (the Go binary built from `cmd/feedback-gate`; the checks are in `internal/hookgate`). Codex sends the same event names and stdin JSON as Claude Code's command hooks and reads the same output (`permissionDecision`, `decision: block`, `additionalContext`, exit code 2), so the table of the [main README](../../README.md#hooks) applies, with these differences:
 
 | Codex event | What runs | Difference from Claude Code |
 | --- | --- | --- |
 | SessionStart | `reset-gate` | None. |
 | UserPromptSubmit | rules file + `feedback-inject` | None. |
 | PreToolUse (`Bash`) | `bash-changes` (`bashStarted`), `feedback-guard` (`pre_bash`) | None. |
-| PreToolUse (`apply_patch`) | `feedback-guard` (`pre_edit`) per file | Codex edits files with one patch (`tool_input.command`, the `*** Begin Patch` format). The patch is split into its files (`src/apply-patch.ts`): `*** Add File` is checked like `Write` (the whole content), `*** Update File` like `Edit` (the added lines), a `*** Move to` at its destination path; `*** Delete File` is not checked. `deny` if any file is denied, else `ask`. |
+| PreToolUse (`apply_patch`) | `feedback-guard` (`pre_edit`) per file | Codex edits files with one patch (`tool_input.command`, the `*** Begin Patch` format). The patch is split into its files (`internal/hookgate/apply_patch.go`): `*** Add File` is checked like `Write` (the whole content), `*** Update File` like `Edit` (the added lines), a `*** Move to` at its destination path; `*** Delete File` is not checked. `deny` if any file is denied, else `ask`. |
 | PreToolUse (`spawn_agent` / `send_input`), opt-in | `agent-launch-guard` | Only with `FEEDBACK_GATE_AGENT_LAUNCH_GUARD=true`. `spawn_agent` is treated as `Agent` (`agent_type` → `subagent_type`, `message` → `prompt`), `send_input` as `SendMessage` (`agent_id` → `to`). |
 | PostToolUse (`Bash`) | `bash-changes`, `feedback-bash-edit`, gate `rules` | None. |
 | PostToolUse (`apply_patch`) | `record-changes` + `feedback-post-edit` per file, then gate `rules` once | Same split; the gate runs once for the whole patch. |
@@ -79,7 +79,7 @@ Codex plugins have no settings screen, so the options of the Claude Code plugin 
 
 ## Layout
 
-Same shape as the Claude Code settings hooks (`hooks/hooks.json` → `scripts/hook.sh` → `hooks/cli.js`), minus the mod (`register.js`), which Codex has no equivalent of:
+Same shape as the Claude Code settings hooks (`hooks/hooks.json` → `scripts/hook.sh` → `feedback-gate`), minus the mod (`register.js`), which Codex has no equivalent of:
 
 ```
 .codex-plugin/plugin.json       # Codex manifest (repository root), hooks -> plugins/codex/hooks/hooks.json
@@ -87,9 +87,8 @@ plugin.json                     # portable Agent Plugins manifest (repository ro
 .agents/plugins/marketplace.json
 plugins/codex/
 ├── hooks/hooks.json            # command hooks for every event
-├── hooks/cli.js                # built from src/codex-cli.ts (CI commits it); imports ../../../hooks/vendor/
-├── scripts/hook.sh             # entry: runs hooks/cli.js with node or bun
+├── scripts/hook.sh             # entry: finds or downloads feedback-gate (see ../../scripts/install-binary.sh), runs `feedback-gate codex <Event>`
 └── README.md, README_ja.md
 ```
 
-Source (`src/`): `host.ts` (the `Host` interface: `options` / `normalize` / `render`, `runCore`, `cliMain`), `host-codex.ts` (this plugin), `host-claude.ts` (Claude Code's settings hooks), `apply-patch.ts`, `codex-cli.ts`. Adding another host means implementing `Host` and bundling a `cliMain(host)` entry; the checks are not touched.
+Source: `cmd/feedback-gate` (the binary) and `internal/hookgate` (the checks, with `Host` for the per-host differences: `host.go`, `host_codex.go`, `host_claude.go`); the binary is built and published by GoReleaser (`.goreleaser.yaml`) when release-please tags a release. Adding another host means implementing `Host` and adding a subcommand; the checks are not touched.

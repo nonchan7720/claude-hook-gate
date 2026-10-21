@@ -37,20 +37,20 @@ codex plugin marketplace add nonchan7720/claude-hook-gate
 
 ## 前提
 
-- `PATH` 上の `node`（または `bun`）と `bash`: フックは `plugins/codex/hooks/cli.js` を動かします。ランタイムが無ければ何もしません（exit 0）。
+- `bash`、および初回は `curl` または `wget`: フックは Go 製のバイナリ `feedback-gate` を動かします。`scripts/hook.sh` が、このリポジトリの GitHub Releases からプラグインのバージョンの `feedback-gate_<os>_<arch>.tar.gz` をダウンロードし（SHA-256 を `checksums.txt` で照合します。`tar` と `sha256sum` / `shasum` も使います）、`${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate` に置きます。ダウンロードは、インストールや更新のあとの最初のフック（SessionStart）で、バージョンごとに 1 回だけ行い、その後は何も要りません。バイナリがキャッシュに無く、ダウンロードもできなければ、フックは何もしません（exit 0）。`FEEDBACK_GATE_BIN`（実行ファイルのパス）を指定すると探索を省き、`FEEDBACK_GATE_RELEASE_BASE_URL` でダウンロード先を差し替えられます（`file://` のディレクトリならオフラインで動きます）。対応は Linux と macOS の amd64 と arm64 です。
 - `terminal-notifier`（任意、macOS）: デスクトップ通知。
 - `dogwood`（任意）: gate のポリシーエンジン。[メインの README](../../README_ja.md#前提) を参照。
 
 ## フック
 
-すべてのイベントが `hooks/hooks.json` の command hook `bash "${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh" <Event>` で、`hooks/cli.js <Event>`（`src/codex-cli.ts` から作る）を走らせます。Codex は Claude Code の command hook と同じイベント名・同じ stdin の JSON を送り、同じ出力（`permissionDecision`、`decision: block`、`additionalContext`、終了コード 2）を読むので、[メインの README の表](../../README_ja.md#フック) がそのまま当てはまります。違いは次のとおりです。
+すべてのイベントが `hooks/hooks.json` の command hook `bash "${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh" <Event>` で、`feedback-gate codex <Event>`（`cmd/feedback-gate` から作る Go 製のバイナリ。検査は `internal/hookgate`）を走らせます。Codex は Claude Code の command hook と同じイベント名・同じ stdin の JSON を送り、同じ出力（`permissionDecision`、`decision: block`、`additionalContext`、終了コード 2）を読むので、[メインの README の表](../../README_ja.md#フック) がそのまま当てはまります。違いは次のとおりです。
 
 | Codex のイベント | 走るもの | Claude Code との違い |
 | --- | --- | --- |
 | SessionStart | `reset-gate` | なし。 |
 | UserPromptSubmit | rules ファイル + `feedback-inject` | なし。 |
 | PreToolUse（`Bash`） | `bash-changes`（`bashStarted`）、`feedback-guard`（`pre_bash`） | なし。 |
-| PreToolUse（`apply_patch`） | ファイルごとの `feedback-guard`（`pre_edit`） | Codex はファイル編集を 1 つのパッチ（`tool_input.command`、`*** Begin Patch` 形式）で行います。パッチをファイルごとに分け（`src/apply-patch.ts`）、`*** Add File` は `Write`（全文）、`*** Update File` は `Edit`（追加行）として検査します。`*** Move to` は移動先のパスで検査し、`*** Delete File` は検査しません。deny が 1 つでもあれば deny、無ければ ask です。 |
+| PreToolUse（`apply_patch`） | ファイルごとの `feedback-guard`（`pre_edit`） | Codex はファイル編集を 1 つのパッチ（`tool_input.command`、`*** Begin Patch` 形式）で行います。パッチをファイルごとに分け（`internal/hookgate/apply_patch.go`）、`*** Add File` は `Write`（全文）、`*** Update File` は `Edit`（追加行）として検査します。`*** Move to` は移動先のパスで検査し、`*** Delete File` は検査しません。deny が 1 つでもあれば deny、無ければ ask です。 |
 | PreToolUse（`spawn_agent` / `send_input`）、任意 | `agent-launch-guard` | `FEEDBACK_GATE_AGENT_LAUNCH_GUARD=true` のときだけ。`spawn_agent` は `Agent`（`agent_type` → `subagent_type`、`message` → `prompt`）、`send_input` は `SendMessage`（`agent_id` → `to`）として扱います。 |
 | PostToolUse（`Bash`） | `bash-changes`、`feedback-bash-edit`、gate の `rules` | なし。 |
 | PostToolUse（`apply_patch`） | ファイルごとの `record-changes` + `feedback-post-edit`、その後 gate の `rules` を 1 回 | 上と同じ分け方。gate はパッチ全体で 1 回だけ走ります。 |
@@ -79,7 +79,7 @@ Codex のプラグインには設定画面が無いので、Claude Code 版の�
 
 ## 構成
 
-Claude Code の settings hook と同じ形（`hooks/hooks.json` → `scripts/hook.sh` → `hooks/cli.js`）から、Codex に相当するものが無い mod（`register.js`）を除いたものです。
+Claude Code の settings hook と同じ形（`hooks/hooks.json` → `scripts/hook.sh` → `feedback-gate`）から、Codex に相当するものが無い mod（`register.js`）を除いたものです。
 
 ```
 .codex-plugin/plugin.json       # Codex のマニフェスト（リポジトリのルート）。hooks -> plugins/codex/hooks/hooks.json
@@ -87,9 +87,8 @@ plugin.json                     # ポータブルな Agent Plugins のマニフ�
 .agents/plugins/marketplace.json
 plugins/codex/
 ├── hooks/hooks.json            # 全イベントの command hook
-├── hooks/cli.js                # src/codex-cli.ts から作る（CI がコミット）。../../../hooks/vendor/ を import する
-├── scripts/hook.sh             # 入口: node か bun で hooks/cli.js を動かす
+├── scripts/hook.sh             # 入口: feedback-gate を探すかダウンロードし（../../scripts/install-binary.sh）、`feedback-gate codex <Event>` を動かす
 └── README.md, README_ja.md
 ```
 
-ソース（`src/`）: `host.ts`（`Host` インターフェース: `options` / `normalize` / `render`、`runCore`、`cliMain`）、`host-codex.ts`（このプラグイン）、`host-claude.ts`（Claude Code の settings hook）、`apply-patch.ts`、`codex-cli.ts`。別のホストを足すときは `Host` を実装して `cliMain(host)` の入口をバンドルするだけで、検査そのものには触りません。
+ソース: `cmd/feedback-gate`（バイナリ）と `internal/hookgate`（検査。ホストごとの違いは `Host`: `host.go`、`host_codex.go`、`host_claude.go`）です。バイナリは、release-please がリリースにタグを付けたときに GoReleaser（`.goreleaser.yaml`）がビルドして公開します。別のホストを足すときは `Host` を実装してサブコマンドを足すだけで、検査そのものには触りません。
