@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { agentLaunchGuard } from '../src/agent-launch-guard.ts'
+import { agentLaunchGuard, agentLaunchLists, parseAgentList } from '../src/agent-launch-guard.ts'
 import type { Dict } from '../src/pyutil.ts'
 
 const guard = (payload: Dict) => agentLaunchGuard(payload, 'ja')
@@ -38,5 +38,36 @@ describe('agent-launch-guard', () => {
 
   test('other tools pass through', () => {
     expect(guard({ tool_name: 'Bash', tool_input: {} }).stdout).toBe('')
+  })
+
+  describe('lists from the environment', () => {
+    test('parseAgentList splits on , and ;, trims and drops empty names', () => {
+      expect(parseAgentList('a, b;c')).toEqual(['a', 'b', 'c'])
+      expect(parseAgentList(' x ,, ; ')).toEqual(['x'])
+      expect(parseAgentList('')).toEqual([])
+      expect(parseAgentList(' ;, ')).toEqual([])
+      expect(parseAgentList(undefined)).toEqual([])
+    })
+
+    test('agentLaunchLists falls back to the defaults when unset or empty', () => {
+      const defaults = { askAgentTypes: ['code-implementer'], allowRecipients: ['git-operator'] }
+      expect(agentLaunchLists({})).toEqual(defaults)
+      expect(agentLaunchLists({ FEEDBACK_GATE_ASK_AGENT_TYPES: '', FEEDBACK_GATE_ALLOW_RECIPIENTS: ' ;, ' })).toEqual(defaults)
+      expect(agentLaunchLists({ FEEDBACK_GATE_ASK_AGENT_TYPES: 'worker; reviewer', FEEDBACK_GATE_ALLOW_RECIPIENTS: 'git-operator, ops' })).toEqual({
+        askAgentTypes: ['worker', 'reviewer'],
+        allowRecipients: ['git-operator', 'ops'],
+      })
+      // 片方だけ設定したら、もう片方は既定のまま
+      expect(agentLaunchLists({ FEEDBACK_GATE_ASK_AGENT_TYPES: 'worker' })).toEqual({ askAgentTypes: ['worker'], allowRecipients: ['git-operator'] })
+    })
+
+    test('custom lists change the verdicts for Agent and SendMessage', () => {
+      const lists = agentLaunchLists({ FEEDBACK_GATE_ASK_AGENT_TYPES: 'worker', FEEDBACK_GATE_ALLOW_RECIPIENTS: 'ops' })
+      const run = (payload: Dict) => agentLaunchGuard(payload, 'ja', lists)
+      expect(decision(run({ tool_name: 'Agent', tool_input: { subagent_type: 'worker', prompt: 'P' } })).permissionDecision).toBe('ask')
+      expect(run({ tool_name: 'Agent', tool_input: { subagent_type: 'code-implementer', prompt: 'P' } }).stdout).toBe('')
+      expect(run({ tool_name: 'SendMessage', tool_input: { to: 'ops', message: 'M' } }).stdout).toBe('')
+      expect(decision(run({ tool_name: 'SendMessage', tool_input: { to: 'git-operator', message: 'M' } })).permissionDecision).toBe('ask')
+    })
   })
 })

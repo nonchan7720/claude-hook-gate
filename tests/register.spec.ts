@@ -261,6 +261,26 @@ describe('PreToolUse', () => {
       },
       { agentLaunchGuard: true },
     ))
+
+  test('FEEDBACK_GATE_ASK_AGENT_TYPES / FEEDBACK_GATE_ALLOW_RECIPIENTS replace the guarded agent types and the allowed recipients', () =>
+    withMod(
+      async (m) => {
+        const worker = (await m.call('classic.PreToolUse', { tool: 'Agent', subagent_type: 'worker', prompt: 'do it' })) as Out
+        expect(String(worker.ask)).toContain('worker に送るプロンプト:\n\ndo it')
+        let reached = false
+        await m.call('classic.PreToolUse', { tool: 'Agent', subagent_type: 'code-implementer', prompt: 'p' }, async () => {
+          reached = true
+          return {}
+        })
+        expect(reached).toBe(true)
+        expect(((await m.call('classic.PreToolUse', { tool: 'SendMessage', to: 'ops', message: 'm' })) as Out).ask).toBeUndefined()
+        expect(String(((await m.call('classic.PreToolUse', { tool: 'SendMessage', to: 'git-operator', message: 'm' })) as Out).ask)).toContain(
+          'git-operator に送るメッセージ',
+        )
+      },
+      { agentLaunchGuard: true },
+      { FEEDBACK_GATE_ASK_AGENT_TYPES: 'worker', FEEDBACK_GATE_ALLOW_RECIPIENTS: 'ops' },
+    ))
 })
 
 // Bash の変更追跡は直近のコミットが触ったファイルも拾う。準備のコミットが拾われないよう、日時を過去にしておく。

@@ -4,7 +4,7 @@
 // 引数の payload は classic コマンド hook が stdin で受け取る JSON の形。各段は classic のスクリプトと同じ
 // { exitCode, stdout, stderr } を返し、それを classic の規約どおり Outcome にまとめて返す。
 import type { PluginOptions } from 'claude-code'
-import { agentLaunchGuard } from './agent-launch-guard.ts'
+import { agentLaunchGuard, agentLaunchLists } from './agent-launch-guard.ts'
 import { allStop } from './all-stop.ts'
 import { bashChangeSteps, bashStarted } from './bash-changes.ts'
 import { feedbackGuard } from './feedback-guard.ts'
@@ -101,7 +101,7 @@ export function preToolUse(io: Io, sessionId: string, options: PluginOptions, pa
   const tool = str(payload.tool_name)
   if (!guardsTool(options, tool)) return Promise.resolve(none)
   const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool)
-  const step: Step = guardsAgents ? async (i) => agentLaunchGuard(payload, i.lang) : (i) => feedbackGuard(i, payload)
+  const step: Step = guardsAgents ? async (i) => agentLaunchGuard(payload, i.lang, agentLaunchLists(i.env)) : (i) => feedbackGuard(i, payload)
   return runSteps(io, sessionId, 'PreToolUse', tool === 'Bash' ? [(i) => bashStarted(i, payload), step] : [step])
 }
 

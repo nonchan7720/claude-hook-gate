@@ -60,7 +60,7 @@ Bash コマンドは、実行前には何が書かれるか分からないので
 - `Agent`: `subagent_type` が `code-implementer` のとき、`prompt` を見せて確認する。
 - `SendMessage`: 宛先が `git-operator` 以外のとき、`message` を見せて確認する。
 
-どちらにも該当しなければ何も出力せず、通常のパーミッション判定に委ねます。対象のエージェント種別と許可する宛先の既定は `src/agent-launch-guard.ts` 冒頭の `ASK_AGENT_TYPES` / `ALLOW_RECIPIENTS`（`internal/hookgate/agent_launch_guard.go` の `AskAgentTypes` / `AllowRecipients`）です。command hook（`feedback-gate` バイナリ）では環境変数 `FEEDBACK_GATE_ASK_AGENT_TYPES`（確認する `subagent_type`）と `FEEDBACK_GATE_ALLOW_RECIPIENTS`（確認なしで送ってよい宛先）で差し替えられます。どちらも `,` または `;` 区切りの一覧で、名前の前後の空白は無視し、未設定や空なら既定のままです（例: `FEEDBACK_GATE_ASK_AGENT_TYPES='code-implementer;worker'`）。
+どちらにも該当しなければ何も出力せず、通常のパーミッション判定に委ねます。対象のエージェント種別と許可する宛先の既定は `src/agent-launch-guard.ts` 冒頭の `ASK_AGENT_TYPES` / `ALLOW_RECIPIENTS`（`internal/hookgate/agent_launch_guard.go` の `AskAgentTypes` / `AllowRecipients`）です。mod の hook も command hook（`feedback-gate` バイナリ）も、環境変数 `FEEDBACK_GATE_ASK_AGENT_TYPES`（確認する `subagent_type`）と `FEEDBACK_GATE_ALLOW_RECIPIENTS`（確認なしで送ってよい宛先）で差し替えられます。どちらも `,` または `;` 区切りの一覧で、名前の前後の空白は無視し、未設定や空なら既定のままです（例: `FEEDBACK_GATE_ASK_AGENT_TYPES='code-implementer;worker'`）。
 
 有効化するには、`/plugin` でインストールするときに表示される設定画面で `agentLaunchGuard` をオンにするか、後から `/config` メニューのこのプラグインの `agentLaunchGuard` の行で切り替えます。
 

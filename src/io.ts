@@ -12,6 +12,10 @@ export type EnvVars = {
   __CFBundleIdentifier?: string
   /** メッセージの言語の判定に使う（i18n.ts）。FEEDBACK_GATE_LANG はこのプラグイン専用の上書き。 */
   FEEDBACK_GATE_LANG?: string
+  /** agentLaunchGuard の確認対象にする subagent_type（`,` か `;` 区切り。未設定・空なら既定）。agent-launch-guard.ts の agentLaunchLists が読む。 */
+  FEEDBACK_GATE_ASK_AGENT_TYPES?: string
+  /** agentLaunchGuard が確認なしで送ってよい SendMessage の宛先（`,` か `;` 区切り。未設定・空なら既定）。 */
+  FEEDBACK_GATE_ALLOW_RECIPIENTS?: string
   LC_ALL?: string
   LC_MESSAGES?: string
   LANG?: string

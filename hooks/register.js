@@ -1767,7 +1767,20 @@ async function correctCommand(io, args) {
 // src/engine-io.ts
 var errorText2 = (e) => e instanceof Error ? e.message : String(e);
 async function readEnv($) {
-  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG] = await Promise.all([
+  const [
+    HOME,
+    PATH,
+    CLAUDE_FEEDBACK_DIR,
+    DOGWOOD_BIN,
+    TERM_PROGRAM,
+    __CFBundleIdentifier,
+    FEEDBACK_GATE_LANG,
+    FEEDBACK_GATE_ASK_AGENT_TYPES,
+    FEEDBACK_GATE_ALLOW_RECIPIENTS,
+    LC_ALL,
+    LC_MESSAGES,
+    LANG
+  ] = await Promise.all([
     $.env.get("HOME"),
     $.env.get("PATH"),
     $.env.get("CLAUDE_FEEDBACK_DIR"),
@@ -1775,11 +1788,26 @@ async function readEnv($) {
     $.env.get("TERM_PROGRAM"),
     $.env.get("__CFBundleIdentifier"),
     $.env.get("FEEDBACK_GATE_LANG"),
+    $.env.get("FEEDBACK_GATE_ASK_AGENT_TYPES"),
+    $.env.get("FEEDBACK_GATE_ALLOW_RECIPIENTS"),
     $.env.get("LC_ALL"),
     $.env.get("LC_MESSAGES"),
     $.env.get("LANG")
   ]);
-  return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG };
+  return {
+    HOME,
+    PATH,
+    CLAUDE_FEEDBACK_DIR,
+    DOGWOOD_BIN,
+    TERM_PROGRAM,
+    __CFBundleIdentifier,
+    FEEDBACK_GATE_LANG,
+    FEEDBACK_GATE_ASK_AGENT_TYPES,
+    FEEDBACK_GATE_ALLOW_RECIPIENTS,
+    LC_ALL,
+    LC_MESSAGES,
+    LANG
+  };
 }
 async function createIo($, options = {}) {
   const [env, projectDir, cwd] = await Promise.all([readEnv($), $.session.root(), $.session.cwd()]);
@@ -1872,6 +1900,14 @@ var ok = (stdout = "", stderr = "") => ({ exitCode: 0, stdout, stderr });
 // src/agent-launch-guard.ts
 var ASK_AGENT_TYPES = ["code-implementer"];
 var ALLOW_RECIPIENTS = ["git-operator"];
+function parseAgentList(s) {
+  return (s ?? "").split(/[,;]/).map((v) => v.trim()).filter((v) => v !== "");
+}
+function agentLaunchLists(env) {
+  const ask = parseAgentList(env.FEEDBACK_GATE_ASK_AGENT_TYPES);
+  const allow = parseAgentList(env.FEEDBACK_GATE_ALLOW_RECIPIENTS);
+  return { askAgentTypes: ask.length > 0 ? ask : [...ASK_AGENT_TYPES], allowRecipients: allow.length > 0 ? allow : [...ALLOW_RECIPIENTS] };
+}
 var ask = (reason) => ok(`${JSON.stringify({
   hookSpecificOutput: {
     hookEventName: "PreToolUse",
@@ -1880,7 +1916,7 @@ var ask = (reason) => ok(`${JSON.stringify({
   }
 })}
 `);
-function agentLaunchGuard(payload, lang) {
+function agentLaunchGuard(payload, lang, lists = { askAgentTypes: ASK_AGENT_TYPES, allowRecipients: ALLOW_RECIPIENTS }) {
   const t = tr(lang);
   const tool = jqStr(payload.tool_name);
   const input = isDict(payload.tool_input) ? payload.tool_input : {};
@@ -1888,7 +1924,7 @@ function agentLaunchGuard(payload, lang) {
     const agentType = jqStr(input.subagent_type);
     if (agentType === "")
       return ok();
-    if (ASK_AGENT_TYPES.includes(agentType)) {
+    if (lists.askAgentTypes.includes(agentType)) {
       return ask(`${t("launch.promptTo", { agentType })}
 
 ${jqStr(input.prompt)}
@@ -1897,7 +1933,7 @@ ${t("launch.checklist")}`);
     }
   } else if (tool === "SendMessage") {
     const recipient = jqStr(input.to);
-    if (!ALLOW_RECIPIENTS.includes(recipient)) {
+    if (!lists.allowRecipients.includes(recipient)) {
       return ask(`${t("launch.messageTo", { recipient: recipient || t("launch.unknownRecipient") })}
 
 ${jqStr(input.message)}
@@ -4385,7 +4421,7 @@ function preToolUse(io, sessionId, options, payload) {
   if (!guardsTool(options, tool))
     return Promise.resolve(none);
   const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool);
-  const step = guardsAgents ? async (i) => agentLaunchGuard(payload, i.lang) : (i) => feedbackGuard(i, payload);
+  const step = guardsAgents ? async (i) => agentLaunchGuard(payload, i.lang, agentLaunchLists(i.env)) : (i) => feedbackGuard(i, payload);
   return runSteps(io, sessionId, "PreToolUse", tool === "Bash" ? [(i) => bashStarted(i, payload), step] : [step]);
 }
 function postToolUse(io, sessionId, payload) {
