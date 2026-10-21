@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.9.1...v0.10.0) (2026-10-21)
+
+
+### Features
+
+* port the command-hook CLI (hooks + Claude/Codex cli) to a single Go binary ([#62](https://github.com/nonchan7720/claude-hook-gate/issues/62)) ([f0bb1e8](https://github.com/nonchan7720/claude-hook-gate/commit/f0bb1e89120ce1e2d986b5e9acddb33010ccc72a))
+
 ## [0.9.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.9.0...v0.9.1) (2026-10-21)
 
 
