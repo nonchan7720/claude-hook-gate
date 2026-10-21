@@ -2,12 +2,13 @@
 # settings hook（hooks/hooks.json の command hook）の入口: `hook.sh <Event>`。
 # 組織管理（Team / Enterprise ログイン、managed settings）の環境では、組み込みのガード（cc-plugin-sec-default）が classic.* を
 # ユーザーの mod に対して飛ばす。settings hook は飛ばされず、stdin の JSON と戻り値（exit 2 / permissionDecision /
-# decision: block / additionalContext）が classic と同一なので、ここから hooks/cli.js（src/ の関数）を呼んで同じ処理をさせる。
+# decision: block / additionalContext）が classic と同一なので、ここから feedback-gate（Go 製のバイナリ）の `claude <Event>` を呼んで同じ処理をさせる。
 #
 # mod の classic.* が走る環境では二重に動かさない: mod は classic.* のどれかが走ると
 # <feedbackDir>/.classic_seen/<session_id> を書く（feedbackDir は CLAUDE_FEEDBACK_DIR か ~/{.claude,.agents}/feedback）。
 # そのマーカーがあれば何もせず exit 0。
-# cli.js には node（無ければ bun）が要る。どちらも無ければ何もせず exit 0。
+# バイナリは FEEDBACK_GATE_BIN、無ければキャッシュ、無ければリリースから取ってくる（scripts/install-binary.sh）。
+# 使えなければ（curl も wget も無い、取得失敗、チェックサム不一致など）何もせず exit 0。
 set -uo pipefail
 
 EVENT="${1:-}"
@@ -32,10 +33,14 @@ if [ -n "$SESSION_ID" ]; then
   fi
 fi
 
-RUNTIME="$(command -v node 2>/dev/null || command -v bun 2>/dev/null || true)"
-[ -n "$RUNTIME" ] || exit 0
-
 ROOT="${CLAUDE_PLUGIN_ROOT:-}"
-[ -n "$ROOT" ] || ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -n "$ROOT" ] || ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+export CLAUDE_PLUGIN_ROOT="$ROOT"
 
-printf '%s' "$PAYLOAD" | exec "$RUNTIME" "$ROOT/hooks/cli.js" "$EVENT"
+# shellcheck source=install-binary.sh
+. "$SCRIPT_DIR/install-binary.sh" 2>/dev/null || exit 0
+BIN="$(feedback_gate_binary "$ROOT")" || exit 0
+[ -n "$BIN" ] || exit 0
+
+printf '%s' "$PAYLOAD" | exec "$BIN" claude "$EVENT"

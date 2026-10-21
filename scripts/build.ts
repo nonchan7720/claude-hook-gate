@@ -13,8 +13,6 @@ import * as path from 'node:path'
 const root = path.resolve(import.meta.dir, '..')
 const hooksDir = path.join(root, 'hooks')
 const vendorDir = path.join(hooksDir, 'vendor')
-// Codex プラグインの CLI の置き場所。プラグインのルートはリポジトリのルートなので、依存（hooks/vendor/）や同梱ファイルは共有する。
-const codexHooksDir = path.join(root, 'plugins', 'codex', 'hooks')
 
 // hooks/vendor/<name>.js に切り出す依存と、その中身（再 export するだけのエントリ）。
 const vendors: Record<string, string> = {
@@ -96,27 +94,6 @@ if (!/^export const register = /m.test(code)) throw new Error('register export n
 }
 outputs[path.join(hooksDir, 'register.js')] = code
 
-// settings hook の CLI（hooks/cli.js）。`node hooks/cli.js <Event>` で動く普通の Node プログラムで、mod の実行環境の制約
-// （node: の import 禁止など）は受けない。yaml / i18next は register.js と同じ hooks/vendor/*.js を相対 import で共有する。
-const cliCode = useVendor(
-  await build({ entrypoints: [path.join(root, 'src', 'cli.ts')], target: 'node', external: ['claude-code', ...Object.keys(vendors)], minify: false }),
-)
-const cliFile = path.join(hooksDir, 'cli.js')
-outputs[cliFile] = cliCode
-
-// Codex の CLI（plugins/codex/hooks/cli.js）。cli.js と同じ Node プログラムで、ホストだけ src/host-codex.ts。
-const codexCliCode = useVendor(
-  await build({
-    entrypoints: [path.join(root, 'src', 'codex-cli.ts')],
-    target: 'node',
-    external: ['claude-code', ...Object.keys(vendors)],
-    minify: false,
-  }),
-  '../../../hooks/vendor',
-)
-const codexCliFile = path.join(codexHooksDir, 'cli.js')
-outputs[codexCliFile] = codexCliCode
-
 // 見えない文字（改行・タブ以外の制御文字、半角スペース以外の空白、書式文字）を \uXXXX に書き換える。
 // ディレクトリの検査は、文字列やコメントに生の見えない文字があると保留にする（yaml の "\x85" / "\xa0" など）。
 // minify 後のこれらは文字列リテラルの中にしか現れないので、エスケープしても意味は変わらない。書き換え後に構文を確かめる。
@@ -137,12 +114,9 @@ for (const [file, text] of Object.entries(outputs)) {
 
 // 実行環境が解決できない import が残っていないことを確かめる（claude-code と相対パス以外は不可）。
 const forbidden = [/(^|[;}\s])import\s*[^'"(]*from\s*['"](?!\.{1,2}\/|claude-code['"])/m, /(^|[;}\s])import\s*['"]/m, /\bimport\(/, /['"]node:/, /\brequire\(/]
-// cli.js は Node で動くので node: の組み込みモジュールは import してよい（それ以外の外部の import や動的な読み込みは不可）。
-const forbiddenCli = [/(^|[;}\s])import\s*[^'"(]*from\s*['"](?!\.{1,2}\/|node:)/m, /(^|[;}\s])import\s*['"]/m, /\bimport\(/, /\brequire\(/]
 for (const [file, text] of Object.entries(outputs)) {
   const rel = path.relative(root, file)
-  const rules = file === cliFile || file === codexCliFile ? forbiddenCli : forbidden
-  for (const rx of rules) if (rx.test(text)) throw new Error(`${rel} contains a forbidden pattern: ${rx}`)
+  for (const rx of forbidden) if (rx.test(text)) throw new Error(`${rel} contains a forbidden pattern: ${rx}`)
   const bytes = new TextEncoder().encode(text).length
   if (bytes >= maxBytes) throw new Error(`${rel} is ${(bytes / 1024).toFixed(0)} KiB; keep each file under ${maxBytes / 1024} KiB`)
 }
