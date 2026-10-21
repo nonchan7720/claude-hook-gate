@@ -37,7 +37,7 @@ codex plugin marketplace add nonchan7720/claude-hook-gate
 
 ## 前提
 
-- `bash`、および初回は `curl` または `wget`: フックは Go 製のバイナリ `feedback-gate` を動かします。`scripts/hook.sh` が、このリポジトリの GitHub Releases からプラグインのバージョンの `feedback-gate_<os>_<arch>.tar.gz` をダウンロードし（SHA-256 を `checksums.txt` で照合します。`tar` と `sha256sum` / `shasum` も使います）、`${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate` に置きます。ダウンロードは、インストールや更新のあとの最初のフック（SessionStart）で、バージョンごとに 1 回だけ行い、その後は何も要りません。バイナリがキャッシュに無く、ダウンロードもできなければ、フックは何もしません（exit 0）。`FEEDBACK_GATE_BIN`（実行ファイルのパス）を指定すると探索を省き、`FEEDBACK_GATE_RELEASE_BASE_URL` でダウンロード先を差し替えられます（`file://` のディレクトリならオフラインで動きます）。対応は Linux と macOS の amd64 と arm64 です。
+- `bash`、および初回は `curl` または `wget`: フックは Go 製のバイナリ `feedback-gate` を動かします。`scripts/hook.sh` が、このリポジトリの GitHub Releases からプラグインのバージョンの `feedback-gate_<os>_<arch>.tar.gz` をダウンロードし（SHA-256 を `checksums.txt` で照合します。`tar` と `sha256sum` / `shasum` も必要で、ハッシュのコマンドが無ければ何も入れません）、`${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate` に置きます。ダウンロード（数 MB）は、インストールや更新のあとの最初のフック（SessionStart）で、そのフックの `timeout` の中で、バージョンごとに 1 回だけ行い、その後は何も要りません。バイナリがキャッシュに無く、ダウンロードもできなければ、フックは何もせず（exit 0）、標準エラーに 1 行だけ出します（`feedback-gate: could not install the feedback-gate v<version> binary (<reason>); the hook did nothing`）。`FEEDBACK_GATE_BIN`（実行ファイルのパス。ビルド済みのバイナリを指定すればダウンロードを避けられます）を指定すると探索を省き、`FEEDBACK_GATE_RELEASE_BASE_URL` でダウンロード先を差し替えられます（`file://` のディレクトリも使えますが `curl` が必要です。`wget` は `file://` を読めません）。ほかのバージョンのキャッシュのディレクトリは、30 日使われなかった場合にだけ削除します。対応は Linux と macOS の amd64 と arm64 です。
 - `terminal-notifier`（任意、macOS）: デスクトップ通知。
 - `dogwood`（任意）: gate のポリシーエンジン。[メインの README](../../README_ja.md#前提) を参照。
 
