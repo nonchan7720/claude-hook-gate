@@ -492,9 +492,22 @@ func TestExpiresProjectsWhenExists(t *testing.T) {
 		})
 	})
 
+	t.Run("YYYY/MM/DD (V8 Date.parse) is read like the dashed form", func(t *testing.T) {
+		WithTmp(func(tmp string) {
+			assert.Equal(t, none, names(t, tmp, []string{"expires: \"2020/01/01\""}, namesOpts{now: T}))
+			assert.Equal(t, none, names(t, tmp, []string{"expires: 2020/1/1"}, namesOpts{now: T}))
+			assert.Equal(t, r, names(t, tmp, []string{"expires: 2026/06/15"}, namesOpts{now: parseMs("2026-06-15T23:59:59.999Z")}))
+			assert.Equal(t, none, names(t, tmp, []string{"expires: 2026/06/15"}, namesOpts{now: parseMs("2026-06-16T00:00:00Z")}))
+			assert.Equal(t, r, names(t, tmp, []string{"expires: '2026/06/15 10:00'"}, namesOpts{now: parseMs("2026-06-15T10:00:00Z")}))
+			assert.Equal(t, none, names(t, tmp, []string{"expires: '2026/06/15 10:00:30'"}, namesOpts{now: parseMs("2026-06-15T10:00:31Z")}))
+		})
+	})
+
 	t.Run("unparsable expires is treated as no expiry", func(t *testing.T) {
 		WithTmp(func(tmp string) {
 			assert.Equal(t, r, names(t, tmp, []string{"expires: not-a-date"}, namesOpts{now: T}))
+			assert.Equal(t, r, names(t, tmp, []string{"expires: '2020/13/01'"}, namesOpts{now: T}))
+			assert.Equal(t, r, names(t, tmp, []string{"expires: '2020/01/01T10:00'"}, namesOpts{now: T}))
 		})
 	})
 

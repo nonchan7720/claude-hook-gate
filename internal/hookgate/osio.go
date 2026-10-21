@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -233,10 +234,11 @@ func childEnv(extra map[string]string) []string {
 	return env
 }
 
-// lookPathIn は cmd を pathEnv（PATH の値）から探す。/ を含めばそのまま。node の spawn と同じく子の PATH で探すため。
-func lookPathIn(cmd, pathEnv string) string {
+// lookPathIn は cmd を pathEnv（PATH の値）から探す。/ を含めばそのまま。node の spawn（libuv の execvp）と同じく
+// 子の PATH だけで探すため、見つからなければ ok=false（親の PATH にはフォールバックしない）。
+func lookPathIn(cmd, pathEnv string) (string, bool) {
 	if strings.Contains(cmd, "/") {
-		return cmd
+		return cmd, true
 	}
 	for _, dir := range strings.Split(pathEnv, string(os.PathListSeparator)) {
 		if dir == "" {
@@ -244,10 +246,10 @@ func lookPathIn(cmd, pathEnv string) string {
 		}
 		p := Join(dir, cmd)
 		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() && canExecute(p, fi) {
-			return p
+			return p, true
 		}
 	}
-	return cmd
+	return cmd, false
 }
 
 // Run はシェルを介さず argv を実行する。独立したプロセスグループにして、TimeoutMs が指定されていれば
@@ -262,7 +264,12 @@ func runProcess(argv []string, opts RunOptions) RunResult {
 	}
 	name := argv[0]
 	if p, ok := opts.Env["PATH"]; ok {
-		name = lookPathIn(name, p)
+		found, ok := lookPathIn(name, p)
+		if !ok {
+			// 子の PATH に無いコマンドは、親の PATH に有っても実行しない（node では ENOENT）
+			return RunResult{ExitCode: 1, Error: fmt.Sprintf("exec: %q: executable file not found in $PATH", name)}
+		}
+		name = found
 	}
 	cmd := exec.CommandContext(context.Background(), name, argv[1:]...)
 	cmd.Dir = opts.Cwd

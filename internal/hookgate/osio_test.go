@@ -1,9 +1,16 @@
+//go:build !windows
+
 package hookgate
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,9 +34,24 @@ func TestOsIoRun(t *testing.T) {
 	})
 
 	t.Run("a timeout kills the whole process group", func(t *testing.T) {
-		r := io.Run([]string{"sh", "-c", "sleep 30 & sleep 30"}, RunOptions{TimeoutMs: 200})
+		r := io.Run([]string{"sh", "-c", "sleep 30 & echo $!; wait"}, RunOptions{TimeoutMs: 300})
 		assert.True(t, r.TimedOut)
 		assert.Equal(t, 1, r.ExitCode)
+		pid, err := strconv.Atoi(strings.TrimSpace(r.Stdout))
+		require.NoError(t, err, "stdout: %q", r.Stdout)
+		require.Positive(t, pid)
+		gone := false
+		for range 100 {
+			if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+				gone = true
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !gone {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+		assert.True(t, gone, "the background sleep (pid %d) must be killed with the group", pid)
 	})
 
 	t.Run("a command that cannot start reports an error with exit code 1", func(t *testing.T) {
@@ -46,6 +68,21 @@ func TestOsIoRun(t *testing.T) {
 		require.NoError(t, os.WriteFile(bin, []byte("#!/bin/sh\necho tool\n"), 0o755))
 		r := io.Run([]string{"mytool"}, RunOptions{Env: map[string]string{"PATH": dir + ":" + os.Getenv("PATH")}})
 		assert.Equal(t, "tool\n", r.Stdout)
+	})
+
+	t.Run("a command missing from the overlay PATH is not run, even if the parent PATH has it", func(t *testing.T) {
+		dir := TmpDir()
+		defer RmTree(dir)
+		marker := filepath.Join(dir, "ran")
+		// sh は親の PATH にあるが、子に渡した PATH（空のディレクトリだけ）には無い
+		r := io.Run([]string{"sh", "-c", "touch " + marker}, RunOptions{Env: map[string]string{"PATH": dir}})
+		assert.Equal(t, 1, r.ExitCode)
+		assert.NotEmpty(t, r.Error)
+		assert.Empty(t, r.Stdout)
+		assert.NoFileExists(t, marker)
+		// 絶対パス（/ を含む）は PATH を見ない
+		r = io.Run([]string{"/bin/sh", "-c", "echo ok"}, RunOptions{Env: map[string]string{"PATH": dir}})
+		assert.Equal(t, "ok\n", r.Stdout)
 	})
 }
 

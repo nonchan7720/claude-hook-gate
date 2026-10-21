@@ -218,13 +218,29 @@ var (
 	// fbYamlTimestampRe は YAML 1.1 の timestamp と ISO 8601 の日付・日時（時刻の秒は省略可）。
 	fbYamlTimestampRe = regexp.MustCompile(`^(\d{4})-(\d{1,2})-(\d{1,2})(?:(?:[Tt]|[ \t]+)(\d{1,2}):(\d{2})(?::(\d{2})(?:\.(\d*))?)?(?:[ \t]*(Z|z|[-+]\d{1,2}(?::\d{2})?))?)?$`)
 	fbYearMonthRe     = regexp.MustCompile(`^(\d{4})(?:-(\d{2}))?$`)
+	// fbSlashDateRe は V8 の Date.parse が読む YYYY/MM/DD（と YYYY/MM/DD HH:MM[:SS]）。
+	fbSlashDateRe = regexp.MustCompile(`^(\d{4})/(\d{1,2})/(\d{1,2})((?: \d{1,2}:\d{2}(?::\d{2})?)?)$`)
 )
 
 const fbDayMs int64 = 86_400_000
 
-// fbJsDateParse は Date.parse の代わり。ISO 8601（YYYY / YYYY-MM / YYYY-MM-DD / 日時）と YAML の timestamp だけを読む。
+// fbNormalizeSlashDate は YYYY/MM/DD（時刻は HH:MM[:SS]）をハイフン区切りの YYYY-MM-DD（HH:MM[:SS]）に直す。
+// V8 の Date.parse はこの書き方も読むので、日付だけの指定はハイフン区切りと同じ扱い（その日の終わり）にそろえる。
+func fbNormalizeSlashDate(text string) string {
+	m := fbSlashDateRe.FindStringSubmatch(text)
+	if m == nil {
+		return text
+	}
+	month, _ := strconv.Atoi(m[2])
+	day, _ := strconv.Atoi(m[3])
+	return fmt.Sprintf("%s-%02d-%02d%s", m[1], month, day, m[4])
+}
+
+// fbJsDateParse は Date.parse の代わり。ISO 8601（YYYY / YYYY-MM / YYYY-MM-DD / 日時）と YAML の timestamp、
+// V8 が読む YYYY/MM/DD（日時）だけを読む。
 // 時差の無い日時は UTC とする（YAML 1.1 の timestamp と同じ。JS の ISO 日時は現地時間）。読めなければ ok=false。
 func fbJsDateParse(text string) (int64, bool) {
+	text = fbNormalizeSlashDate(text)
 	if m := fbYearMonthRe.FindStringSubmatch(text); m != nil {
 		year, _ := strconv.Atoi(m[1])
 		month := 1
@@ -277,7 +293,7 @@ func fbParseExpires(v any) (int64, bool) {
 	if !ok {
 		return 0, false
 	}
-	text := fbJsTrim(s)
+	text := fbNormalizeSlashDate(fbJsTrim(s))
 	t, ok := fbJsDateParse(text)
 	if !ok {
 		return 0, false
