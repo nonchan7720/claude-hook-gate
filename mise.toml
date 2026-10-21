@@ -1,3 +1,22 @@
 [tools]
 bun = "1.4.2"
 node = "24"
+go = "1.24"
+golangci-lint = "2.15.0"
+goreleaser = "2.18.3"
+
+[tasks.lint]
+description = "Lint the Go sources and the TypeScript sources"
+run = "golangci-lint run ./... && bun run lint"
+
+[tasks.fmt]
+description = "Format the Go sources and the TypeScript sources"
+run = "golangci-lint fmt ./... && bun run format"
+
+[tasks.test]
+description = "Run the Go unit tests and the TypeScript tests (which spawn the Go binary)"
+run = "go test ./... && bun run test"
+
+[tasks.build]
+description = "Build the feedback-gate binary into bin/"
+run = "go build -o bin/feedback-gate ./cmd/feedback-gate"

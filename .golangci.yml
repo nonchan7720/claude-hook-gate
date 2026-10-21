@@ -1,0 +1,100 @@
+# golangci-lint v2 の設定。minto（github.com/nonchan7720/minto）の .golangci.yml を元にしている。
+# `golangci-lint run ./...` で lint、`golangci-lint fmt ./...` で整形（gofmt + goimports）。
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - asasalint
+    - asciicheck
+    - bidichk
+    - bodyclose
+    - containedctx
+    - contextcheck
+    - decorder
+    - durationcheck
+    - errname
+    - errorlint
+    - exhaustive
+    - gocheckcompilerdirectives
+    - gocritic
+    - gocyclo
+    - gomoddirectives
+    - gomodguard
+    - goprintffuncname
+    - gosec
+    - makezero
+    - nakedret
+    - nestif
+    - nilerr
+    - nilnil
+    - noctx
+    - nolintlint
+    - nonamedreturns
+    - nosprintfhostport
+    - predeclared
+    - testableexamples
+    - tparallel
+    - unconvert
+    - unparam
+    - usestdlibvars
+    - whitespace
+    - copyloopvar
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      disable:
+        - fieldalignment
+    gocyclo:
+      # TS からの 1:1 移植で分岐の多い関数（gate / feedback-rules）があるため、minto より緩める。
+      min-complexity: 30
+    nestif:
+      min-complexity: 8
+    revive:
+      rules:
+        - name: exported
+          disabled: true
+    gocritic:
+      disabled-checks:
+        - ifElseChain
+        - singleCaseSwitch
+
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - gocyclo
+          - errcheck
+          - dupl
+          - gosec
+          - funlen
+          - unparam
+          - nestif
+          - gocritic
+      # G104: 戻り値のエラーを無視している箇所（hook は内部エラーで作業を止めない方針）。
+      # G204: 引数ベクタのプロセス起動（gate.yaml のコマンドを実行するのが役目）。
+      # G304: ユーザーの指定したパスの読み込み（ルールファイル・状態ファイル）。
+      - text: "G104|G204|G304|G110|G112|G305"
+        linters:
+          - gosec
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/nonchan7720/claude-hook-gate
+
+run:
+  timeout: 5m
+  allow-parallel-runners: true
+  concurrency: 4

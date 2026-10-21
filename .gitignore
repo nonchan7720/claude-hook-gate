@@ -20,3 +20,9 @@ dist
 
 # Python (test fixtures)
 __pycache__
+
+# Go build output (mise run build)
+/bin/
+
+# Agent worktrees
+.claude/worktrees/
