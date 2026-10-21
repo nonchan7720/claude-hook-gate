@@ -124,7 +124,92 @@ func TestSkipCommandRe(t *testing.T) {
 	})
 }
 
+func TestIsReadOnlyCommand(t *testing.T) {
+	t.Run("accepts commands that only read", func(t *testing.T) {
+		for _, c := range []string{
+			"ls -la",
+			"cat src/a.ts | head -20",
+			"grep -rn foo src && git status",
+			"git -C sub log --oneline -5; git diff HEAD~1",
+			`rg "x" --glob "*.ts" 2>/dev/null`,
+			`find . -name "*.go" | wc -l`,
+			"FOO=1 env | sort | uniq -c",
+			"cd src && ls $(git rev-parse --show-toplevel)",
+			"sed -n 1,20p a.ts",
+			"go list ./... && go env GOPATH",
+			"cat a.txt > /dev/null 2>&1",
+			`echo "hello" && pwd`,
+			"/usr/bin/grep x y",
+			"time ls",
+		} {
+			assert.True(t, IsReadOnlyCommand(c), c)
+		}
+	})
+	t.Run("rejects commands that may write", func(t *testing.T) {
+		for _, c := range []string{
+			"",
+			"echo x > a.txt",
+			"cat a >> b",
+			"sed -i s/a/b/ x.txt",
+			"sed -ni p x.txt",
+			"sort -o out in",
+			`find . -name "*.tmp" -delete`,
+			`find . -exec rm {} \;`,
+			`awk '{system("rm x")}' f`,
+			"ls | xargs rm",
+			"cat a | tee b",
+			"bun run format",
+			"python3 x.py",
+			"git checkout -- .",
+			"git diff --output=p.diff",
+			"ls && make",
+			"go build ./...",
+			"cat <<EOF > x\nhi\nEOF",
+			"ls $(touch x)",
+			"ls `rm x`",
+			"ls; (rm x)",
+			"sudo ls",
+		} {
+			assert.False(t, IsReadOnlyCommand(c), c)
+		}
+	})
+}
+
 func TestRecordBashChanges(t *testing.T) {
+	t.Run("does not record anything for a read-only command, even when a file was written meanwhile", func(t *testing.T) {
+		bctRun(t, func(proj, _ string, _ *bctClock, io Io) {
+			bctInitRepo(t, proj, true)
+			p := bctPayload(Dict{"tool_input": Dict{"command": "grep -rn foo . | head"}})
+			BashStarted(io, p)
+			assert.False(t, Exists(StatePath(proj, "bash_started", "sess-1--tu1", "json")))
+			// 別のセッションがその間に書いたファイル
+			writeText(filepath.Join(proj, "tracked.txt"), "edited by another session\n")
+			bctSetMtime(t, filepath.Join(proj, "tracked.txt"), bctT0+500)
+			assert.Empty(t, RecordBashChanges(io, p))
+			assert.False(t, Exists(ChangedPath(proj, "sess-1")))
+		})
+	})
+
+	t.Run("does not record files another session already holds in its gate state (same working tree)", func(t *testing.T) {
+		bctRun(t, func(proj, _ string, _ *bctClock, io Io) {
+			bctInitRepo(t, proj, true)
+			require.NoError(t, os.MkdirAll(filepath.Dir(ChangedPath(proj, "sess-2")), 0o755))
+			writeText(ChangedPath(proj, "sess-2"), filepath.Join(proj, "tracked.txt")+"\n")
+			writeText(StatePath(proj, "gate_failed", "sess-3--agent-9", "txt"), filepath.Join(proj, "old.txt")+"\n")
+			// 自分のセッションのサブエージェント分は他人扱いしない
+			writeText(StatePath(proj, "gate_passed", "sess-1--agent-1", "txt"), filepath.Join(proj, "mine.txt")+"\n")
+			p := bctPayload(Dict{"tool_input": Dict{"command": "bun run format"}})
+			BashStarted(io, p)
+			for _, f := range []string{"tracked.txt", "old.txt", "mine.txt", "new.txt"} {
+				writeText(filepath.Join(proj, f), "changed\n")
+				bctSetMtime(t, filepath.Join(proj, f), bctT0+500)
+			}
+			want := []string{filepath.Join(proj, "mine.txt"), filepath.Join(proj, "new.txt")}
+			assert.Equal(t, want, bctSorted(RecordBashChanges(io, p)))
+			assert.Equal(t, want, bctSorted(ChangedLines(proj, "sess-1")))
+		})
+	})
+
 	t.Run("records only files whose mtime is at or after the start", func(t *testing.T) {
 		bctRun(t, func(proj, _ string, _ *bctClock, io Io) {
 			bctInitRepo(t, proj, true)

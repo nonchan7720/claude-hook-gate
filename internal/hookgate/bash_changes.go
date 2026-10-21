@@ -39,6 +39,132 @@ import (
 var SkipCommandRe = regexp.MustCompile(
 	`\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?:=\S+)?))*\s+(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b`)
 
+// 読むだけのコマンド（ファイルを書き換えられないもの）は変更検出の対象外にする（src/bash-changes.ts の isReadOnlyCommand）。
+// 同じ作業ツリーで別のセッションが編集中だと、このコマンドの間に書かれたファイルを「このコマンドの変更」として拾ってしまい、
+// 調査しかしていないセッションの gate が他人の変更で走る（そして同じコマンドの直列化で相手の実行を待つ）ため。判定は保守的:
+// コマンドを `|` / `&&` / `||` / `;` / 改行 / `&` / `$(` / バッククォート / `(` / `{` で区切り、各区切りの先頭の語（環境変数の代入と
+// command / builtin / time / exec は読み飛ばす）がすべて読むだけのものに限る。ファイルへのリダイレクト（`>`。`2>&1` と /dev/null
+// 行きは除く）、find の -exec / -delete、sed の -i、sort の -o、awk の system( などがあれば読むだけとはみなさない。
+// 分からないものは「書くかもしれない」側に倒す（検査が増える方向で、抜ける方向ではない）。
+var bashReadOnlyCommands = bashSet(
+	"ls", "cat", "head", "tail", "less", "more", "bat", "tac", "nl", "wc", "grep", "egrep", "fgrep", "rg", "ag", "ack", "find", "fd", "fdfind",
+	"sort", "uniq", "cut", "tr", "awk", "gawk", "mawk", "sed", "diff", "cmp", "comm", "stat", "file", "du", "df", "tree", "pwd", "echo", "printf",
+	"which", "whereis", "type", "env", "printenv", "jq", "yq", "column", "od", "xxd", "hexdump", "strings", "basename", "dirname", "realpath",
+	"readlink", "date", "uname", "id", "whoami", "hostname", "sleep", "rev", "fold", "paste", "join", "md5sum", "sha1sum", "sha256sum", "shasum",
+	"cksum", "ps", "pgrep", "lsof", "man", "true", "false", ":", "test", "[", "[[", "cd", "pushd", "popd", "exit", "return", "export", "local",
+	"set", "unset", "shift",
+)
+
+var bashReadOnlyGit = bashSet(
+	"status", "log", "diff", "show", "blame", "ls-files", "ls-tree", "grep", "rev-parse", "rev-list", "describe", "shortlog", "cat-file", "branch",
+	"tag", "remote", "fetch", "reflog", "name-rev", "show-ref", "for-each-ref", "diff-tree", "var", "version", "help",
+)
+
+var bashReadOnlyGo = bashSet("env", "version", "list", "doc")
+
+var bashGitValueOptions = bashSet("-C", "-c", "--git-dir", "--work-tree", "--namespace")
+
+var bashWrapperWords = bashSet("command", "builtin", "time", "exec", "nice")
+
+var (
+	// bashWriteHintRe が入っていれば書くかもしれない（どのコマンドでも）。
+	bashWriteHintRe = regexp.MustCompile(`system\(|-exec\b|-execdir\b|-ok\b|-okdir\b|-delete\b|-fprint|--in-place|--output`)
+	// bashHarmlessRedirectRe は許されるリダイレクト: 2>&1 や >/dev/null の類。これを消したあとに `>` が残れば、ファイルへ書いている。
+	bashHarmlessRedirectRe = regexp.MustCompile(`\d*>>?&\d+|\d*>>?\s*/dev/null`)
+	bashSegmentSplitRe     = regexp.MustCompile("\\|\\|?|&&|;|\n|&|\\$\\(|`|<\\(|\\(|\\{")
+	bashLeadingAssignRe    = regexp.MustCompile(`^(?:\w+=(?:"[^"]*"|'[^']*'|\S*)\s+)*`)
+	bashFirstWordRe        = regexp.MustCompile(`^\s*\S+\s*`)
+	bashSedInPlaceRe       = regexp.MustCompile(`^-[A-Za-z]*i`)
+	bashSortOutputRe       = regexp.MustCompile(`^-[A-Za-z]*o`)
+	bashTrailingCloseRe    = regexp.MustCompile(`[)}]+$`)
+)
+
+func bashSet(words ...string) map[string]bool {
+	m := make(map[string]bool, len(words))
+	for _, w := range words {
+		m[w] = true
+	}
+	return m
+}
+
+// bashCommandWords は segment の語（空白区切り。引用符の中の空白までは見ない）から、先頭の wrapper と環境変数の代入を外したもの。
+func bashCommandWords(segment string) []string {
+	rest := bashLeadingAssignRe.ReplaceAllString(segment, "")
+	words := strings.Fields(rest)
+	for len(words) > 0 && bashWrapperWords[words[0]] {
+		rest = bashLeadingAssignRe.ReplaceAllString(bashFirstWordRe.ReplaceAllString(rest, ""), "")
+		words = strings.Fields(rest)
+	}
+	return words
+}
+
+// bashSubcommandOf は git / go の、グローバルオプションを飛ばした先のサブコマンド。
+func bashSubcommandOf(words []string, valueOptions map[string]bool) string {
+	for i := 1; i < len(words); i++ {
+		w := words[i]
+		if valueOptions[w] {
+			i++
+			continue
+		}
+		if strings.HasPrefix(w, "-") {
+			continue
+		}
+		return w
+	}
+	return ""
+}
+
+// IsReadOnlyCommand は command がファイルを書き換えないコマンドだけでできているか（保守的: 分からなければ false）。
+func IsReadOnlyCommand(command string) bool {
+	text := bashHarmlessRedirectRe.ReplaceAllString(command, " ")
+	if strings.Contains(text, ">") || bashWriteHintRe.MatchString(text) {
+		return false
+	}
+	found := false
+	for _, segment := range bashSegmentSplitRe.Split(text, -1) {
+		words := bashCommandWords(segment)
+		if len(words) == 0 {
+			continue
+		}
+		name := words[0]
+		if i := strings.LastIndex(name, "/"); i >= 0 {
+			name = name[i+1:]
+		}
+		name = bashTrailingCloseRe.ReplaceAllString(name, "")
+		if name == "" {
+			continue
+		}
+		found = true
+		switch name {
+		case "git":
+			if !bashReadOnlyGit[bashSubcommandOf(words, bashGitValueOptions)] {
+				return false
+			}
+			continue
+		case "go":
+			if !bashReadOnlyGo[bashSubcommandOf(words, nil)] {
+				return false
+			}
+			continue
+		}
+		if !bashReadOnlyCommands[name] {
+			return false
+		}
+		if name == "sed" || name == "sort" {
+			re := bashSedInPlaceRe
+			if name == "sort" {
+				re = bashSortOutputRe
+			}
+			for _, w := range words[1:] {
+				if re.MatchString(w) {
+					return false
+				}
+			}
+		}
+	}
+	return found
+}
+
 // HFS+ の 1 秒粒度と時計ずれの余裕。
 const bashMtimeSlackMs int64 = 2000
 
@@ -119,6 +245,9 @@ func BashStarted(io Io, payload Dict) ScriptResult {
 	func() {
 		// 追跡の失敗で作業を止めない。
 		defer func() { _ = recover() }()
+		if IsReadOnlyCommand(bashCommandOf(payload)) {
+			return
+		}
 		projectDir := bashProjectDir(io)
 		gate := bashHasGate(io, projectDir)
 		if !gate {
@@ -219,11 +348,8 @@ func bashDetect(io Io, projectDir string, gate bool, startedDirPath, raw string,
 		return bashNone
 	}
 
-	var command string
-	if input, isDict := AsDict(payload["tool_input"]); isDict {
-		command = JqStr(input["command"])
-	}
-	if SkipCommandRe.MatchString(command) {
+	command := bashCommandOf(payload)
+	if SkipCommandRe.MatchString(command) || IsReadOnlyCommand(command) {
 		return bashNone
 	}
 
@@ -233,12 +359,23 @@ func bashDetect(io Io, projectDir string, gate bool, startedDirPath, raw string,
 	if cwd == "" {
 		cwd = io.Cwd()
 	}
+	foreign := map[string]bool{}
+	if gate {
+		sessionID := JqStr(payload["session_id"])
+		if sessionID == "" {
+			sessionID = "unknown"
+		}
+		foreign = bashFilesOfOtherSessions(io, stateDir, sessionID)
+	}
 	changed := []string{}
 	seen := map[string]bool{}
 	for _, root := range bashScanRoots(io, projectDir, cwd, command) {
 		for _, rel := range bashCandidates(io, root, threshold) {
 			abs := Join(root, rel)
 			if strings.HasPrefix(abs, stateDir+"/") || strings.HasPrefix(abs, startedDirPath+"/") || strings.HasPrefix(rel, ".claude/"+bashStateDir+"/") {
+				continue
+			}
+			if foreign[abs] {
 				continue
 			}
 			if st, ok := io.Stat(abs); ok && st.Kind == KindFile && st.MtimeMs >= threshold && !seen[abs] {
@@ -275,6 +412,43 @@ func bashDetect(io Io, projectDir string, gate bool, startedDirPath, raw string,
 		}
 	}
 	return BashChangeResult{Changed: changed, Recorded: recorded, Threshold: threshold, Gate: gate}
+}
+
+// bashCommandOf は payload.tool_input.command。
+func bashCommandOf(payload Dict) string {
+	if input, isDict := AsDict(payload["tool_input"]); isDict {
+		return JqStr(input["command"])
+	}
+	return ""
+}
+
+var bashOtherStateRe = regexp.MustCompile(`^(?:changed_files|gate_passed|gate_failed)\.(.+)\.txt$`)
+
+// bashFilesOfOtherSessions は同じ作業ツリーで動く他のセッションが自分の変更として持っているファイル（changed_files / gate_passed /
+// gate_failed の <session>[--<agent>] が自分のセッションでないもの）。このコマンドの間に mtime が動いていても、それは相手の編集なので
+// 拾わない。相手の gate がそのファイルを検査する。自分のセッションのサブエージェント分は従来どおり拾う。
+func bashFilesOfOtherSessions(io Io, stateDir, sessionID string) map[string]bool {
+	out := map[string]bool{}
+	for _, e := range io.List(stateDir) {
+		if e.Kind != KindFile {
+			continue
+		}
+		m := bashOtherStateRe.FindStringSubmatch(e.Name)
+		if m == nil {
+			continue
+		}
+		id := m[1]
+		if id == sessionID || strings.HasPrefix(id, sessionID+"--") {
+			continue
+		}
+		text, _ := io.ReadFile(Join(stateDir, e.Name))
+		for _, line := range strings.Split(text, "\n") {
+			if line != "" {
+				out[line] = true
+			}
+		}
+	}
+	return out
 }
 
 func bashGitTop(io Io, dir string) string {
