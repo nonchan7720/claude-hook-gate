@@ -299,6 +299,8 @@ const regexMatchTimeout = 10 * time.Second
 // 先頭の (?i) / (?s) / (?m) と名前付きグループ (?P<name>...) / (?P=name) を読み替え、\A（文字列の先頭）と
 // \Z / \z（文字列の末尾）は m の有無によらず文字列の端だけに一致させる。m フラグ無しの $ も JS と同じく
 // 文字列の末尾だけに一致する（.NET 系の「末尾の改行の前」には一致しない）。
+// TS 版（mod 側の src/pyutil.ts）は JS の RegExp なので、同じルールファイルが同じ結果になるよう JS の意味に寄せる:
+// regexp2.ECMAScript で \w \d \b を ASCII だけにし、残りの違い（. ^ $ \s が見る改行・空白の範囲）は translateJS で書き換える。
 // 対応できない書き方（先頭の (?x) など）や不正な正規表現はエラー（呼び出し側がその要素だけを無効にする）。
 func PyRegExp(source, flags string) (*regexp2.Regexp, error) {
 	src := source
@@ -314,19 +316,13 @@ func PyRegExp(source, flags string) (*regexp2.Regexp, error) {
 			}
 		}
 	}
-	multiline := strings.Contains(fl, "m")
-	src = replaceAnchors(src, multiline)
+	src = translateJS(src, strings.Contains(fl, "m"), strings.Contains(fl, "s"))
 	src = namedGroupRe.ReplaceAllString(src, "(?<$1>")
 	src = namedBackRe.ReplaceAllString(src, `\k<$1>`)
-	var opts regexp2.RegexOptions
+	// ECMAScript は IgnoreCase / Multiline としか組めない（Singleline も使えない）ので、m と s は translateJS が引き受ける。
+	opts := regexp2.RegexOptions(regexp2.ECMAScript)
 	if strings.Contains(fl, "i") {
 		opts |= regexp2.IgnoreCase
-	}
-	if multiline {
-		opts |= regexp2.Multiline
-	}
-	if strings.Contains(fl, "s") {
-		opts |= regexp2.Singleline
 	}
 	re, err := regexp2.Compile(src, opts)
 	if err != nil {
@@ -342,8 +338,27 @@ func PyMatch(re *regexp2.Regexp, s string) bool {
 	return err == nil && ok
 }
 
-// replaceAnchors は文字クラスの外の \Z / \z を \z に、m フラグ無しの $ を \z に置き換え、文字クラス先頭の ] を整える。
-func replaceAnchors(src string, multiline bool) string {
+const (
+	// jsSpaceSet は JS の \s（WhiteSpace + LineTerminator）。ECMAScript モードの \s は ASCII の空白だけなので展開する。
+	jsSpaceSet = `\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff`
+	// jsLineTerminators は JS の LineTerminator（. の除外と m フラグ付き ^ $ が見る改行）。
+	jsLineTerminators = `\n\r\u2028\u2029`
+	// jsWordBoundary / jsNotWordBoundary は JS の \b / \B（単語文字は ASCII の [A-Za-z0-9_] だけ）。
+	// regexp2 は ECMAScript モードでも \b だけは Unicode の単語文字で判定するので展開する。
+	jsWordBoundary    = `(?:(?<=[A-Za-z0-9_])(?![A-Za-z0-9_])|(?<![A-Za-z0-9_])(?=[A-Za-z0-9_]))`
+	jsNotWordBoundary = `(?:(?<=[A-Za-z0-9_])(?=[A-Za-z0-9_])|(?<![A-Za-z0-9_])(?![A-Za-z0-9_]))`
+)
+
+// translateJS は Python 形式の正規表現（regexp2 の ECMAScript モードに渡すもの）を JS の RegExp と同じ意味にする。
+//   - 文字クラスの外の \A は \A、\Z / \z は \z（文字列の端だけ）。
+//   - m フラグ無しの $ は \z。m フラグ付きの ^ $ は JS の改行（\n \r U+2028 U+2029）の前後に一致させる。
+//   - \b \B は ASCII の単語文字で判定する（regexp2 は ECMAScript モードでも \b だけ Unicode で判定する）。
+//   - . は s フラグ付きなら全文字、無しなら JS の改行以外。
+//   - \s \S は JS の空白の範囲に広げる（クラスの中の \s も展開。クラスの中の \S は ASCII のまま）。
+//   - JS では恒等エスケープになる \a \e \p などの英字は、.NET 系の意味にならないよう英字そのものにする。
+//   - 文字クラスの中の [ は JS では文字なので \[ にする（.NET の差集合 [a-z-[aeiou]] を避ける）。
+//   - 文字クラス先頭の ]（Python では []] / [^]] の ] は文字）は \] にする。
+func translateJS(src string, multiline, dotAll bool) string {
 	var out strings.Builder
 	inClass := false
 	for i := 0; i < len(src); i++ {
@@ -353,22 +368,26 @@ func replaceAnchors(src string, multiline bool) string {
 				out.WriteByte(c)
 				break
 			}
-			next := src[i+1]
-			if !inClass && (next == 'Z' || next == 'z') {
-				out.WriteString(`\z`)
-				i++
-				continue
-			}
-			// 次の 1 文字（UTF-8 の続きのバイトを含む）をそのまま写す
-			out.WriteByte(c)
 			i++
-			out.WriteByte(src[i])
+			writeJSEscape(&out, src[i], inClass)
 			continue
 		}
-		if c == '[' && !inClass {
+		if inClass {
+			switch c {
+			case ']':
+				inClass = false
+				out.WriteByte(c)
+			case '[':
+				out.WriteString(`\[`)
+			default:
+				out.WriteByte(c)
+			}
+			continue
+		}
+		switch c {
+		case '[':
 			inClass = true
 			out.WriteByte(c)
-			// 先頭の ^ の直後の ] はクラスの中身（Python では []] / [^]] の ] は文字）
 			if i+1 < len(src) && src[i+1] == '^' {
 				i++
 				out.WriteByte(src[i])
@@ -377,18 +396,69 @@ func replaceAnchors(src string, multiline bool) string {
 				i++
 				out.WriteString(`\]`)
 			}
-			continue
+		case '.':
+			if dotAll {
+				out.WriteString(`[\s\S]`)
+			} else {
+				out.WriteString(`[^` + jsLineTerminators + `]`)
+			}
+		case '^':
+			if multiline {
+				out.WriteString(`(?:\A|(?<=[` + jsLineTerminators + `]))`)
+			} else {
+				out.WriteByte(c)
+			}
+		case '$':
+			if multiline {
+				out.WriteString(`(?:\z|(?=[` + jsLineTerminators + `]))`)
+			} else {
+				out.WriteString(`\z`)
+			}
+		default:
+			out.WriteByte(c)
 		}
-		if c == ']' && inClass {
-			inClass = false
-		}
-		if c == '$' && !inClass && !multiline {
-			out.WriteString(`\z`)
-			continue
-		}
-		out.WriteByte(c)
 	}
 	return out.String()
+}
+
+// writeJSEscape は `\<next>` を JS と同じ意味になる書き方で out に書く（バックスラッシュの次の 1 バイトが next）。
+func writeJSEscape(out *strings.Builder, next byte, inClass bool) {
+	switch {
+	case !inClass && next == 'A':
+		out.WriteString(`\A`)
+	case !inClass && (next == 'Z' || next == 'z'):
+		out.WriteString(`\z`)
+	case next == 's' && inClass:
+		out.WriteString(jsSpaceSet)
+	case next == 's':
+		out.WriteString(`[` + jsSpaceSet + `]`)
+	case next == 'S' && !inClass:
+		out.WriteString(`[^` + jsSpaceSet + `]`)
+	case next == 'b' && !inClass:
+		out.WriteString(jsWordBoundary)
+	case next == 'B' && !inClass:
+		out.WriteString(jsNotWordBoundary)
+	case next >= 0x80, isIdentityEscapeLetter(next, inClass):
+		// 恒等エスケープ: バックスラッシュを落とす（非 ASCII の文字の続きのバイトは呼び出し側の次の周回でそのまま写る）
+		out.WriteByte(next)
+	default:
+		out.WriteByte('\\')
+		out.WriteByte(next)
+	}
+}
+
+// isIdentityEscapeLetter は \<c> が JS（u フラグ無し）では c そのものを表す英字・_ か。
+// JS が意味を持たせている d D w W s S b B f n r t v c x u k 0-9 は含まない（B は文字クラスの中では恒等）。
+func isIdentityEscapeLetter(c byte, inClass bool) bool {
+	switch {
+	case c == '_':
+		return true
+	case c == 'B':
+		return inClass
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+		return !strings.ContainsRune("dDwWsSbfnrtvcxuk", rune(c))
+	}
+	return false
 }
 
 // JqStr は jq の `.x // empty`（null / false は空）+ `-r`（文字列はそのまま）に相当する取り出し。
