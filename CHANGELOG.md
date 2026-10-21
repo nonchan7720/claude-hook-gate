@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.9.0...v0.9.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* let the settings hook CLI exit when a command leaves a grandchild holding its pipes ([#63](https://github.com/nonchan7720/claude-hook-gate/issues/63)) ([d237c47](https://github.com/nonchan7720/claude-hook-gate/commit/d237c47453c88d6f2656cb23482618f15f3a61bd))
+
 ## [0.9.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.8.0...v0.9.0) (2026-10-20)
 
 
