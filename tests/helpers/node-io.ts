@@ -169,10 +169,14 @@ function runProcess(argv: readonly string[], options: RunOptions = {}): Promise<
     let stderr = ''
     let timedOut = false
     let settled = false
+    let graceTimer: ReturnType<typeof setTimeout> | undefined
     const finish = (r: RunResult): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      if (graceTimer) clearTimeout(graceTimer)
+      child.stdout?.destroy()
+      child.stderr?.destroy()
       resolve(r)
     }
     const timer = setTimeout(() => {
@@ -189,8 +193,13 @@ function runProcess(argv: readonly string[], options: RunOptions = {}): Promise<
     child.stderr?.on('data', (d: Buffer) => {
       stderr += d.toString('utf8')
     })
+    const result = (code: number | null): RunResult => ({ exitCode: timedOut ? 1 : (code ?? 1), stdout, stderr, timedOut })
     child.on('error', (e) => finish({ exitCode: 1, stdout, stderr, timedOut, error: e.message }))
-    child.on('close', (code) => finish({ exitCode: timedOut ? 1 : (code ?? 1), stdout, stderr, timedOut }))
+    // src/node-io.ts と同じく、孫プロセスがパイプを継いでいても 'exit' の少し後に返す。
+    child.on('exit', (code) => {
+      graceTimer = setTimeout(() => finish(result(code)), 500)
+    })
+    child.on('close', (code) => finish(result(code)))
     child.stdin?.on('error', () => undefined)
     child.stdin?.end(options.stdin ?? '')
   })
