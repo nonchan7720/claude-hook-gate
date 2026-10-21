@@ -72,6 +72,8 @@ Codex plugins have no settings screen, so the options of the Claude Code plugin 
 | --- | --- | --- |
 | `FEEDBACK_GATE_LANG` | `language` | `ja` / `en`; unset follows `LC_ALL` / `LC_MESSAGES` / `LANG`. |
 | `FEEDBACK_GATE_AGENT_LAUNCH_GUARD` | `agentLaunchGuard` | `true` to enable (default off). |
+| `FEEDBACK_GATE_ASK_AGENT_TYPES` | (none) | Agent types (`agent_type`) the launch guard asks about, separated by `,` or `;` (default `code-implementer`). |
+| `FEEDBACK_GATE_ALLOW_RECIPIENTS` | (none) | Recipients (`agent_id`) of `send_input` that need no confirmation, separated by `,` or `;` (default `git-operator`). |
 | `FEEDBACK_GATE_AUTO_COUNT` | `autoCount` | `false` to disable (default on). |
 | `FEEDBACK_GATE_RULES_FILE` | `rulesFile` | Path of the rules file injected into every prompt (default `~/{.agents,.claude}/feedback-gate/feedback_rules.md`; the bundled `rules/feedback_rules.md` when none exists). |
 

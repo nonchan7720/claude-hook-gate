@@ -72,6 +72,8 @@ Codex のプラグインには設定画面が無いので、Claude Code 版の�
 | --- | --- | --- |
 | `FEEDBACK_GATE_LANG` | `language` | `ja` / `en`。未設定なら `LC_ALL` / `LC_MESSAGES` / `LANG` に従う。 |
 | `FEEDBACK_GATE_AGENT_LAUNCH_GUARD` | `agentLaunchGuard` | `true` で有効（既定は無効）。 |
+| `FEEDBACK_GATE_ASK_AGENT_TYPES` | （なし） | launch guard が確認するエージェント種別（`agent_type`）。`,` または `;` 区切り（既定 `code-implementer`）。 |
+| `FEEDBACK_GATE_ALLOW_RECIPIENTS` | （なし） | `send_input` で確認なしに送ってよい宛先（`agent_id`）。`,` または `;` 区切り（既定 `git-operator`）。 |
 | `FEEDBACK_GATE_AUTO_COUNT` | `autoCount` | `false` で無効（既定は有効）。 |
 | `FEEDBACK_GATE_RULES_FILE` | `rulesFile` | 毎回のプロンプトに注入する rules ファイルのパス（既定 `~/{.agents,.claude}/feedback-gate/feedback_rules.md`。無ければ同梱の `rules/feedback_rules.md`）。 |
 

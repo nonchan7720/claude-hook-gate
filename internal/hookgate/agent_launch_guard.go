@@ -10,12 +10,41 @@ package hookgate
 // - SendMessage: AllowRecipients 以外の宛先への送信を ask
 //
 // どちらにも該当しなければ何も出力せず、通常のパーミッション判定に委ねる。
+//
+// 一覧は環境変数で差し替えられる（AgentLaunchLists）: FEEDBACK_GATE_ASK_AGENT_TYPES と FEEDBACK_GATE_ALLOW_RECIPIENTS に
+// `,` か `;` 区切りで並べる（前後の空白は無視、空の要素は捨てる）。未設定なら既定の一覧。
 
-// AskAgentTypes は起動前に確認する subagent_type。
+import "strings"
+
+// AskAgentTypes は起動前に確認する subagent_type の既定。
 var AskAgentTypes = []string{"code-implementer"}
 
-// AllowRecipients は確認なしで送ってよい宛先（エージェント名）。
+// AllowRecipients は確認なしで送ってよい宛先（エージェント名）の既定。
 var AllowRecipients = []string{"git-operator"}
+
+// ParseAgentList は `,` / `;` 区切りの一覧を要素に分ける。前後の空白は落とし、空の要素は捨てる。
+func ParseAgentList(s string) []string {
+	var out []string
+	for _, item := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ';' }) {
+		if v := strings.TrimSpace(item); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// AgentLaunchLists は環境変数から [確認する subagent_type, 確認なしで送ってよい宛先] を決める。未設定（または空の一覧）なら既定。
+func AgentLaunchLists(env EnvVars) ([]string, []string) {
+	askAgentTypes := ParseAgentList(env.FeedbackGateAskAgentTypes)
+	if len(askAgentTypes) == 0 {
+		askAgentTypes = AskAgentTypes
+	}
+	allowRecipients := ParseAgentList(env.FeedbackGateAllowRecipients)
+	if len(allowRecipients) == 0 {
+		allowRecipients = AllowRecipients
+	}
+	return askAgentTypes, allowRecipients
+}
 
 func fbAskLaunch(reason string) ScriptResult {
 	return Ok(JSONStringify(OMap{{"hookSpecificOutput", OMap{
@@ -25,8 +54,13 @@ func fbAskLaunch(reason string) ScriptResult {
 	}}})+"\n", "")
 }
 
-// AgentLaunchGuard はサブエージェントへの作業指示の送信前に、本文を見せて ask を返す。
+// AgentLaunchGuard はサブエージェントへの作業指示の送信前に、本文を見せて ask を返す（既定の一覧）。
 func AgentLaunchGuard(payload Dict, lang Lang) ScriptResult {
+	return AgentLaunchGuardWith(payload, lang, AskAgentTypes, AllowRecipients)
+}
+
+// AgentLaunchGuardWith は AgentLaunchGuard の、確認する subagent_type と確認なしの宛先を指定する形。
+func AgentLaunchGuardWith(payload Dict, lang Lang, askAgentTypes, allowRecipients []string) ScriptResult {
 	t := Tr(lang)
 	tool := JqStr(payload["tool_name"])
 	input := Dict{}
@@ -39,12 +73,12 @@ func AgentLaunchGuard(payload Dict, lang Lang) ScriptResult {
 		if agentType == "" {
 			return Ok("", "")
 		}
-		if fbContainsString(AskAgentTypes, agentType) {
+		if fbContainsString(askAgentTypes, agentType) {
 			return fbAskLaunch(t("launch.promptTo", map[string]any{"agentType": agentType}) + "\n\n" + JqStr(input["prompt"]) + "\n\n" + t("launch.checklist"))
 		}
 	case "SendMessage":
 		recipient := JqStr(input["to"])
-		if !fbContainsString(AllowRecipients, recipient) {
+		if !fbContainsString(allowRecipients, recipient) {
 			shown := recipient
 			if shown == "" {
 				shown = t("launch.unknownRecipient")

@@ -40,6 +40,9 @@ func PickEnv(environ map[string]string) EnvVars {
 		LCAll:             environ["LC_ALL"],
 		LCMessages:        environ["LC_MESSAGES"],
 		LangEnv:           environ["LANG"],
+
+		FeedbackGateAskAgentTypes:   environ["FEEDBACK_GATE_ASK_AGENT_TYPES"],
+		FeedbackGateAllowRecipients: environ["FEEDBACK_GATE_ALLOW_RECIPIENTS"],
 	}
 }
 

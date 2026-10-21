@@ -97,6 +97,7 @@ func MakeIo(opts IoOpts) Io {
 		{&env.Home, &o.Home}, {&env.Path, &o.Path}, {&env.ClaudeFeedbackDir, &o.ClaudeFeedbackDir}, {&env.DogwoodBin, &o.DogwoodBin},
 		{&env.TermProgram, &o.TermProgram}, {&env.CFBundleID, &o.CFBundleID}, {&env.FeedbackGateLang, &o.FeedbackGateLang},
 		{&env.LCAll, &o.LCAll}, {&env.LCMessages, &o.LCMessages}, {&env.LangEnv, &o.LangEnv},
+		{&env.FeedbackGateAskAgentTypes, &o.FeedbackGateAskAgentTypes}, {&env.FeedbackGateAllowRecipients, &o.FeedbackGateAllowRecipients},
 	} {
 		if *f.src != "" {
 			*f.dst = *f.src

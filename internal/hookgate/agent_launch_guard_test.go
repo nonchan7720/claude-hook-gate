@@ -46,3 +46,54 @@ func TestAgentLaunchGuard(t *testing.T) {
 		assert.Equal(t, "", guard(Dict{"tool_name": "Bash", "tool_input": Dict{}}).Stdout)
 	})
 }
+
+// FEEDBACK_GATE_ASK_AGENT_TYPES / FEEDBACK_GATE_ALLOW_RECIPIENTS で一覧を差し替える（TS 版には無い）。
+func TestAgentLaunchGuardListsFromEnv(t *testing.T) {
+	decision := func(r ScriptResult) Dict {
+		return fbtParseJSON(t, r.Stdout)["hookSpecificOutput"].(Dict)
+	}
+	agent := func(agentType string) Dict {
+		return Dict{"tool_name": "Agent", "tool_input": Dict{"subagent_type": agentType, "prompt": "P"}}
+	}
+	send := func(to string) Dict {
+		return Dict{"tool_name": "SendMessage", "tool_input": Dict{"to": to, "message": "M"}}
+	}
+
+	t.Run("ParseAgentList splits on , and ;, trims, and drops empty items", func(t *testing.T) {
+		assert.Equal(t, []string{"a", "b", "c"}, ParseAgentList("a, b;c"))
+		assert.Equal(t, []string{"x"}, ParseAgentList(" x ,, ; "))
+		assert.Nil(t, ParseAgentList(""))
+		assert.Nil(t, ParseAgentList(" ;, "))
+	})
+
+	t.Run("unset or empty variables keep the defaults", func(t *testing.T) {
+		ask, allow := AgentLaunchLists(EnvVars{})
+		assert.Equal(t, AskAgentTypes, ask)
+		assert.Equal(t, AllowRecipients, allow)
+		ask, allow = AgentLaunchLists(EnvVars{FeedbackGateAskAgentTypes: " ; ", FeedbackGateAllowRecipients: ","})
+		assert.Equal(t, AskAgentTypes, ask)
+		assert.Equal(t, AllowRecipients, allow)
+	})
+
+	t.Run("the asked agent types and the allowed recipients come from the environment", func(t *testing.T) {
+		ask, allow := AgentLaunchLists(EnvVars{FeedbackGateAskAgentTypes: "worker;reviewer", FeedbackGateAllowRecipients: "git-operator, ops"})
+		assert.Equal(t, "ask", decision(AgentLaunchGuardWith(agent("worker"), LangJA, ask, allow))["permissionDecision"])
+		assert.Equal(t, "ask", decision(AgentLaunchGuardWith(agent("reviewer"), LangJA, ask, allow))["permissionDecision"])
+		// 既定の code-implementer は一覧に無いので通す。
+		assert.Equal(t, "", AgentLaunchGuardWith(agent("code-implementer"), LangJA, ask, allow).Stdout)
+		assert.Equal(t, "", AgentLaunchGuardWith(send("ops"), LangJA, ask, allow).Stdout)
+		assert.Equal(t, "", AgentLaunchGuardWith(send("git-operator"), LangJA, ask, allow).Stdout)
+		assert.Equal(t, "ask", decision(AgentLaunchGuardWith(send("someone"), LangJA, ask, allow))["permissionDecision"])
+	})
+
+	t.Run("PreToolUse reads the lists from the Io environment", func(t *testing.T) {
+		WithTmp(func(dir string) {
+			io := MakeIo(IoOpts{ProjectDir: dir, Env: EnvVars{FeedbackGateAskAgentTypes: "worker"}})
+			opts := PluginOptions{AgentLaunchGuard: true}
+			run := PreToolUse(io, "sess", opts, agent("worker"))
+			assert.NotNil(t, run.Outcome.Ask)
+			run = PreToolUse(io, "sess", opts, agent("code-implementer"))
+			assert.Nil(t, run.Outcome.Ask)
+		})
+	})
+}

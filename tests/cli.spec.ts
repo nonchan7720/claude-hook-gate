@@ -107,6 +107,22 @@ describe('PreToolUse', () => {
       expect(r.json?.hookSpecificOutput.permissionDecision).toBe('ask')
       expect(r.json?.hookSpecificOutput.permissionDecisionReason).toContain('code-implementer に送るプロンプト:\n\ndo it')
     }))
+
+  test('FEEDBACK_GATE_ASK_AGENT_TYPES / FEEDBACK_GATE_ALLOW_RECIPIENTS replace the guarded agent types and the allowed recipients', () =>
+    withEnv(async (env) => {
+      const on = {
+        CLAUDE_PLUGIN_OPTION_agentLaunchGuard: 'true',
+        FEEDBACK_GATE_ASK_AGENT_TYPES: 'worker; reviewer',
+        FEEDBACK_GATE_ALLOW_RECIPIENTS: 'git-operator, ops',
+      }
+      const agent = (type: string) => ({ tool_name: 'Agent', tool_input: { subagent_type: type, prompt: 'do it' }, tool_use_id: 't3' })
+      const send = (to: string) => ({ tool_name: 'SendMessage', tool_input: { to, message: 'hi' }, tool_use_id: 't4' })
+      expect((await hook(env, 'PreToolUse', agent('worker'), on)).json?.hookSpecificOutput.permissionDecision).toBe('ask')
+      expect((await hook(env, 'PreToolUse', agent('reviewer'), on)).json?.hookSpecificOutput.permissionDecision).toBe('ask')
+      expect((await hook(env, 'PreToolUse', agent('code-implementer'), on)).stdout).toBe('')
+      expect((await hook(env, 'PreToolUse', send('ops'), on)).stdout).toBe('')
+      expect((await hook(env, 'PreToolUse', send('someone'), on)).json?.hookSpecificOutput.permissionDecision).toBe('ask')
+    }))
 })
 
 describe('PostToolUse', () => {

@@ -16,6 +16,12 @@ type EnvVars struct {
 	LCAll            string // LC_ALL
 	LCMessages       string // LC_MESSAGES
 	LangEnv          string // LANG
+	// FeedbackGateAskAgentTypes は FEEDBACK_GATE_ASK_AGENT_TYPES: agentLaunchGuard が確認する subagent_type の一覧（`,` / `;` 区切り）。
+	// 未設定なら AskAgentTypes の既定。
+	FeedbackGateAskAgentTypes string
+	// FeedbackGateAllowRecipients は FEEDBACK_GATE_ALLOW_RECIPIENTS: agentLaunchGuard が確認なしで送ってよい宛先の一覧（同上）。
+	// 未設定なら AllowRecipients の既定。
+	FeedbackGateAllowRecipients string
 }
 
 // Kind はファイルの種類。

@@ -179,7 +179,10 @@ func PreToolUse(io Io, sessionID string, options PluginOptions, payload Dict) Ho
 	guardsAgents := options.AgentLaunchGuard && reAgentTools.MatchString(tool)
 	var step Step
 	if guardsAgents {
-		step = func(i Io) ScriptResult { return AgentLaunchGuard(payload, i.Lang()) }
+		step = func(i Io) ScriptResult {
+			askAgentTypes, allowRecipients := AgentLaunchLists(i.Env())
+			return AgentLaunchGuardWith(payload, i.Lang(), askAgentTypes, allowRecipients)
+		}
 	} else {
 		step = func(i Io) ScriptResult { return FeedbackGuard(i, payload) }
 	}
