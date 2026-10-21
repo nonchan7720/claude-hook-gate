@@ -4093,6 +4093,32 @@ function makeNodeIo(init) {
     }
   };
 }
+var EXIT_GRACE_MS = 500;
+var activeGroups = new Set;
+var FORWARDED_SIGNALS = ["SIGTERM", "SIGINT", "SIGHUP"];
+var forwardSignal = (signal) => {
+  for (const pid of activeGroups) {
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {}
+  }
+  activeGroups.clear();
+  for (const s of FORWARDED_SIGNALS)
+    process.removeListener(s, forwardSignal);
+  process.kill(process.pid, signal);
+};
+var track = (pid) => {
+  if (activeGroups.size === 0)
+    for (const s of FORWARDED_SIGNALS)
+      process.on(s, forwardSignal);
+  activeGroups.add(pid);
+};
+var untrack = (pid) => {
+  activeGroups.delete(pid);
+  if (activeGroups.size === 0)
+    for (const s of FORWARDED_SIGNALS)
+      process.removeListener(s, forwardSignal);
+};
 function runProcess(argv, options = {}) {
   return new Promise((resolve) => {
     const [cmd, ...args] = argv;
@@ -4110,16 +4136,25 @@ function runProcess(argv, options = {}) {
     } catch (e) {
       return resolve({ exitCode: 1, stdout: "", stderr: "", timedOut: false, error: String(e) });
     }
+    if (child.pid)
+      track(child.pid);
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let settled = false;
+    let graceTimer;
     const finish = (r) => {
       if (settled)
         return;
       settled = true;
       if (timer)
         clearTimeout(timer);
+      if (graceTimer)
+        clearTimeout(graceTimer);
+      if (child.pid)
+        untrack(child.pid);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       resolve(r);
     };
     const timer = options.timeoutMs === undefined ? undefined : setTimeout(() => {
@@ -4137,8 +4172,12 @@ function runProcess(argv, options = {}) {
     child.stderr?.on("data", (d) => {
       stderr += d.toString("utf8");
     });
+    const result = (code) => ({ exitCode: timedOut ? 1 : code ?? 1, stdout, stderr, timedOut });
     child.on("error", (e) => finish({ exitCode: 1, stdout, stderr, timedOut, error: e.message }));
-    child.on("close", (code) => finish({ exitCode: timedOut ? 1 : code ?? 1, stdout, stderr, timedOut }));
+    child.on("exit", (code) => {
+      graceTimer = setTimeout(() => finish(result(code)), EXIT_GRACE_MS);
+    });
+    child.on("close", (code) => finish(result(code)));
     child.stdin?.on("error", () => {
       return;
     });

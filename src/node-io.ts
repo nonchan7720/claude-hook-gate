@@ -123,6 +123,40 @@ export function makeNodeIo(init: NodeIoInit): Io {
   }
 }
 
+/** 'exit' の後、stdout / stderr の残りを読むために待つ上限（ミリ秒）。 */
+const EXIT_GRACE_MS = 500
+
+/** 実行中の子プロセス（プロセスグループのリーダー）の PID。hook のプロセスがシグナルで止められるとき道連れにする。 */
+const activeGroups = new Set<number>()
+const FORWARDED_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP'] as const
+type ForwardedSignal = (typeof FORWARDED_SIGNALS)[number]
+
+/** 子プロセスは独立したプロセスグループで走る（タイムアウトで子孫ごと止めるため）ので、hook のプロセス自体が
+ * SIGTERM などで止められると（Claude Code 側の timeout や中断）、そのままでは子孫が残る。同じシグナルを受けたら
+ * 走っているグループをすべて止めてから、本来どおりそのシグナルで終わる。 */
+const forwardSignal = (signal: ForwardedSignal): void => {
+  for (const pid of activeGroups) {
+    try {
+      process.kill(-pid, 'SIGKILL')
+    } catch {
+      // すでに終わっている
+    }
+  }
+  activeGroups.clear()
+  for (const s of FORWARDED_SIGNALS) process.removeListener(s, forwardSignal)
+  process.kill(process.pid, signal)
+}
+
+const track = (pid: number): void => {
+  if (activeGroups.size === 0) for (const s of FORWARDED_SIGNALS) process.on(s, forwardSignal)
+  activeGroups.add(pid)
+}
+
+const untrack = (pid: number): void => {
+  activeGroups.delete(pid)
+  if (activeGroups.size === 0) for (const s of FORWARDED_SIGNALS) process.removeListener(s, forwardSignal)
+}
+
 function runProcess(argv: readonly string[], options: RunOptions = {}): Promise<RunResult> {
   return new Promise((resolve) => {
     const [cmd, ...args] = argv
@@ -141,14 +175,21 @@ function runProcess(argv: readonly string[], options: RunOptions = {}): Promise<
     } catch (e) {
       return resolve({ exitCode: 1, stdout: '', stderr: '', timedOut: false, error: String(e) })
     }
+    if (child.pid) track(child.pid)
     let stdout = ''
     let stderr = ''
     let timedOut = false
     let settled = false
+    let graceTimer: ReturnType<typeof setTimeout> | undefined
     const finish = (r: RunResult): void => {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
+      if (graceTimer) clearTimeout(graceTimer)
+      if (child.pid) untrack(child.pid)
+      // パイプを孫プロセスが継いでいても、このプロセスがそれを待って生き続けないよう手放す。
+      child.stdout?.destroy()
+      child.stderr?.destroy()
       resolve(r)
     }
     // timeoutMs の指定があるときだけ打ち切る（指定が無ければ、hooks.json の timeout が上限になる）。
@@ -169,8 +210,15 @@ function runProcess(argv: readonly string[], options: RunOptions = {}): Promise<
     child.stderr?.on('data', (d: Buffer) => {
       stderr += d.toString('utf8')
     })
+    const result = (code: number | null): RunResult => ({ exitCode: timedOut ? 1 : (code ?? 1), stdout, stderr, timedOut })
     child.on('error', (e) => finish({ exitCode: 1, stdout, stderr, timedOut, error: e.message }))
-    child.on('close', (code) => finish({ exitCode: timedOut ? 1 : (code ?? 1), stdout, stderr, timedOut }))
+    // 'close' は stdout / stderr の両方が閉じてから来る。コマンドがバックグラウンドに残した孫プロセス（dev サーバーや
+    // デーモンなど）がパイプを継いでいると、コマンド自体が終わっても孫が終わるまで来ないので、hook のプロセスが
+    // いつまでも終わらない。そこで 'exit' を基準にし、残りの出力を少しだけ待ってから結果を返す。
+    child.on('exit', (code) => {
+      graceTimer = setTimeout(() => finish(result(code)), EXIT_GRACE_MS)
+    })
+    child.on('close', (code) => finish(result(code)))
     child.stdin?.on('error', () => undefined)
     child.stdin?.end(options.stdin ?? '')
   })
