@@ -1,6 +1,6 @@
 // hook モジュールの実行環境は Node も DOM も持たず、ファイルやプロセスには `$`（エンジン）経由でしか
 // 触れない。ポートしたロジックはすべてこの Io インターフェースだけに依存し、実環境では
-// engine-io.ts が `$` から、テストでは tests/helpers/node-io.ts が Node から実装する。
+// engine-io.ts が `$` から、テストでは tests/helpers/node-io.ts が Node から実装する（command hook の Go 版は internal/hookgate/osio.go）。
 import type { Lang } from './i18n.ts'
 
 export type EnvVars = {
@@ -12,6 +12,10 @@ export type EnvVars = {
   __CFBundleIdentifier?: string
   /** メッセージの言語の判定に使う（i18n.ts）。FEEDBACK_GATE_LANG はこのプラグイン専用の上書き。 */
   FEEDBACK_GATE_LANG?: string
+  /** agentLaunchGuard の確認対象にする subagent_type（`,` か `;` 区切り。未設定・空なら既定）。agent-launch-guard.ts の agentLaunchLists が読む。 */
+  FEEDBACK_GATE_ASK_AGENT_TYPES?: string
+  /** agentLaunchGuard が確認なしで送ってよい SendMessage の宛先（`,` か `;` 区切り。未設定・空なら既定）。 */
+  FEEDBACK_GATE_ALLOW_RECIPIENTS?: string
   LC_ALL?: string
   LC_MESSAGES?: string
   LANG?: string

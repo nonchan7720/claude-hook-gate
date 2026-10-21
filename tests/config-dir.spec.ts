@@ -4,7 +4,6 @@ import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { CLAUDE_CONFIG_DIRS, configPaths, findGateYaml, pickConfigDir } from '../src/config-dir.ts'
 import { feedbackDir, feedbackDirs, listRules, projectFeedbackDir, projectFeedbackDirs } from '../src/feedback-rules.ts'
-import { CODEX_CONFIG_DIRS } from '../src/host-codex.ts'
 import { loadRules } from '../src/rules-file.ts'
 import { gateStatusDir } from '../src/running-registry.ts'
 import { stopTestGate } from '../src/stop-test-gate.ts'
@@ -31,15 +30,13 @@ describe('pickConfigDir / configPaths', () => {
     withDirs(async (proj) => {
       const exists = async (p: string) => fs.existsSync(p)
       expect(await pickConfigDir(CLAUDE_CONFIG_DIRS, proj, exists)).toBe(path.join(proj, '.claude'))
-      expect(await pickConfigDir(CODEX_CONFIG_DIRS, proj, exists)).toBe(path.join(proj, '.agents'))
       fs.mkdirSync(path.join(proj, '.agents'))
       expect(await pickConfigDir(CLAUDE_CONFIG_DIRS, proj, exists)).toBe(path.join(proj, '.agents'))
       fs.mkdirSync(path.join(proj, '.claude'))
       expect(await pickConfigDir(CLAUDE_CONFIG_DIRS, proj, exists)).toBe(path.join(proj, '.claude'))
-      expect(await pickConfigDir(CODEX_CONFIG_DIRS, proj, exists)).toBe(path.join(proj, '.agents'))
-      expect(configPaths(makeIo({ projectDir: proj, configDirNames: CODEX_CONFIG_DIRS }), proj, 'gate.yaml')).toEqual([
-        path.join(proj, '.agents', 'gate.yaml'),
+      expect(configPaths(makeIo({ projectDir: proj }), proj, 'gate.yaml')).toEqual([
         path.join(proj, '.claude', 'gate.yaml'),
+        path.join(proj, '.agents', 'gate.yaml'),
       ])
     }))
 })
@@ -54,13 +51,12 @@ describe('gate.yaml and the state directory', () => {
       expect(gateStatusDir(io)).toBe(path.join(proj, '.agents', '.gate-status'))
     }))
 
-  test('Codex prefers .agents over .claude when both have a gate.yaml; Claude Code prefers .claude', () =>
+  test('Claude Code prefers .claude over .agents when both have a gate.yaml', () =>
     withDirs(async (proj) => {
       for (const d of ['.agents', '.claude']) {
         fs.mkdirSync(path.join(proj, d))
         fs.writeFileSync(path.join(proj, d, 'gate.yaml'), '{"rules":[]}')
       }
-      expect(await findGateYaml(makeIo({ projectDir: proj, configDirNames: CODEX_CONFIG_DIRS }))).toBe(path.join(proj, '.agents', 'gate.yaml'))
       expect(await findGateYaml(makeIo({ projectDir: proj }))).toBe(path.join(proj, '.claude', 'gate.yaml'))
     }))
 
@@ -93,13 +89,11 @@ describe('feedback rules in .claude and .agents', () => {
       fs.symlinkSync(path.join(home, '.claude'), path.join(home, '.agents'))
       writeRule(path.join(proj, '.agents', 'feedback'), 'proj_rule', 4)
       fs.symlinkSync(path.join(proj, '.agents'), path.join(proj, '.claude'))
-      for (const configDirNames of [CLAUDE_CONFIG_DIRS, CODEX_CONFIG_DIRS]) {
-        const rules = await listRules(makeIo({ projectDir: proj, env: { HOME: home }, configDirNames }))
-        expect(rules.map((r) => [r.name, r.count])).toEqual([
-          ['shared', 3],
-          ['proj_rule', 4],
-        ])
-      }
+      const rules = await listRules(makeIo({ projectDir: proj, env: { HOME: home }, configDirNames: CLAUDE_CONFIG_DIRS }))
+      expect(rules.map((r) => [r.name, r.count])).toEqual([
+        ['shared', 3],
+        ['proj_rule', 4],
+      ])
     }))
 
   test('CLAUDE_FEEDBACK_DIR replaces the home candidates entirely', () =>

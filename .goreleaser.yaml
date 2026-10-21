@@ -1,0 +1,55 @@
+version: 2
+
+project_name: feedback-gate
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: feedback-gate
+    binary: feedback-gate
+    main: ./cmd/feedback-gate
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+# scripts/install-binary.sh downloads feedback-gate_<os>_<arch>.tar.gz and verifies it against checksums.txt.
+archives:
+  - id: feedback-gate
+    ids:
+      - feedback-gate
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  disable: true
+
+release:
+  github:
+    owner: nonchan7720
+    name: claude-hook-gate
+  # release-please creates the GitHub release (and its notes) first; GoReleaser only attaches the artifacts.
+  mode: keep-existing
+  prerelease: false

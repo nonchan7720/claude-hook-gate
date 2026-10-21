@@ -1,9 +1,10 @@
-// Codex プラグインの CLI（src/codex-cli.ts）: `bun src/codex-cli.ts <Event>` を子プロセスで起動し、Codex の command hook の規約
+// Codex プラグインの CLI（Go 製の feedback-gate バイナリ、cmd/feedback-gate）: `feedback-gate codex <Event>` を子プロセスで起動し、Codex の command hook の規約
 // （stdin の JSON → stdout の JSON / stderr / 終了コード）と、環境変数で受けるプラグイン設定を確かめる。
 import { describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { writeGateYaml } from './helpers/gate.ts'
+import { feedbackGateBin } from './helpers/go-binary.ts'
 import { MISSING_DOGWOOD_BIN, REPO_ROOT, rmTree, tmpDir } from './helpers/node-io.ts'
 
 type Out = Record<string, unknown>
@@ -30,14 +31,14 @@ async function withEnv<T>(body: (env: Env) => Promise<T>): Promise<T> {
 
 const { CLAUDE_PROJECT_DIR: _cpd, ...base } = process.env as Record<string, string>
 
-// Codex プラグインのルートはリポジトリのルート（hook.sh が PLUGIN_ROOT を CLAUDE_PLUGIN_ROOT として cli.js に渡す）。
+// Codex プラグインのルートはリポジトリのルート（hook.sh が PLUGIN_ROOT を CLAUDE_PLUGIN_ROOT として feedback-gate に渡す）。
 const PLUGIN_ROOT = REPO_ROOT
 
 /** CLI を子プロセスで走らせる。Codex はプロジェクトの環境変数（CLAUDE_PROJECT_DIR など）を渡さないので、cwd は payload から取らせる。 */
 async function hook(env: Env, event: string, payload: Out, extra: Record<string, string> = {}): Promise<Result> {
   // Codex は CLAUDE_PROJECT_DIR を渡さない（projectDir は payload の cwd から決まる）ので、親から漏れたものも落とす。
   const { LANG: _l, LC_ALL: _a, LC_MESSAGES: _m, FEEDBACK_GATE_LANG: _f, CLAUDE_AGENT_ID: _g, ...clean } = base
-  const proc = Bun.spawn([process.execPath, path.join(REPO_ROOT, 'src', 'codex-cli.ts'), event], {
+  const proc = Bun.spawn([feedbackGateBin(), 'codex', event], {
     cwd: env.proj,
     env: {
       ...clean,
@@ -121,6 +122,17 @@ describe('PreToolUse', () => {
       const r = await hook(env, 'PreToolUse', agent, { FEEDBACK_GATE_AGENT_LAUNCH_GUARD: 'true' })
       expect(r.json?.hookSpecificOutput?.permissionDecision).toBe('deny')
       expect(r.json?.hookSpecificOutput?.permissionDecisionReason).toContain('code-implementer に送るプロンプト:\n\ndo it')
+    }))
+
+  test('FEEDBACK_GATE_ASK_AGENT_TYPES / FEEDBACK_GATE_ALLOW_RECIPIENTS replace the lists for spawn_agent / send_input', () =>
+    withEnv(async (env) => {
+      const on = { FEEDBACK_GATE_AGENT_LAUNCH_GUARD: 'true', FEEDBACK_GATE_ASK_AGENT_TYPES: 'worker', FEEDBACK_GATE_ALLOW_RECIPIENTS: 'ops' }
+      const spawn = (type: string) => ({ tool_name: 'spawn_agent', tool_input: { agent_type: type, message: 'do it' }, tool_use_id: 't3' })
+      const send = (id: string) => ({ tool_name: 'send_input', tool_input: { agent_id: id, message: 'hi' }, tool_use_id: 't4' })
+      expect((await hook(env, 'PreToolUse', spawn('worker'), on)).json?.hookSpecificOutput?.permissionDecision).toBe('deny')
+      expect((await hook(env, 'PreToolUse', spawn('code-implementer'), on)).stdout).toBe('')
+      expect((await hook(env, 'PreToolUse', send('ops'), on)).stdout).toBe('')
+      expect((await hook(env, 'PreToolUse', send('git-operator'), on)).json?.hookSpecificOutput?.permissionDecision).toBe('deny')
     }))
 })
 
@@ -220,7 +232,7 @@ describe('SessionStart / PermissionRequest', () => {
       expect(r.exitCode).toBe(0)
       expect(r.stdout).toBe('')
       expect((await hook(env, 'Notification', {})).exitCode).toBe(1)
-      const proc = Bun.spawn([process.execPath, path.join(REPO_ROOT, 'src', 'codex-cli.ts'), 'Stop'], {
+      const proc = Bun.spawn([feedbackGateBin(), 'codex', 'Stop'], {
         cwd: env.proj,
         env: { ...base, HOME: env.home, CLAUDE_FEEDBACK_DIR: env.feedback, CLAUDE_PLUGIN_ROOT: PLUGIN_ROOT },
         stdin: new TextEncoder().encode('not json'),

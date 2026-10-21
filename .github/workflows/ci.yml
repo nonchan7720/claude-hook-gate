@@ -17,16 +17,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      # bun / node / go / golangci-lint / goreleaser は mise.toml の版を入れる（ローカルと同じ道具立て）。
+      - uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde # v5.2.1
         with:
-          bun-version: 1.4.2
+          cache: true
       - run: bun install --frozen-lockfile
+      - name: Lint (golangci-lint)
+        run: golangci-lint run ./...
+      - name: Format check (golangci-lint fmt)
+        run: golangci-lint fmt --diff ./...
+      - name: Vet (go vet)
+        run: go vet ./...
+      - name: Test (Go)
+        run: go test ./...
+      # TypeScript の統合テスト（tests/cli.spec.ts など）が子プロセスで起動するバイナリ。FEEDBACK_GATE_BIN が無ければテストが自分でビルドするが、
+      # CI ではビルドの失敗をテストの前の独立したステップとして見せる。
+      - name: Build the feedback-gate binary
+        run: go build -o "$RUNNER_TEMP/feedback-gate" ./cmd/feedback-gate
       - name: Lint (Biome)
         run: bun run lint
       - name: Type check (tsc --noEmit)
         run: bun run typecheck
-      - name: Test
+      - name: Test (TypeScript, including the integration tests against the Go binary)
         run: bun run test
+        env:
+          FEEDBACK_GATE_BIN: ${{ runner.temp }}/feedback-gate
       # 配布用バンドルが作れること、バンドルが相対パスと claude-code 以外を import していないこと、各ファイルが上限サイズ未満であることを確かめる
       # （検査は scripts/build.ts の中にある）。
       - name: Build bundle

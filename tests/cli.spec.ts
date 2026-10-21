@@ -1,8 +1,9 @@
-// settings hook の CLI（src/cli.ts）: `bun src/cli.ts <Event>` を子プロセスで起動し、classic の規約（stdin の JSON → stdout の JSON / stderr / 終了コード）を確かめる。
+// settings hook の CLI（Go 製の feedback-gate バイナリ、cmd/feedback-gate）: `feedback-gate claude <Event>` を子プロセスで起動し、classic の規約（stdin の JSON → stdout の JSON / stderr / 終了コード）を確かめる。
 import { describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { exists, writeGateYaml } from './helpers/gate.ts'
+import { feedbackGateBin } from './helpers/go-binary.ts'
 import { MISSING_DOGWOOD_BIN, REPO_ROOT, rmTree, tmpDir } from './helpers/node-io.ts'
 
 type Out = Record<string, unknown>
@@ -29,7 +30,7 @@ async function withEnv<T>(body: (env: Env) => Promise<T>): Promise<T> {
 /** CLI を子プロセスで走らせる。session_id と cwd は既定で補う。extra はプラグイン設定などの環境変数。 */
 async function hook(env: Env, event: string, payload: Out, extra: Record<string, string> = {}): Promise<Result> {
   const { LANG: _l, LC_ALL: _a, LC_MESSAGES: _m, FEEDBACK_GATE_LANG: _f, CLAUDE_AGENT_ID: _g, ...base } = process.env as Record<string, string>
-  const proc = Bun.spawn([process.execPath, path.join(REPO_ROOT, 'src', 'cli.ts'), event], {
+  const proc = Bun.spawn([feedbackGateBin(), 'claude', event], {
     cwd: env.proj,
     env: {
       ...base,
@@ -106,6 +107,22 @@ describe('PreToolUse', () => {
       expect(r.json?.hookSpecificOutput.permissionDecision).toBe('ask')
       expect(r.json?.hookSpecificOutput.permissionDecisionReason).toContain('code-implementer に送るプロンプト:\n\ndo it')
     }))
+
+  test('FEEDBACK_GATE_ASK_AGENT_TYPES / FEEDBACK_GATE_ALLOW_RECIPIENTS replace the guarded agent types and the allowed recipients', () =>
+    withEnv(async (env) => {
+      const on = {
+        CLAUDE_PLUGIN_OPTION_agentLaunchGuard: 'true',
+        FEEDBACK_GATE_ASK_AGENT_TYPES: 'worker; reviewer',
+        FEEDBACK_GATE_ALLOW_RECIPIENTS: 'git-operator, ops',
+      }
+      const agent = (type: string) => ({ tool_name: 'Agent', tool_input: { subagent_type: type, prompt: 'do it' }, tool_use_id: 't3' })
+      const send = (to: string) => ({ tool_name: 'SendMessage', tool_input: { to, message: 'hi' }, tool_use_id: 't4' })
+      expect((await hook(env, 'PreToolUse', agent('worker'), on)).json?.hookSpecificOutput.permissionDecision).toBe('ask')
+      expect((await hook(env, 'PreToolUse', agent('reviewer'), on)).json?.hookSpecificOutput.permissionDecision).toBe('ask')
+      expect((await hook(env, 'PreToolUse', agent('code-implementer'), on)).stdout).toBe('')
+      expect((await hook(env, 'PreToolUse', send('ops'), on)).stdout).toBe('')
+      expect((await hook(env, 'PreToolUse', send('someone'), on)).json?.hookSpecificOutput.permissionDecision).toBe('ask')
+    }))
 })
 
 describe('PostToolUse', () => {
@@ -125,6 +142,17 @@ describe('PostToolUse', () => {
       expect(r.exitCode).toBe(0)
       expect(r.json?.decision).toBe('block')
       expect(r.json?.reason).toContain('no_todo')
+    }))
+
+  test('the CLI exits right after the hook even when a gate command leaves a grandchild holding its pipes', () =>
+    withEnv(async (env) => {
+      writeGateYaml(env.proj, { rules: [{ match: '**/*.py', run: ["sh -c 'sleep 20 & echo hi'"] }] })
+      const file = path.join(env.proj, 'x.py')
+      fs.writeFileSync(file, 'x = 1\n')
+      const started = Date.now()
+      const r = await hook(env, 'PostToolUse', { tool_name: 'Write', tool_input: { file_path: file }, tool_response: {}, tool_use_id: 't1' })
+      expect(r.exitCode).toBe(0)
+      expect(Date.now() - started).toBeLessThan(5000)
     }))
 
   test('additionalContext: the report of a finished subagent is handed to the caller', () =>
@@ -207,7 +235,7 @@ describe('SessionStart / Notification', () => {
   test('an unknown event is a usage error; broken stdin still exits 0', async () => {
     await withEnv(async (env) => {
       expect((await hook(env, 'Bogus', {})).exitCode).toBe(1)
-      const proc = Bun.spawn([process.execPath, path.join(REPO_ROOT, 'src', 'cli.ts'), 'Stop'], {
+      const proc = Bun.spawn([feedbackGateBin(), 'claude', 'Stop'], {
         cwd: env.proj,
         env: { ...process.env, HOME: env.home, CLAUDE_FEEDBACK_DIR: env.feedback, CLAUDE_PROJECT_DIR: env.proj, CLAUDE_PLUGIN_ROOT: REPO_ROOT },
         stdin: new TextEncoder().encode('not json'),

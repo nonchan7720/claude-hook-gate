@@ -8,7 +8,20 @@ const errorText = (e: unknown): string => (e instanceof Error ? e.message : Stri
 
 /** `$.env.get` は名前をソース上の文字列リテラルで書く必要があるので、参照する変数を1つずつ並べる。 */
 async function readEnv($: Engine): Promise<EnvVars> {
-  const [HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG] = await Promise.all([
+  const [
+    HOME,
+    PATH,
+    CLAUDE_FEEDBACK_DIR,
+    DOGWOOD_BIN,
+    TERM_PROGRAM,
+    __CFBundleIdentifier,
+    FEEDBACK_GATE_LANG,
+    FEEDBACK_GATE_ASK_AGENT_TYPES,
+    FEEDBACK_GATE_ALLOW_RECIPIENTS,
+    LC_ALL,
+    LC_MESSAGES,
+    LANG,
+  ] = await Promise.all([
     $.env.get('HOME'),
     $.env.get('PATH'),
     $.env.get('CLAUDE_FEEDBACK_DIR'),
@@ -16,11 +29,26 @@ async function readEnv($: Engine): Promise<EnvVars> {
     $.env.get('TERM_PROGRAM'),
     $.env.get('__CFBundleIdentifier'),
     $.env.get('FEEDBACK_GATE_LANG'),
+    $.env.get('FEEDBACK_GATE_ASK_AGENT_TYPES'),
+    $.env.get('FEEDBACK_GATE_ALLOW_RECIPIENTS'),
     $.env.get('LC_ALL'),
     $.env.get('LC_MESSAGES'),
     $.env.get('LANG'),
   ])
-  return { HOME, PATH, CLAUDE_FEEDBACK_DIR, DOGWOOD_BIN, TERM_PROGRAM, __CFBundleIdentifier, FEEDBACK_GATE_LANG, LC_ALL, LC_MESSAGES, LANG }
+  return {
+    HOME,
+    PATH,
+    CLAUDE_FEEDBACK_DIR,
+    DOGWOOD_BIN,
+    TERM_PROGRAM,
+    __CFBundleIdentifier,
+    FEEDBACK_GATE_LANG,
+    FEEDBACK_GATE_ASK_AGENT_TYPES,
+    FEEDBACK_GATE_ALLOW_RECIPIENTS,
+    LC_ALL,
+    LC_MESSAGES,
+    LANG,
+  }
 }
 
 /** options はプラグイン設定（userConfig）。`language` がメッセージの言語を決める（auto なら OS の言語設定）。

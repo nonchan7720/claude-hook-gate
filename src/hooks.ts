@@ -1,9 +1,10 @@
-// イベントごとの処理（中核）。mod（src/register.ts、classic.* から）と command hook の CLI（src/cli.ts / src/codex-cli.ts、
-// ホストごとの変換は src/host*.ts）の両方がここを呼び、ここが各イベントの実装（src/feedback-guard.ts、src/stop-test-gate.ts など）を呼ぶ。
+// イベントごとの処理（中核）。mod（src/register.ts、classic.* から）がここを呼び、ここが各イベントの実装（src/feedback-guard.ts、
+// src/stop-test-gate.ts など）を呼ぶ。command hook の CLI は Go 版（internal/hookgate/hooks.go と host*.go。バイナリは
+// `feedback-gate claude|codex <Event>`）にあり、この中核を同じ構成で移したもの。
 // 引数の payload は classic コマンド hook が stdin で受け取る JSON の形。各段は classic のスクリプトと同じ
 // { exitCode, stdout, stderr } を返し、それを classic の規約どおり Outcome にまとめて返す。
 import type { PluginOptions } from 'claude-code'
-import { agentLaunchGuard } from './agent-launch-guard.ts'
+import { agentLaunchGuard, agentLaunchLists } from './agent-launch-guard.ts'
 import { allStop } from './all-stop.ts'
 import { bashChangeSteps, bashStarted } from './bash-changes.ts'
 import { feedbackGuard } from './feedback-guard.ts'
@@ -100,7 +101,7 @@ export function preToolUse(io: Io, sessionId: string, options: PluginOptions, pa
   const tool = str(payload.tool_name)
   if (!guardsTool(options, tool)) return Promise.resolve(none)
   const guardsAgents = options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool)
-  const step: Step = guardsAgents ? async (i) => agentLaunchGuard(payload, i.lang) : (i) => feedbackGuard(i, payload)
+  const step: Step = guardsAgents ? async (i) => agentLaunchGuard(payload, i.lang, agentLaunchLists(i.env)) : (i) => feedbackGuard(i, payload)
   return runSteps(io, sessionId, 'PreToolUse', tool === 'Bash' ? [(i) => bashStarted(i, payload), step] : [step])
 }
 
