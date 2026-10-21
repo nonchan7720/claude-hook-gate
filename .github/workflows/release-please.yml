@@ -3,6 +3,13 @@ name: Release Please
 on:
   push:
     branches: [main]
+  # 既にあるリリースにバイナリを添付し直す／後から添付するための手動実行（tag に vX.Y.Z）。
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build and attach the feedback-gate binaries to (e.g. v0.9.0)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -10,6 +17,8 @@ permissions:
 
 jobs:
   release-please:
+    # 手動実行（workflow_dispatch）では新しいリリースを作らない。
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
@@ -27,9 +36,13 @@ jobs:
   # release-please が GitHub リリース（と vX.Y.Z のタグ）を作ったときだけ、GoReleaser が feedback-gate_<os>_<arch>.tar.gz と
   # checksums.txt をそのリリースに添付する（scripts/install-binary.sh がこれを取りに行く）。リリース本体は release-please が作るので
   # .goreleaser.yaml は release.mode: keep-existing にしてある。
+  # workflow_dispatch では、tag で指定した既存のリリース（まだバイナリが無い vX.Y.Z）に対して同じことを行う。その場合は、タグではなく
+  # このワークフローを実行したブランチ（main）の HEAD をビルドする: 古いタグ（Go 移植より前のリリース）にはビルドするコードが無いため。
+  # バージョンとリリースの宛先は GORELEASER_CURRENT_TAG で tag に合わせ、HEAD がタグ上に無いので --skip=validate を付ける。
+  # needs の release-please は手動実行ではスキップされるので、!cancelled() を付けて実行できるようにしている。
   goreleaser:
     needs: release-please
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    if: ${{ !cancelled() && (github.event_name == 'workflow_dispatch' || needs.release-please.outputs.release_created == 'true') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -37,7 +50,22 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          # push では release-please が作ったタグ。手動実行ではタグの出力が空なので、実行したブランチの HEAD。
+          ref: ${{ needs.release-please.outputs.tag_name || github.sha }}
+      - name: Point GoReleaser at the requested tag (workflow_dispatch)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "tag must look like v1.2.3, got: $TAG" >&2
+            exit 1
+          fi
+          if ! git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "tag $TAG does not exist in this repository" >&2
+            exit 1
+          fi
+          echo "GORELEASER_CURRENT_TAG=$TAG" >> "$GITHUB_ENV"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
@@ -46,6 +74,6 @@ jobs:
         with:
           distribution: goreleaser
           version: "~> 2"
-          args: release --clean --config .goreleaser.yaml
+          args: release --clean --config .goreleaser.yaml${{ github.event_name == 'workflow_dispatch' && ' --skip=validate' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
