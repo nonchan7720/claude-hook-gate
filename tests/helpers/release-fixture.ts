@@ -1,5 +1,5 @@
 // テスト用: GoReleaser が作るリリースの置き場（<base>/v<version>/feedback-gate_<os>_<arch>.tar.gz と checksums.txt）のまがいものを作る。
-// hook.sh は FEEDBACK_GATE_RELEASE_BASE_URL=file://<base> でここから偽のバイナリを取ってくる（オフラインで動く）。
+// hook.sh は FEEDBACK_GATE_RELEASE_BASE_URL=file://<base> でここから偽のバイナリを取ってくる（ネットワークは要らないが、file:// を読めるのは curl だけなので curl は要る）。
 import { spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import * as fs from 'node:fs'
@@ -49,4 +49,15 @@ export function makePluginRoot(dir: string, version: string): string {
   fs.mkdirSync(path.join(root, '.claude-plugin'), { recursive: true })
   fs.writeFileSync(path.join(root, '.claude-plugin', 'plugin.json'), `{\n  "name": "feedback-gate",\n  "version": "${version}"\n}\n`)
   return root
+}
+
+/** バイナリを用意できなかったときに install-binary.sh が標準エラーに書く 1 行。 */
+export function installNotice(version: string, reason: string): string {
+  return `feedback-gate: could not install the feedback-gate v${version} binary (${reason}); the hook did nothing\n`
+}
+
+/** パスの mtime（と atime）を days 日前にする。キャッシュの片付け（30 日）の検証用。 */
+export function ageDays(target: string, days: number): void {
+  const t = new Date(Date.now() - days * 24 * 60 * 60 * 1000)
+  fs.utimesSync(target, t, t)
 }

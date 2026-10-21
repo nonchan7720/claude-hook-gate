@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { REPO_ROOT, rmTree, tmpDir } from './helpers/node-io.ts'
-import { makePluginRoot, makeRelease, releasePlatform } from './helpers/release-fixture.ts'
+import { ageDays, FAKE_BINARY_SCRIPT, installNotice, makePluginRoot, makeRelease, releasePlatform } from './helpers/release-fixture.ts'
 
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'hook.sh')
 const BASH = Bun.which('bash') ?? '/bin/bash'
@@ -55,7 +55,12 @@ function withSetup(body: (s: Setup, run: Run) => void): void {
 
 /** ダウンロードに要るコマンド（curl, tar, gzip, チェックサム, mktemp など）を bin に張る。 */
 function linkDownloadTools(s: Setup): void {
-  for (const c of ['curl', 'tar', 'gzip', 'sha256sum', 'shasum', 'mktemp', 'mv', 'chmod', 'uname', 'mkdir', 'rm', 'cp']) link(s, c)
+  for (const c of ['curl', 'tar', 'gzip', 'sha256sum', 'shasum', 'mktemp', 'mv', 'chmod', 'uname', 'mkdir', 'rm', 'cp', 'find', 'touch']) link(s, c)
+}
+
+/** curl / wget とチェックサム以外の、ダウンロードの前に install-binary.sh が使うコマンド（uname, mkdir, find, touch, mktemp, rm）。 */
+function linkInstallBasics(s: Setup): void {
+  for (const c of ['uname', 'mkdir', 'find', 'touch', 'mktemp', 'rm']) link(s, c)
 }
 
 const calls = (s: Setup): string => (fs.existsSync(s.calls) ? fs.readFileSync(s.calls, 'utf8') : '')
@@ -121,17 +126,43 @@ describe('scripts/hook.sh', () => {
       expect(calls(s)).toBe('')
     }))
 
-  test('no FEEDBACK_GATE_BIN and no curl or wget: exit 0 and nothing happens', () =>
+  test.skipIf(!downloadable)('no FEEDBACK_GATE_BIN and no curl or wget: exit 0, nothing happens, one line on stderr says why', () =>
     withSetup((s, run) => {
+      // uname / mkdir / find / touch / mktemp / rm とチェックサムはあるので、止まるのは curl / wget が無いところ。
+      linkInstallBasics(s)
+      for (const c of ['sha256sum', 'shasum']) link(s, c)
       const root = makePluginRoot(s.dir, '1.2.3')
       const cache = path.join(s.dir, 'cache')
       const r = run('Stop', payload, { FEEDBACK_GATE_BIN: '', CLAUDE_PLUGIN_ROOT: root, FEEDBACK_GATE_CACHE_DIR: cache })
       expect(r.status).toBe(0)
       expect(r.stdout).toBe('')
-      expect(r.stderr).toBe('')
+      expect(r.stderr).toBe(installNotice('1.2.3', 'no-download-tool'))
       expect(calls(s)).toBe('')
       expect(fs.existsSync(path.join(cache, '1.2.3', 'feedback-gate'))).toBe(false)
-    }))
+    }),
+  )
+
+  test.skipIf(!downloadable)('no sha256sum or shasum: fails closed, nothing is installed even though the download would work', () =>
+    withSetup((s, run) => {
+      linkDownloadTools(s)
+      for (const c of ['sha256sum', 'shasum']) fs.rmSync(path.join(s.bin, c), { force: true })
+      const root = makePluginRoot(s.dir, '1.2.3')
+      const release = makeRelease(s.dir, '1.2.3')
+      const cache = path.join(s.dir, 'cache')
+      const r = run('Stop', payload, {
+        FEEDBACK_GATE_BIN: '',
+        CLAUDE_PLUGIN_ROOT: root,
+        FEEDBACK_GATE_CACHE_DIR: cache,
+        FEEDBACK_GATE_RELEASE_BASE_URL: `file://${release.base}`,
+        CALLS: s.calls,
+      })
+      expect(r.status).toBe(0)
+      expect(r.stdout).toBe('')
+      expect(r.stderr).toBe(installNotice('1.2.3', 'no-sha256-tool'))
+      expect(calls(s)).toBe('')
+      expect(fs.existsSync(path.join(cache, '1.2.3', 'feedback-gate'))).toBe(false)
+    }),
+  )
 
   test.skipIf(!downloadable)('downloads the binary for the plugin version once, verifies it, caches it under <cache>/<version>/ and runs it', () =>
     withSetup((s, run) => {
@@ -139,9 +170,16 @@ describe('scripts/hook.sh', () => {
       const root = makePluginRoot(s.dir, '1.2.3')
       const release = makeRelease(s.dir, '1.2.3')
       const cache = path.join(s.dir, 'cache')
-      // 古いバージョンのキャッシュは新しく入れたときに片付く（現在のバージョンは残る）。
+      // 別バージョンのキャッシュは、新しく入れたときに 30 日より古いものだけが片付く（新しいもの・現在のバージョンは残る）。
+      // 前のフックが殺されて残った 60 分より古い作業ディレクトリも片付くが、新しいものは触らない。
       fs.mkdirSync(path.join(cache, '0.1.0'), { recursive: true })
       fs.writeFileSync(path.join(cache, '0.1.0', 'feedback-gate'), '#!/bin/sh\n')
+      ageDays(path.join(cache, '0.1.0'), 40)
+      fs.mkdirSync(path.join(cache, '0.2.0'), { recursive: true })
+      fs.writeFileSync(path.join(cache, '0.2.0', 'feedback-gate'), '#!/bin/sh\n')
+      fs.mkdirSync(path.join(cache, '1.2.3', '.download.stale'), { recursive: true })
+      ageDays(path.join(cache, '1.2.3', '.download.stale'), 1)
+      fs.mkdirSync(path.join(cache, '1.2.3', '.download.fresh'), { recursive: true })
       const env = {
         FEEDBACK_GATE_BIN: '',
         CLAUDE_PLUGIN_ROOT: root,
@@ -156,8 +194,9 @@ describe('scripts/hook.sh', () => {
       expect(fs.statSync(installed).mode & 0o111).not.toBe(0)
       expect(calls(s)).toBe(`feedback-gate|claude PostToolUse|${root}|${payload}\n`)
       expect(fs.existsSync(path.join(cache, '0.1.0'))).toBe(false)
-      // 作業用のファイルは残さない。
-      expect(fs.readdirSync(path.join(cache, '1.2.3'))).toEqual(['feedback-gate'])
+      expect(fs.existsSync(path.join(cache, '0.2.0', 'feedback-gate'))).toBe(true)
+      // 自分の作業用のファイルは残さない。古い .download.* は消え、新しいもの（別のフックが使っているかもしれない）は残る。
+      expect(fs.readdirSync(path.join(cache, '1.2.3')).sort()).toEqual(['.download.fresh', 'feedback-gate'])
 
       // 2 回目はキャッシュから動く（リリースが無くても）。
       rmTree(release.base)
@@ -181,8 +220,47 @@ describe('scripts/hook.sh', () => {
       })
       expect(r.status).toBe(0)
       expect(r.stdout).toBe('')
+      expect(r.stderr).toBe(installNotice('1.2.3', 'checksum-mismatch'))
       expect(calls(s)).toBe('')
       expect(fs.existsSync(path.join(cache, '1.2.3', 'feedback-gate'))).toBe(false)
+    }),
+  )
+
+  test.skipIf(!downloadable)('a cached binary that is in use is touched, so a version dir last used long ago is not considered old afterwards', () =>
+    withSetup((s, run) => {
+      linkDownloadTools(s)
+      const root = makePluginRoot(s.dir, '1.2.3')
+      const cache = path.join(s.dir, 'cache')
+      const vdir = path.join(cache, '1.2.3')
+      fs.mkdirSync(vdir, { recursive: true })
+      fs.writeFileSync(path.join(vdir, 'feedback-gate'), FAKE_BINARY_SCRIPT, { mode: 0o755 })
+      ageDays(vdir, 40)
+      const r = run('Stop', payload, { FEEDBACK_GATE_BIN: '', CLAUDE_PLUGIN_ROOT: root, FEEDBACK_GATE_CACHE_DIR: cache, CALLS: s.calls })
+      expect(r.status).toBe(0)
+      expect(r.stderr).toBe('')
+      expect(calls(s)).toBe(`feedback-gate|claude Stop|${root}|${payload}\n`)
+      expect(Date.now() - fs.statSync(vdir).mtimeMs).toBeLessThan(5 * 60 * 1000)
+    }),
+  )
+
+  test.skipIf(!downloadable)('two plugin versions sharing a cache do not evict each other', () =>
+    withSetup((s, run) => {
+      linkDownloadTools(s)
+      const cache = path.join(s.dir, 'cache')
+      const release = makeRelease(s.dir, '1.2.3')
+      const other = path.join(cache, '0.9.0')
+      fs.mkdirSync(other, { recursive: true })
+      fs.writeFileSync(path.join(other, 'feedback-gate'), FAKE_BINARY_SCRIPT, { mode: 0o755 })
+      const env = {
+        FEEDBACK_GATE_BIN: '',
+        CLAUDE_PLUGIN_ROOT: makePluginRoot(s.dir, '1.2.3'),
+        FEEDBACK_GATE_CACHE_DIR: cache,
+        FEEDBACK_GATE_RELEASE_BASE_URL: `file://${release.base}`,
+        CALLS: s.calls,
+      }
+      expect(run('Stop', payload, env).status).toBe(0)
+      expect(fs.existsSync(path.join(other, 'feedback-gate'))).toBe(true)
+      expect(fs.existsSync(path.join(cache, '1.2.3', 'feedback-gate'))).toBe(true)
     }),
   )
 
@@ -199,6 +277,7 @@ describe('scripts/hook.sh', () => {
         CALLS: s.calls,
       })
       expect(r.status).toBe(0)
+      expect(r.stderr).toBe(installNotice('9.9.9', 'download-failed'))
       expect(calls(s)).toBe('')
     }),
   )

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Codex の command hook の入口: `hook.sh <Event>` → `feedback-gate codex <Event>`（Go 製のバイナリ）。
 # バイナリは FEEDBACK_GATE_BIN、無ければキャッシュ、無ければこのプラグインのバージョンのリリースから取ってくる（scripts/install-binary.sh）。
-# 使えなければ（curl も wget も無い、取得失敗、チェックサム不一致など）何もせず exit 0。
+# 使えなければ（curl も wget も無い、取得失敗、チェックサム不一致、sha256sum / shasum が無いなど）何もせず exit 0（標準エラーに理由つきの 1 行だけを出す）。
 # プラグインのルートはリポジトリのルート（rules/ や scripts/ を二重に持たないため）。
 set -uo pipefail
 

@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { REPO_ROOT, rmTree, tmpDir } from './helpers/node-io.ts'
-import { makePluginRoot, makeRelease, releasePlatform } from './helpers/release-fixture.ts'
+import { ageDays, FAKE_BINARY_SCRIPT, installNotice, makePluginRoot, makeRelease, releasePlatform } from './helpers/release-fixture.ts'
 
 const SCRIPT = path.join(REPO_ROOT, 'plugins', 'codex', 'scripts', 'hook.sh')
 const BASH = Bun.which('bash') ?? '/bin/bash'
@@ -43,7 +43,12 @@ function withSetup(body: (s: Setup, run: Run) => void): void {
 
 /** ダウンロードに要るコマンド（curl, tar, gzip, チェックサム, mktemp など）を bin に張る。 */
 function linkDownloadTools(s: Setup): void {
-  for (const c of ['curl', 'tar', 'gzip', 'sha256sum', 'shasum', 'mktemp', 'mv', 'chmod', 'uname', 'mkdir', 'rm', 'cp']) link(s, c)
+  for (const c of ['curl', 'tar', 'gzip', 'sha256sum', 'shasum', 'mktemp', 'mv', 'chmod', 'uname', 'mkdir', 'rm', 'cp', 'find', 'touch']) link(s, c)
+}
+
+/** curl / wget とチェックサム以外の、ダウンロードの前に install-binary.sh が使うコマンド（uname, mkdir, find, touch, mktemp, rm）。 */
+function linkInstallBasics(s: Setup): void {
+  for (const c of ['uname', 'mkdir', 'find', 'touch', 'mktemp', 'rm']) link(s, c)
 }
 
 const calls = (s: Setup): string => (fs.existsSync(s.calls) ? fs.readFileSync(s.calls, 'utf8') : '')
@@ -74,17 +79,43 @@ describe('plugins/codex/scripts/hook.sh', () => {
       expect(calls(s)).toBe('')
     }))
 
-  test('no FEEDBACK_GATE_BIN and no curl or wget: exit 0 and nothing happens', () =>
+  test.skipIf(!downloadable)('no FEEDBACK_GATE_BIN and no curl or wget: exit 0, nothing happens, one line on stderr says why', () =>
     withSetup((s, run) => {
+      // uname / mkdir / find / touch / mktemp / rm とチェックサムはあるので、止まるのは curl / wget が無いところ。
+      linkInstallBasics(s)
+      for (const c of ['sha256sum', 'shasum']) link(s, c)
       const root = makePluginRoot(s.dir, '1.2.3')
       const cache = path.join(s.dir, 'cache')
       const r = run('Stop', payload, { FEEDBACK_GATE_BIN: '', PLUGIN_ROOT: root, FEEDBACK_GATE_CACHE_DIR: cache })
       expect(r.status).toBe(0)
       expect(r.stdout).toBe('')
-      expect(r.stderr).toBe('')
+      expect(r.stderr).toBe(installNotice('1.2.3', 'no-download-tool'))
       expect(calls(s)).toBe('')
       expect(fs.existsSync(path.join(cache, '1.2.3', 'feedback-gate'))).toBe(false)
-    }))
+    }),
+  )
+
+  test.skipIf(!downloadable)('no sha256sum or shasum: fails closed, nothing is installed even though the download would work', () =>
+    withSetup((s, run) => {
+      linkDownloadTools(s)
+      for (const c of ['sha256sum', 'shasum']) fs.rmSync(path.join(s.bin, c), { force: true })
+      const root = makePluginRoot(s.dir, '1.2.3')
+      const release = makeRelease(s.dir, '1.2.3')
+      const cache = path.join(s.dir, 'cache')
+      const r = run('Stop', payload, {
+        FEEDBACK_GATE_BIN: '',
+        PLUGIN_ROOT: root,
+        FEEDBACK_GATE_CACHE_DIR: cache,
+        FEEDBACK_GATE_RELEASE_BASE_URL: `file://${release.base}`,
+        CALLS: s.calls,
+      })
+      expect(r.status).toBe(0)
+      expect(r.stdout).toBe('')
+      expect(r.stderr).toBe(installNotice('1.2.3', 'no-sha256-tool'))
+      expect(calls(s)).toBe('')
+      expect(fs.existsSync(path.join(cache, '1.2.3', 'feedback-gate'))).toBe(false)
+    }),
+  )
 
   test.skipIf(!downloadable)('downloads the binary for the plugin version, verifies it, caches it under <cache>/<version>/ and runs it', () =>
     withSetup((s, run) => {
@@ -92,6 +123,12 @@ describe('plugins/codex/scripts/hook.sh', () => {
       const root = makePluginRoot(s.dir, '1.2.3')
       const release = makeRelease(s.dir, '1.2.3')
       const cache = path.join(s.dir, 'cache')
+      // 別バージョンのキャッシュは、新しく入れたときに 30 日より古いものだけが片付く（新しいものは残る）。
+      fs.mkdirSync(path.join(cache, '0.1.0'), { recursive: true })
+      fs.writeFileSync(path.join(cache, '0.1.0', 'feedback-gate'), '#!/bin/sh\n')
+      ageDays(path.join(cache, '0.1.0'), 40)
+      fs.mkdirSync(path.join(cache, '0.2.0'), { recursive: true })
+      fs.writeFileSync(path.join(cache, '0.2.0', 'feedback-gate'), '#!/bin/sh\n')
       const env = {
         FEEDBACK_GATE_BIN: '',
         PLUGIN_ROOT: root,
@@ -102,6 +139,8 @@ describe('plugins/codex/scripts/hook.sh', () => {
       const r = run('SessionStart', payload, env)
       expect(r.status).toBe(0)
       expect(r.stderr).toBe('')
+      expect(fs.existsSync(path.join(cache, '0.1.0'))).toBe(false)
+      expect(fs.existsSync(path.join(cache, '0.2.0', 'feedback-gate'))).toBe(true)
       expect(fs.statSync(path.join(cache, '1.2.3', 'feedback-gate')).mode & 0o111).not.toBe(0)
       expect(calls(s)).toBe(`feedback-gate|codex SessionStart|${root}|${payload}\n`)
 
@@ -127,8 +166,26 @@ describe('plugins/codex/scripts/hook.sh', () => {
       })
       expect(r.status).toBe(0)
       expect(r.stdout).toBe('')
+      expect(r.stderr).toBe(installNotice('1.2.3', 'checksum-mismatch'))
       expect(calls(s)).toBe('')
       expect(fs.existsSync(path.join(cache, '1.2.3', 'feedback-gate'))).toBe(false)
+    }),
+  )
+
+  test.skipIf(!downloadable)('a cached binary that is in use is touched, so a version dir last used long ago is not considered old afterwards', () =>
+    withSetup((s, run) => {
+      linkDownloadTools(s)
+      const root = makePluginRoot(s.dir, '1.2.3')
+      const cache = path.join(s.dir, 'cache')
+      const vdir = path.join(cache, '1.2.3')
+      fs.mkdirSync(vdir, { recursive: true })
+      fs.writeFileSync(path.join(vdir, 'feedback-gate'), FAKE_BINARY_SCRIPT, { mode: 0o755 })
+      ageDays(vdir, 40)
+      const r = run('Stop', payload, { FEEDBACK_GATE_BIN: '', PLUGIN_ROOT: root, FEEDBACK_GATE_CACHE_DIR: cache, CALLS: s.calls })
+      expect(r.status).toBe(0)
+      expect(r.stderr).toBe('')
+      expect(calls(s)).toBe(`feedback-gate|codex Stop|${root}|${payload}\n`)
+      expect(Date.now() - fs.statSync(vdir).mtimeMs).toBeLessThan(5 * 60 * 1000)
     }),
   )
 })
