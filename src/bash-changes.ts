@@ -37,6 +37,202 @@ import { stopTestGate } from './stop-test-gate.ts'
 export const SKIP_COMMAND_RE =
   /\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?:=\S+)?))*\s+(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/
 
+/**
+ * 読むだけのコマンド（ファイルを書き換えられないもの）は変更検出の対象外にする。同じ作業ツリーで別のセッションが編集中だと、
+ * このコマンドの間に書かれたファイルを「このコマンドの変更」として拾ってしまい、調査しかしていないセッションの gate が
+ * 他人の変更で走る（そして同じコマンドの直列化で相手の実行を待つ）ため。判定は保守的: コマンドを `|` / `&&` / `||` / `;` /
+ * 改行 / `&` / `$(` / バッククォート / `(` / `{` で区切り、各区切りの先頭の語（環境変数の代入と `command` / `builtin` /
+ * `time` / `exec` は読み飛ばす）がすべて読むだけのものに限る。ファイルへのリダイレクト（`>`。`2>&1` と `/dev/null` 行きは除く）、
+ * `find` の `-exec` / `-delete`、`sed` の `-i`、`sort` の `-o`、`awk` の `system(` などがあれば読むだけとはみなさない。
+ * 分からないものは「書くかもしれない」側に倒す（検査が増える方向で、抜ける方向ではない）。
+ */
+const READ_ONLY_COMMANDS = new Set([
+  'ls',
+  'cat',
+  'head',
+  'tail',
+  'less',
+  'more',
+  'bat',
+  'tac',
+  'nl',
+  'wc',
+  'grep',
+  'egrep',
+  'fgrep',
+  'rg',
+  'ag',
+  'ack',
+  'find',
+  'fd',
+  'fdfind',
+  'sort',
+  'uniq',
+  'cut',
+  'tr',
+  'awk',
+  'gawk',
+  'mawk',
+  'sed',
+  'diff',
+  'cmp',
+  'comm',
+  'stat',
+  'file',
+  'du',
+  'df',
+  'tree',
+  'pwd',
+  'echo',
+  'printf',
+  'which',
+  'whereis',
+  'type',
+  'env',
+  'printenv',
+  'jq',
+  'yq',
+  'column',
+  'od',
+  'xxd',
+  'hexdump',
+  'strings',
+  'basename',
+  'dirname',
+  'realpath',
+  'readlink',
+  'date',
+  'uname',
+  'id',
+  'whoami',
+  'hostname',
+  'sleep',
+  'rev',
+  'fold',
+  'paste',
+  'join',
+  'md5sum',
+  'sha1sum',
+  'sha256sum',
+  'shasum',
+  'cksum',
+  'ps',
+  'pgrep',
+  'lsof',
+  'man',
+  'true',
+  'false',
+  ':',
+  'test',
+  '[',
+  '[[',
+  'cd',
+  'pushd',
+  'popd',
+  'exit',
+  'return',
+  'export',
+  'local',
+  'set',
+  'unset',
+  'shift',
+])
+const READ_ONLY_GIT = new Set([
+  'status',
+  'log',
+  'diff',
+  'show',
+  'blame',
+  'ls-files',
+  'ls-tree',
+  'grep',
+  'rev-parse',
+  'rev-list',
+  'describe',
+  'shortlog',
+  'cat-file',
+  'branch',
+  'tag',
+  'remote',
+  'fetch',
+  'reflog',
+  'name-rev',
+  'show-ref',
+  'for-each-ref',
+  'diff-tree',
+  'var',
+  'version',
+  'help',
+])
+const READ_ONLY_GO = new Set(['env', 'version', 'list', 'doc'])
+/** これが入っていれば書くかもしれない（どのコマンドでも）。 */
+const WRITE_HINT_RE = /system\(|-exec\b|-execdir\b|-ok\b|-okdir\b|-delete\b|-fprint|--in-place|--output/
+/** 許されるリダイレクト: 2>&1 や >/dev/null の類。これを消したあとに `>` が残れば、ファイルへ書いている。 */
+const HARMLESS_REDIRECT_RE = /\d*>>?&\d+|\d*>>?\s*\/dev\/null/g
+const SEGMENT_SPLIT_RE = /\|\|?|&&|;|\n|&|\$\(|`|<\(|\(|\{/
+const LEADING_ASSIGN_RE = /^(?:\w+=(?:"[^"]*"|'[^']*'|\S*)\s+)*/
+const WRAPPER_WORDS = new Set(['command', 'builtin', 'time', 'exec', 'nice'])
+
+/** segment の語（空白区切り。引用符の中の空白までは見ない）。 */
+const wordsOf = (segment: string): string[] =>
+  segment
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w !== '')
+
+/** 先頭の語から wrapper と環境変数の代入を外した語の列。 */
+function commandWords(segment: string): string[] {
+  let rest = segment.replace(LEADING_ASSIGN_RE, '')
+  let words = wordsOf(rest)
+  while (words.length > 0 && WRAPPER_WORDS.has(words[0] ?? '')) {
+    rest = rest.replace(/^\s*\S+\s*/, '').replace(LEADING_ASSIGN_RE, '')
+    words = wordsOf(rest)
+  }
+  return words
+}
+
+/** git / go の、グローバルオプションを飛ばした先のサブコマンド。 */
+function subcommandOf(words: string[], valueOptions: Set<string>): string {
+  for (let i = 1; i < words.length; i++) {
+    const w = words[i] ?? ''
+    if (valueOptions.has(w)) {
+      i++
+      continue
+    }
+    if (w.startsWith('-')) continue
+    return w
+  }
+  return ''
+}
+
+const GIT_VALUE_OPTIONS = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace'])
+
+/** command がファイルを書き換えないコマンドだけでできているか（保守的: 分からなければ false）。 */
+export function isReadOnlyCommand(command: string): boolean {
+  const text = command.replace(HARMLESS_REDIRECT_RE, ' ')
+  if (text.includes('>') || WRITE_HINT_RE.test(text)) return false
+  let any = false
+  for (const segment of text.split(SEGMENT_SPLIT_RE)) {
+    const words = commandWords(segment)
+    if (words.length === 0) continue
+    const name = (words[0] ?? '').replace(/^.*\//, '').replace(/[)}]+$/, '')
+    if (name === '') continue
+    any = true
+    if (name === 'git') {
+      if (!READ_ONLY_GIT.has(subcommandOf(words, GIT_VALUE_OPTIONS))) return false
+      continue
+    }
+    if (name === 'go') {
+      if (!READ_ONLY_GO.has(subcommandOf(words, new Set()))) return false
+      continue
+    }
+    if (!READ_ONLY_COMMANDS.has(name)) return false
+    if (name === 'sed' && words.some((w) => /^-[A-Za-z]*i/.test(w))) return false
+    if (name === 'sort' && words.some((w) => /^-[A-Za-z]*o/.test(w))) return false
+  }
+  return any
+}
+
 // HFS+ の 1 秒粒度と時計ずれの余裕。
 const MTIME_SLACK_MS = 2000
 
@@ -60,6 +256,8 @@ const startedKey = (payload: Dict): string => {
   return `${sessionId}--${toolUseId}`
 }
 
+const commandOf = (payload: Dict): string => jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined)
+
 const hasGate = async (io: Io, projectDir: string): Promise<boolean> => (await findGateYaml(io, projectDir)) !== undefined
 
 /** 開始時刻ファイルを置くディレクトリ。gate.yaml があれば <設定ディレクトリ>/.gate-status/、無ければ <feedbackDir>/.bash_started/。 */
@@ -70,6 +268,7 @@ const startedPath = (dir: string, payload: Dict): string => join(dir, `bash_star
 /** PreToolUse(Bash): コマンド開始時刻を控える（追跡する必要のある PJ だけ）。常に ok() を返す。 */
 export async function bashStarted(io: Io, payload: Dict): Promise<ScriptResult> {
   try {
+    if (isReadOnlyCommand(commandOf(payload))) return ok()
     const projectDir = io.projectDir || io.cwd
     const gate = await hasGate(io, projectDir)
     if (!gate && !wantsBashEdits(await listRules(io))) return ok()
@@ -136,16 +335,18 @@ async function detect(io: Io, projectDir: string, gate: boolean, startedDirPath:
   // tool_use_id が食い違う開始時刻は、別のコマンドのものなので使わない。
   if (jqStr(saved.tool_use_id) !== jqStr(payload.tool_use_id)) return NONE
 
-  const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined)
-  if (SKIP_COMMAND_RE.test(command)) return NONE
+  const command = commandOf(payload)
+  if (SKIP_COMMAND_RE.test(command) || isReadOnlyCommand(command)) return NONE
 
   const threshold = saved.started - MTIME_SLACK_MS
   const stateDir = gateStatusDir(io)
+  const foreign = gate ? await filesOfOtherSessions(io, stateDir, jqStr(payload.session_id) || 'unknown') : new Set<string>()
   const picked = new Set<string>()
   for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd, command)) {
     for (const rel of await candidates(io, root, threshold)) {
       const abs = join(root, rel)
       if (abs.startsWith(`${stateDir}/`) || abs.startsWith(`${startedDirPath}/`) || rel.startsWith(`.claude/${STATE_DIR}/`)) continue
+      if (foreign.has(abs)) continue
       const st = await io.stat(abs)
       if (st?.kind === 'file' && st.mtimeMs >= threshold) picked.add(abs)
     }
@@ -159,6 +360,25 @@ async function detect(io: Io, projectDir: string, gate: boolean, startedDirPath:
   const recorded = changed.filter((p) => !have.has(p))
   if (recorded.length > 0) await io.writeFile(memo, `${existing}${recorded.map((p) => `${p}\n`).join('')}`)
   return { changed, recorded, threshold, gate }
+}
+
+const OTHER_STATE_RE = /^(?:changed_files|gate_passed|gate_failed)\.(.+)\.txt$/
+
+/**
+ * 同じ作業ツリーで動く他のセッションが自分の変更として持っているファイル（changed_files / gate_passed / gate_failed の
+ * <session>[--<agent>] が自分のセッションでないもの）。このコマンドの間に mtime が動いていても、それは相手の編集なので
+ * 拾わない。相手の gate がそのファイルを検査する。自分のセッションのサブエージェント分は従来どおり拾う。
+ */
+async function filesOfOtherSessions(io: Io, stateDir: string, sessionId: string): Promise<Set<string>> {
+  const out = new Set<string>()
+  for (const e of await io.list(stateDir)) {
+    const m = e.kind === 'file' ? OTHER_STATE_RE.exec(e.name) : null
+    if (m === null) continue
+    const id = m[1] ?? ''
+    if (id === sessionId || id.startsWith(`${sessionId}--`)) continue
+    for (const line of ((await io.readFile(join(stateDir, e.name))) ?? '').split('\n')) if (line !== '') out.add(line)
+  }
+  return out
 }
 
 const gitTop = async (io: Io, dir: string): Promise<string> => {

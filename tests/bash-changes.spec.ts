@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { bashChanges, bashStarted, mentionsWorktree, recordBashChanges, SKIP_COMMAND_RE } from '../src/bash-changes.ts'
+import { bashChanges, bashStarted, isReadOnlyCommand, mentionsWorktree, recordBashChanges, SKIP_COMMAND_RE } from '../src/bash-changes.ts'
 import type { Dict } from '../src/pyutil.ts'
 import { changedLines, changedPath, exists, statePath, writeGateYaml } from './helpers/gate.ts'
 import { makeIo, rmTree, tmpDir, withTmp } from './helpers/node-io.ts'
@@ -79,7 +79,93 @@ describe('SKIP_COMMAND_RE', () => {
   })
 })
 
+describe('isReadOnlyCommand', () => {
+  test('accepts commands that only read', () => {
+    for (const c of [
+      'ls -la',
+      'cat src/a.ts | head -20',
+      'grep -rn foo src && git status',
+      'git -C sub log --oneline -5; git diff HEAD~1',
+      'rg "x" --glob "*.ts" 2>/dev/null',
+      'find . -name "*.go" | wc -l',
+      'FOO=1 env | sort | uniq -c',
+      'cd src && ls $(git rev-parse --show-toplevel)',
+      'sed -n 1,20p a.ts',
+      'go list ./... && go env GOPATH',
+      'cat a.txt > /dev/null 2>&1',
+      'echo "hello" && pwd',
+      '/usr/bin/grep x y',
+      'time ls',
+    ]) {
+      expect(isReadOnlyCommand(c)).toBe(true)
+    }
+  })
+  test('rejects commands that may write', () => {
+    for (const c of [
+      '',
+      'echo x > a.txt',
+      'cat a >> b',
+      'sed -i s/a/b/ x.txt',
+      'sed -ni p x.txt',
+      'sort -o out in',
+      'find . -name "*.tmp" -delete',
+      'find . -exec rm {} \\;',
+      'awk \'{system("rm x")}\' f',
+      'ls | xargs rm',
+      'cat a | tee b',
+      'bun run format',
+      'python3 x.py',
+      'git checkout -- .',
+      'git diff --output=p.diff',
+      'ls && make',
+      'go build ./...',
+      'cat <<EOF > x\nhi\nEOF',
+      'ls $(touch x)',
+      'ls `rm x`',
+      'ls; (rm x)',
+      'sudo ls',
+    ]) {
+      expect(isReadOnlyCommand(c)).toBe(false)
+    }
+  })
+})
+
 describe('recordBashChanges', () => {
+  test('does not record anything for a read-only command, even when a file was written meanwhile', () =>
+    withTmp(async (proj) => {
+      initRepo(proj)
+      const clock = { t: T0 }
+      const io = ioAt(proj, clock)
+      const p = payload({ tool_input: { command: 'grep -rn foo . | head' } })
+      await bashStarted(io, p)
+      expect(exists(statePath(proj, 'bash_started', 'sess-1--tu1', 'json'))).toBe(false)
+      // 別のセッションがその間に書いたファイル
+      fs.writeFileSync(path.join(proj, 'tracked.txt'), 'edited by another session\n')
+      setMtime(path.join(proj, 'tracked.txt'), T0 + 500)
+      expect(await recordBashChanges(io, p)).toEqual([])
+      expect(exists(changedPath(proj, 'sess-1'))).toBe(false)
+    }))
+
+  test('does not record files another session already holds in its gate state (same working tree)', () =>
+    withTmp(async (proj) => {
+      initRepo(proj)
+      const clock = { t: T0 }
+      const io = ioAt(proj, clock)
+      fs.mkdirSync(path.dirname(changedPath(proj, 'sess-2')), { recursive: true })
+      fs.writeFileSync(changedPath(proj, 'sess-2'), `${path.join(proj, 'tracked.txt')}\n`)
+      fs.writeFileSync(statePath(proj, 'gate_failed', 'sess-3--agent-9', 'txt'), `${path.join(proj, 'old.txt')}\n`)
+      // 自分のセッションのサブエージェント分は他人扱いしない
+      fs.writeFileSync(statePath(proj, 'gate_passed', 'sess-1--agent-1', 'txt'), `${path.join(proj, 'mine.txt')}\n`)
+      const p = payload({ tool_input: { command: 'bun run format' } })
+      await bashStarted(io, p)
+      for (const f of ['tracked.txt', 'old.txt', 'mine.txt', 'new.txt']) {
+        fs.writeFileSync(path.join(proj, f), 'changed\n')
+        setMtime(path.join(proj, f), T0 + 500)
+      }
+      expect((await recordBashChanges(io, p)).sort()).toEqual([path.join(proj, 'mine.txt'), path.join(proj, 'new.txt')])
+      expect(changedLines(proj, 'sess-1').sort()).toEqual([path.join(proj, 'mine.txt'), path.join(proj, 'new.txt')])
+    }))
+
   test('records only files whose mtime is at or after the start', () =>
     withTmp(async (proj) => {
       initRepo(proj)

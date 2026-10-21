@@ -3892,6 +3892,186 @@ async function feedbackBashEdits(io, payload, files, threshold) {
 
 // src/bash-changes.ts
 var SKIP_COMMAND_RE = /\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?:=\S+)?))*\s+(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b/;
+var READ_ONLY_COMMANDS = new Set([
+  "ls",
+  "cat",
+  "head",
+  "tail",
+  "less",
+  "more",
+  "bat",
+  "tac",
+  "nl",
+  "wc",
+  "grep",
+  "egrep",
+  "fgrep",
+  "rg",
+  "ag",
+  "ack",
+  "find",
+  "fd",
+  "fdfind",
+  "sort",
+  "uniq",
+  "cut",
+  "tr",
+  "awk",
+  "gawk",
+  "mawk",
+  "sed",
+  "diff",
+  "cmp",
+  "comm",
+  "stat",
+  "file",
+  "du",
+  "df",
+  "tree",
+  "pwd",
+  "echo",
+  "printf",
+  "which",
+  "whereis",
+  "type",
+  "env",
+  "printenv",
+  "jq",
+  "yq",
+  "column",
+  "od",
+  "xxd",
+  "hexdump",
+  "strings",
+  "basename",
+  "dirname",
+  "realpath",
+  "readlink",
+  "date",
+  "uname",
+  "id",
+  "whoami",
+  "hostname",
+  "sleep",
+  "rev",
+  "fold",
+  "paste",
+  "join",
+  "md5sum",
+  "sha1sum",
+  "sha256sum",
+  "shasum",
+  "cksum",
+  "ps",
+  "pgrep",
+  "lsof",
+  "man",
+  "true",
+  "false",
+  ":",
+  "test",
+  "[",
+  "[[",
+  "cd",
+  "pushd",
+  "popd",
+  "exit",
+  "return",
+  "export",
+  "local",
+  "set",
+  "unset",
+  "shift"
+]);
+var READ_ONLY_GIT = new Set([
+  "status",
+  "log",
+  "diff",
+  "show",
+  "blame",
+  "ls-files",
+  "ls-tree",
+  "grep",
+  "rev-parse",
+  "rev-list",
+  "describe",
+  "shortlog",
+  "cat-file",
+  "branch",
+  "tag",
+  "remote",
+  "fetch",
+  "reflog",
+  "name-rev",
+  "show-ref",
+  "for-each-ref",
+  "diff-tree",
+  "var",
+  "version",
+  "help"
+]);
+var READ_ONLY_GO = new Set(["env", "version", "list", "doc"]);
+var WRITE_HINT_RE = /system\(|-exec\b|-execdir\b|-ok\b|-okdir\b|-delete\b|-fprint|--in-place|--output/;
+var HARMLESS_REDIRECT_RE = /\d*>>?&\d+|\d*>>?\s*\/dev\/null/g;
+var SEGMENT_SPLIT_RE = /\|\|?|&&|;|\n|&|\$\(|`|<\(|\(|\{/;
+var LEADING_ASSIGN_RE = /^(?:\w+=(?:"[^"]*"|'[^']*'|\S*)\s+)*/;
+var WRAPPER_WORDS = new Set(["command", "builtin", "time", "exec", "nice"]);
+var wordsOf = (segment) => segment.trim().split(/\s+/).filter((w) => w !== "");
+function commandWords(segment) {
+  let rest = segment.replace(LEADING_ASSIGN_RE, "");
+  let words = wordsOf(rest);
+  while (words.length > 0 && WRAPPER_WORDS.has(words[0] ?? "")) {
+    rest = rest.replace(/^\s*\S+\s*/, "").replace(LEADING_ASSIGN_RE, "");
+    words = wordsOf(rest);
+  }
+  return words;
+}
+function subcommandOf(words, valueOptions) {
+  for (let i = 1;i < words.length; i++) {
+    const w = words[i] ?? "";
+    if (valueOptions.has(w)) {
+      i++;
+      continue;
+    }
+    if (w.startsWith("-"))
+      continue;
+    return w;
+  }
+  return "";
+}
+var GIT_VALUE_OPTIONS = new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
+function isReadOnlyCommand(command) {
+  const text = command.replace(HARMLESS_REDIRECT_RE, " ");
+  if (text.includes(">") || WRITE_HINT_RE.test(text))
+    return false;
+  let any = false;
+  for (const segment of text.split(SEGMENT_SPLIT_RE)) {
+    const words = commandWords(segment);
+    if (words.length === 0)
+      continue;
+    const name = (words[0] ?? "").replace(/^.*\//, "").replace(/[)}]+$/, "");
+    if (name === "")
+      continue;
+    any = true;
+    if (name === "git") {
+      if (!READ_ONLY_GIT.has(subcommandOf(words, GIT_VALUE_OPTIONS)))
+        return false;
+      continue;
+    }
+    if (name === "go") {
+      if (!READ_ONLY_GO.has(subcommandOf(words, new Set)))
+        return false;
+      continue;
+    }
+    if (!READ_ONLY_COMMANDS.has(name))
+      return false;
+    if (name === "sed" && words.some((w) => /^-[A-Za-z]*i/.test(w)))
+      return false;
+    if (name === "sort" && words.some((w) => /^-[A-Za-z]*o/.test(w)))
+      return false;
+  }
+  return any;
+}
 var MTIME_SLACK_MS = 2000;
 var STALE_STARTED_MS = 2 * 60 * 60 * 1000;
 var STATE_DIR = ".gate-status";
@@ -3907,11 +4087,14 @@ var startedKey = (payload) => {
   const sessionId = jqStr(payload.session_id) || "unknown";
   return `${sessionId}--${toolUseId}`;
 };
+var commandOf = (payload) => jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
 var hasGate = async (io, projectDir) => await findGateYaml(io, projectDir) !== undefined;
 var startedDir = (io, _projectDir, gate) => gate ? gateStatusDir(io) : join(feedbackDir(io), ".bash_started");
 var startedPath = (dir, payload) => join(dir, `bash_started.${startedKey(payload)}.json`);
 async function bashStarted(io, payload) {
   try {
+    if (isReadOnlyCommand(commandOf(payload)))
+      return ok();
     const projectDir = io.projectDir || io.cwd;
     const gate = await hasGate(io, projectDir);
     if (!gate && !wantsBashEdits(await listRules(io)))
@@ -3960,16 +4143,19 @@ async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
     return NONE;
   if (jqStr(saved.tool_use_id) !== jqStr(payload.tool_use_id))
     return NONE;
-  const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
-  if (SKIP_COMMAND_RE.test(command))
+  const command = commandOf(payload);
+  if (SKIP_COMMAND_RE.test(command) || isReadOnlyCommand(command))
     return NONE;
   const threshold = saved.started - MTIME_SLACK_MS;
   const stateDir = gateStatusDir(io);
+  const foreign = gate ? await filesOfOtherSessions(io, stateDir, jqStr(payload.session_id) || "unknown") : new Set;
   const picked = new Set;
   for (const root of await scanRoots(io, projectDir, jqStr(payload.cwd) || io.cwd, command)) {
     for (const rel of await candidates(io, root, threshold)) {
       const abs = join(root, rel);
       if (abs.startsWith(`${stateDir}/`) || abs.startsWith(`${startedDirPath}/`) || rel.startsWith(`.claude/${STATE_DIR}/`))
+        continue;
+      if (foreign.has(abs))
         continue;
       const st = await io.stat(abs);
       if (st?.kind === "file" && st.mtimeMs >= threshold)
@@ -3988,6 +4174,23 @@ async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
     await io.writeFile(memo, `${existing}${recorded.map((p) => `${p}
 `).join("")}`);
   return { changed, recorded, threshold, gate };
+}
+var OTHER_STATE_RE = /^(?:changed_files|gate_passed|gate_failed)\.(.+)\.txt$/;
+async function filesOfOtherSessions(io, stateDir, sessionId) {
+  const out = new Set;
+  for (const e of await io.list(stateDir)) {
+    const m = e.kind === "file" ? OTHER_STATE_RE.exec(e.name) : null;
+    if (m === null)
+      continue;
+    const id = m[1] ?? "";
+    if (id === sessionId || id.startsWith(`${sessionId}--`))
+      continue;
+    for (const line of (await io.readFile(join(stateDir, e.name)) ?? "").split(`
+`))
+      if (line !== "")
+        out.add(line);
+  }
+  return out;
 }
 var gitTop = async (io, dir) => {
   const top = await io.run(["git", "-C", dir, "rev-parse", "--show-toplevel"], { timeoutMs: 1e4 });
