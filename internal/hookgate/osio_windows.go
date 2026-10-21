@@ -22,3 +22,8 @@ func canExecute(_ string, fi fs.FileInfo) bool { return fi.Mode().IsRegular() }
 func removeEmptyDir(path string) {
 	_ = syscall.Rmdir(path)
 }
+
+// Windows にはプロセスグループもシグナルの転送も無いので、何もしない。
+func trackGroup(int) {}
+
+func untrackGroup(int) {}

@@ -255,6 +255,11 @@ func lookPathIn(cmd, pathEnv string) (string, bool) {
 	return cmd, false
 }
 
+// exitGrace は、コマンドが終わってから stdout / stderr の残りを読むために待つ上限。バックグラウンドに残った孫
+// プロセス（dev サーバーやデーモンなど）がパイプを継いでいても、これを過ぎたらパイプを閉じて結果を返す
+// （exec.Cmd.WaitDelay。Node 版の EXIT_GRACE_MS と同じ）。
+const exitGrace = 500 * time.Millisecond
+
 // Run はシェルを介さず argv を実行する。独立したプロセスグループにして、TimeoutMs が指定されていれば
 // タイムアウトで子孫ごと SIGKILL する（指定が無ければ hooks.json の timeout が上限になる）。
 func (o *osIo) Run(argv []string, opts RunOptions) RunResult {
@@ -281,10 +286,16 @@ func runProcess(argv []string, opts RunOptions) RunResult {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// 'close' ではなく終了を基準にする: 孫がパイプを継いでいても、終了の後は exitGrace だけ待って返る。
+	cmd.WaitDelay = exitGrace
 	setProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		return RunResult{ExitCode: 1, Error: err.Error()}
 	}
+	// hook のプロセス自体がシグナルで止められたとき、走っているグループを道連れにする（unix のみ）。
+	pid := cmd.Process.Pid
+	trackGroup(pid)
+	defer untrackGroup(pid)
 	var (
 		mu       sync.Mutex
 		timedOut bool
@@ -315,6 +326,13 @@ func runProcess(argv []string, opts RunOptions) RunResult {
 		res.ExitCode = 1
 	case waitErr == nil:
 		res.ExitCode = 0
+	case errors.Is(waitErr, exec.ErrWaitDelay):
+		// コマンドは終わっているが、孫がパイプを握ったまま exitGrace を過ぎたので閉じた。コマンド自身の終了コードを使う
+		// （ErrWaitDelay はコマンドが 0 で終わったときだけ返るが、念のため ProcessState から読む）。
+		res.ExitCode = 0
+		if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() > 0 {
+			res.ExitCode = cmd.ProcessState.ExitCode()
+		}
 	default:
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) && exitErr.ExitCode() >= 0 {

@@ -144,6 +144,17 @@ describe('PostToolUse', () => {
       expect(r.json?.reason).toContain('no_todo')
     }))
 
+  test('the CLI exits right after the hook even when a gate command leaves a grandchild holding its pipes', () =>
+    withEnv(async (env) => {
+      writeGateYaml(env.proj, { rules: [{ match: '**/*.py', run: ["sh -c 'sleep 20 & echo hi'"] }] })
+      const file = path.join(env.proj, 'x.py')
+      fs.writeFileSync(file, 'x = 1\n')
+      const started = Date.now()
+      const r = await hook(env, 'PostToolUse', { tool_name: 'Write', tool_input: { file_path: file }, tool_response: {}, tool_use_id: 't1' })
+      expect(r.exitCode).toBe(0)
+      expect(Date.now() - started).toBeLessThan(5000)
+    }))
+
   test('additionalContext: the report of a finished subagent is handed to the caller', () =>
     withEnv(async (env) => {
       writeGateYaml(env.proj, failingCheck)
