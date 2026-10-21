@@ -1,6 +1,6 @@
 // hook モジュールの実行環境は Node も DOM も持たず、ファイルやプロセスには `$`（エンジン）経由でしか
 // 触れない。ポートしたロジックはすべてこの Io インターフェースだけに依存し、実環境では
-// engine-io.ts が `$` から、テストでは tests/helpers/node-io.ts が Node から実装する。
+// engine-io.ts が `$` から、テストでは tests/helpers/node-io.ts が Node から実装する（command hook の Go 版は internal/hookgate/osio.go）。
 import type { Lang } from './i18n.ts'
 
 export type EnvVars = {

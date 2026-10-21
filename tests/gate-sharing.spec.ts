@@ -10,7 +10,6 @@ const logFiles = (proj: string, stateId: string): string[] => {
   const dir = path.join(proj, '.claude', '.gate-status', 'logs', stateId)
   return fs.existsSync(dir) ? fs.readdirSync(dir) : []
 }
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
 type Logs = { bandLog?: Array<string | undefined>; resultLog?: Array<string | undefined> }
 

@@ -2,7 +2,7 @@
 import type { Io } from './io.ts'
 import { join } from './path.ts'
 
-/** Claude Code の候補。Codex は逆順（src/host-codex.ts）。 */
+/** Claude Code の候補。Codex は逆順（Go 版の internal/hookgate/host_codex.go）。 */
 export const CLAUDE_CONFIG_DIRS: readonly string[] = ['.claude', '.agents']
 
 /**

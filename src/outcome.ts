@@ -71,7 +71,7 @@ export const merge = (first: Outcome, second: Outcome): Outcome => {
 
 export const decided = (o: Outcome) => o.block !== undefined || o.deny !== undefined || o.ask !== undefined || o.allow === true
 
-// Outcome を classic コマンド hook の出力（終了コード 0 + stdout の JSON）へ戻す。settings hook の CLI（src/cli.ts）が使う。
+// Outcome を classic コマンド hook の出力（終了コード 0 + stdout の JSON）へ戻す。classic の出力形式の検証用で、Go 版の CLI（internal/hookgate/host_claude.go）は同じ変換を持つ。
 // toOutcome の逆変換で、exit 2 の block / deny は JSON の判定（decision: block / permissionDecision: deny）で同じ効果になる
 // （exit 2 は stderr を理由にするだけで、stdout の JSON は無視される規約なので、情報は reason に移す）。
 // stderr は warn など正常終了時の出力で、そのまま stderr へ出す。

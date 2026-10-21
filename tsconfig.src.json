@@ -5,15 +5,5 @@
     "types": []
   },
   "include": ["src", "hooks", "types"],
-  // src/cli.ts・src/codex-cli.ts・src/host*.ts と src/node-io.ts は Node で動く command hook（settings hook / Codex プラグイン）用（mod の実行環境の外）なので、Node の型が無い検査から外す。
-  "exclude": [
-    "hooks/register.test.ts",
-    "node_modules",
-    "src/cli.ts",
-    "src/codex-cli.ts",
-    "src/host.ts",
-    "src/host-claude.ts",
-    "src/host-codex.ts",
-    "src/node-io.ts"
-  ]
+  "exclude": ["hooks/register.test.ts", "node_modules"]
 }

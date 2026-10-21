@@ -1,5 +1,6 @@
-// イベントごとの処理（中核）。mod（src/register.ts、classic.* から）と command hook の CLI（src/cli.ts / src/codex-cli.ts、
-// ホストごとの変換は src/host*.ts）の両方がここを呼び、ここが各イベントの実装（src/feedback-guard.ts、src/stop-test-gate.ts など）を呼ぶ。
+// イベントごとの処理（中核）。mod（src/register.ts、classic.* から）がここを呼び、ここが各イベントの実装（src/feedback-guard.ts、
+// src/stop-test-gate.ts など）を呼ぶ。command hook の CLI は Go 版（internal/hookgate/hooks.go と host*.go。バイナリは
+// `feedback-gate claude|codex <Event>`）にあり、この中核を同じ構成で移したもの。
 // 引数の payload は classic コマンド hook が stdin で受け取る JSON の形。各段は classic のスクリプトと同じ
 // { exitCode, stdout, stderr } を返し、それを classic の規約どおり Outcome にまとめて返す。
 import type { PluginOptions } from 'claude-code'

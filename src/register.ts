@@ -12,8 +12,8 @@ import { listRunning, runningBand } from './running-registry.ts'
 
 // settings.json の command hook をプラグイン同梱の TypeScript 関数（src/）として載せ替えた mod。
 // イベントごとの処理は src/hooks.ts にあり、ここは classic.* のイベントをエンジンの $ から作った Io で
-// そこへ渡し、結果（Outcome）を次の hook の結果に重ねて返すだけ。同じ src/hooks.ts を settings hook の
-// CLI（src/cli.ts、hooks/hooks.json）も呼ぶ。
+// そこへ渡し、結果（Outcome）を次の hook の結果に重ねて返すだけ。同じ検査を settings hook
+// （hooks/hooks.json）が Go 版のバイナリ（internal/hookgate、`feedback-gate claude <Event>`）でも走らせる。
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
@@ -25,7 +25,7 @@ async function withNext(next: (e: HookEvent) => Promise<HookResult>, e: HookEven
 
 // classic.* の hook の先頭で呼ぶ。セッション別のマーカー <feedbackDir>/.classic_seen/<session> を書く。組織管理のガード
 // （cc-plugin-sec-default）が classic.* をユーザーの mod に対して飛ばす環境ではこれが書かれず、hooks/hooks.json の
-// settings hook（scripts/hook.sh → hooks/cli.js）が同じ処理を代わりに走らせる。こちらが走る環境では、あちらがマーカーを
+// settings hook（scripts/hook.sh → feedback-gate バイナリ。scripts/install-binary.sh が取得する）が同じ処理を代わりに走らせる。こちらが走る環境では、あちらがマーカーを
 // 見て黙る。無ければ書き、refresh（classic.Notification）では毎回書き直す（reset-gate の 24h 掃除に消されないように）。
 async function markClassic($: Engine, options: PluginOptions, refresh = false): Promise<void> {
   try {
