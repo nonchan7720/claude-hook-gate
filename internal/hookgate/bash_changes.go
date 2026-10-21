@@ -64,7 +64,7 @@ func bashStateIDOf(payload Dict) string {
 func bashSanitizeToolUseID(s string) string {
 	var b strings.Builder
 	for _, r := range s {
-		if r < 0x80 && bashNameChar(byte(r)) {
+		if bashNameChar(r) {
 			b.WriteRune(r)
 			continue
 		}
@@ -295,7 +295,7 @@ func MentionsWorktree(command, name string) bool {
 		}
 		i := from + idx
 		end := i + len(needle)
-		if end >= len(command) || !bashNameChar(command[end]) {
+		if end >= len(command) || !bashNameChar(rune(command[end])) {
 			return true
 		}
 		from = i + 1
@@ -304,7 +304,7 @@ func MentionsWorktree(command, name string) bool {
 }
 
 // bashNameChar は [A-Za-z0-9._-]。
-func bashNameChar(c byte) bool {
+func bashNameChar(c rune) bool {
 	return c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-'
 }
 

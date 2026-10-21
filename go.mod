@@ -1,6 +1,6 @@
 module github.com/nonchan7720/claude-hook-gate
 
-go 1.24
+go 1.27
 
 require (
 	github.com/dlclark/regexp2 v1.12.0

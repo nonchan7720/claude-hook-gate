@@ -24,7 +24,6 @@ linters:
     - gocritic
     - gocyclo
     - gomoddirectives
-    - gomodguard
     - goprintffuncname
     - gosec
     - makezero

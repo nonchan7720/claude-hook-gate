@@ -61,7 +61,7 @@ func Truthy(v any) bool {
 	switch rv.Kind() { //nolint:exhaustive // 他は常に真
 	case reflect.Slice, reflect.Map, reflect.Array:
 		return rv.Len() > 0
-	case reflect.Ptr, reflect.Interface:
+	case reflect.Pointer, reflect.Interface:
 		return !rv.IsNil()
 	}
 	return true
