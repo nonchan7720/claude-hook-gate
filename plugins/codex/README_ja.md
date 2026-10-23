@@ -59,15 +59,16 @@ bash plugins/codex/scripts/install-hooks.sh --remove [...]   # 写しからプ�
    - `bash plugins/codex/scripts/install-hooks.sh --toml` の出力を `requirements.toml` に貼ってもらう（ユーザーがフックを切れないよう `[features] hooks = true` も一緒に）。
    - 加えて、出力が指すパスに置いた、全ユーザーが読めるこのリポジトリのチェックアウトを全マシンに（Codex はフックのスクリプトを配布しません。`scripts/hook.sh` は自分の場所からルートを求めるので `PLUGIN_ROOT` は不要です）。バイナリのキャッシュはユーザーごと（`~/.cache/feedback-gate`）なので、各ユーザーの最初のセッションが 1 回ダウンロードします。GitHub に出られないマシンでは、バイナリを共有のパスに置いて全員の `FEEDBACK_GATE_BIN` に指定するか、リリースのファイルのミラーを `FEEDBACK_GATE_RELEASE_BASE_URL` に指定してください。
 
-### 管理者がフックを配ってくれないとき
+### 管理層に自分でフックを置く
 
-`allow_managed_hooks_only` が効いている間は、どのファイルに書いてもあなたのフックは動かず、プラグインもそれを迂回しようとはしません。`requirements.toml` は組織の決定で、プラグインは Codex がユーザーに書かせる層にしかフックを登録しません。フック無しでも動くのは次のものです。
+`allow_managed_hooks_only` の下で Codex が見るのはフックの*出どころ*であって、誰が書いたかではありません。管理層から来たフックは走らせ、それ以外は飛ばします。`~/.codex/` の下やプロジェクトのファイルはどれも管理層ではないので、そこで何を調整しても動きません。マシン上の素のファイルとして存在する管理層はシステムの設定フォルダ、Linux と macOS では `/etc/codex/` です。そこの `hooks.json`（またはそこの `config.toml` の `[hooks]`）は管理層のフックとして全ユーザーに対して信頼の確認なしに走り、ポリシーが `/etc/codex/requirements.toml` から来ていても、MDM のプロファイルや ChatGPT ワークスペースから来ていても、飛ばされません。そこに書くにはマシンの管理者権限（`sudo`）が要ります。それがあるなら、管理者がやることを自分でやります。
 
-- **ルールは `AGENTS.md` 経由で Codex に届けられます。** `bash plugins/codex/scripts/print-rules.sh`（`feedback-gate codex print-rules`）は、UserPromptSubmit のフックが毎回のプロンプトに足すものをそのまま表示します。rules ファイル（`FEEDBACK_GATE_RULES_FILE` か同梱の `rules/feedback_rules.md`）と、`~/{.agents,.claude}/feedback/` の、プロジェクトの中で実行すればその `{.agents,.claude}/feedback/` の、確定したフィードバックルール（`count >= 3`）です。出力を `~/.codex/AGENTS.md`（全セッション）かプロジェクトの `AGENTS.md`（そのプロジェクト）に貼り、ルールが変わったら再実行してください。Codex はルールを指示として読みます。これはフックが与えるものと同じです。無いのは強制（ツール呼び出しと停止時の `deny` / `ask` / `block`）と `count` の自動増加です。
-- **gate は Codex の外で走らせます。** `gate.yaml` のコマンドは普通の lint / テストのコマンドなので、git の pre-commit フックや CI で走らせ、`AGENTS.md` で「終える前にこれを実行する」と Codex に指示してください。合否は Stop フックの代わりに git や CI が強制します。
-- **そのプロジェクトは Claude Code で使う。** 同じルールと同じ `gate.yaml` を Claude Code 版が読み、その settings hook は組織のガードの下でも動きます。Claude Code で検査し、Codex にはルールを*伝える*だけのプロジェクトでも、検査は 1 回は通ります。
+```
+bash plugins/codex/scripts/install-hooks.sh --print > /tmp/feedback-gate-hooks.json   # 自分として: バイナリを自分のキャッシュに取り、フックを表示する
+sudo install -D -m 0644 /tmp/feedback-gate-hooks.json /etc/codex/hooks.json          # root として: システム層に置く
+```
 
-`--toml` の出力を手に、管理者にもう一度頼んでみてください。`requirements.toml` の数行とチェックアウト 1 つで済み、管理層のフックはまさにそのポリシーのためにあるものです。
+管理者が既に `/etc/codex/hooks.json` を置いているなら、`sudo bash plugins/codex/scripts/install-hooks.sh --to /etc/codex/hooks.json` がそれにマージします（`FEEDBACK_GATE_BIN` で自分のキャッシュのバイナリを指さない限り、root のキャッシュにもバイナリを取ります）。`--print` と `install` はファイルを置き換えます。フックが指すチェックアウト（`install-hooks.sh` を実行したディレクトリ）はそのままの場所に置き、Codex を使う全ユーザーが読めるようにしておいてください。Codex を再起動すると、`/hooks` にそのフックが管理層のものとして並びます。ポリシーが `requirements.toml` の `[hooks] managed_dir` まで固定している場合は、管理者が `--toml` の出力をそこに貼る形だけが使えます。マシンの管理者権限が無ければ、その管理者だけが経路で、渡すものは上の `--print` / `--toml` の出力です。
 
 ### 二重に走らせない
 
@@ -133,7 +134,6 @@ plugins/codex/
 ├── hooks/hooks.json            # 全イベントの command hook
 ├── scripts/hook.sh             # 入口: feedback-gate を探すかダウンロードし（../../scripts/install-binary.sh）、`feedback-gate codex <Event>` を動かす
 ├── scripts/install-hooks.sh    # Codex はまだプラグインのフックを走らせないので hooks/hooks.json を ~/.codex/hooks.json などに写す（`feedback-gate codex install-hooks`）
-├── scripts/print-rules.sh      # UserPromptSubmit が注入する内容を表示。どのフックも動かない環境で AGENTS.md に貼る（`feedback-gate codex print-rules`）
 └── README.md, README_ja.md
 ```
 

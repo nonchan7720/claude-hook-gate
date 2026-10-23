@@ -3,7 +3,6 @@
 //	feedback-gate claude <Event>   Claude Code settings hook
 //	feedback-gate codex  <Event>   Codex plugin hook
 //	feedback-gate codex  install-hooks [...]   copy the Codex hooks into a hooks.json Codex reads (see internal/hookgate/codex_install_hooks.go)
-//	feedback-gate codex  print-rules           print what UserPromptSubmit adds to the context, for AGENTS.md where no hook runs
 //	feedback-gate version          print the version
 package main
 
@@ -33,10 +32,6 @@ func run(args []string) int {
 				cwd, _ := os.Getwd()
 				return hookgate.CodexInstallHooks(args[2:], hookgate.EnvironMap(), cwd, os.Stdout, os.Stderr)
 			}
-			if len(args) >= 2 && args[1] == "print-rules" {
-				cwd, _ := os.Getwd()
-				return hookgate.CodexPrintRules(args[2:], hookgate.EnvironMap(), cwd, os.Stdout, os.Stderr)
-			}
 			return hookgate.CliMain(hookgate.CodexHost, args[1:], os.Stdin, os.Stdout, os.Stderr)
 		case "version":
 			if len(args) == 1 {
@@ -45,6 +40,6 @@ func run(args []string) int {
 			}
 		}
 	}
-	fmt.Fprintln(os.Stderr, "usage: feedback-gate <claude|codex> <Event> | feedback-gate codex install-hooks [...] | feedback-gate codex print-rules | feedback-gate version")
+	fmt.Fprintln(os.Stderr, "usage: feedback-gate <claude|codex> <Event> | feedback-gate codex install-hooks [...] | feedback-gate version")
 	return 1
 }

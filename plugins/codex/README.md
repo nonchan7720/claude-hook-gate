@@ -59,15 +59,16 @@ Check in this order. `/hooks` in Codex lists every hook source it found and whet
    - `bash plugins/codex/scripts/install-hooks.sh --toml`, to be pasted into `requirements.toml` together with `[features] hooks = true` (so a user cannot turn hooks off);
    - and a checkout of this repository at the path the output names, on every machine, readable by every user (Codex does not distribute hook scripts; `scripts/hook.sh` finds its root from its own location, so no `PLUGIN_ROOT` is needed). The binary cache is per user (`~/.cache/feedback-gate`), so each user's first session downloads it once; where machines have no access to GitHub, put the binary at a shared path and set `FEEDBACK_GATE_BIN` for everyone, or `FEEDBACK_GATE_RELEASE_BASE_URL` to a mirror of the release files.
 
-### If the administrator does not deploy the hooks
+### Putting the hooks in the managed layer yourself
 
-With `allow_managed_hooks_only` in force no hook of yours runs, whatever file you put it in, and the plugin does not try to get around that: `requirements.toml` is the organization's decision, and the plugin only ever registers hooks in the layers Codex lets a user write. What still works without hooks:
+Under `allow_managed_hooks_only` Codex decides by the *source* of a hook, not by who wrote it: a hook is run when it comes from a managed layer and skipped otherwise. No file under `~/.codex/` or in the project is managed, so there is nothing to tune there. The managed layer that is a plain file on the machine is the system config folder, `/etc/codex/` on Linux and macOS: a `hooks.json` there (or `[hooks]` in the `config.toml` there) is managed, runs for every user without a trust prompt, and is not skipped by the policy, whether that policy comes from `/etc/codex/requirements.toml`, an MDM profile or the ChatGPT workspace. Writing there needs administrator rights on the machine (`sudo`). If you have them, do what the administrator would do:
 
-- **The rules reach Codex through `AGENTS.md`.** `bash plugins/codex/scripts/print-rules.sh` (`feedback-gate codex print-rules`) prints exactly what the UserPromptSubmit hook would add to every prompt: the rules file (your `FEEDBACK_GATE_RULES_FILE` or the bundled `rules/feedback_rules.md`) and the confirmed feedback rules (`count >= 3`) of `~/{.agents,.claude}/feedback/` and, run inside a project, of its `{.agents,.claude}/feedback/`. Paste the output into `~/.codex/AGENTS.md` (every session) or the project's `AGENTS.md` (that project), and run it again when the rules change. Codex then sees the rules as instructions, which is what the hook gives it too; what is missing is the enforcement (`deny` / `ask` / `block` on tool calls and at stop time) and the automatic `count` increase.
-- **The gate runs outside Codex.** The commands of `gate.yaml` are ordinary lint / test commands: run them from a git pre-commit hook or in CI, and tell Codex in `AGENTS.md` to run them before it finishes. The pass / fail is then enforced by git or CI instead of the Stop hook.
-- **Use Claude Code for that project.** The same rules and the same `gate.yaml` are read by the Claude Code plugin, whose settings hooks run under an organization's guard. A project checked by Claude Code and only *told* the rules in Codex is still checked once.
+```
+bash plugins/codex/scripts/install-hooks.sh --print > /tmp/feedback-gate-hooks.json   # as yourself: downloads the binary into your cache, prints the hooks
+sudo install -D -m 0644 /tmp/feedback-gate-hooks.json /etc/codex/hooks.json          # as root: place it in the system layer
+```
 
-Ask the administrator again with the `--toml` output in hand: it is a few lines of `requirements.toml` and a checkout, and managed hooks are exactly what that policy is for.
+If the administrator already put a `hooks.json` there, `sudo bash plugins/codex/scripts/install-hooks.sh --to /etc/codex/hooks.json` merges into it instead (and downloads the binary into root's cache too, unless `FEEDBACK_GATE_BIN` points at the one in yours); `--print` plus `install` replaces the file. The checkout the hooks point at (the directory `install-hooks.sh` was run from) must stay where it is and be readable by every user who runs Codex. Restart Codex; `/hooks` then lists the hooks as managed. If the policy also pins `[hooks] managed_dir` in `requirements.toml`, the `--toml` output pasted there by the administrator is the only form; without administrator rights on the machine, that administrator is the only route, and the `--print` / `--toml` outputs above are what to hand them.
 
 ### No double runs
 
@@ -133,7 +134,6 @@ plugins/codex/
 ├── hooks/hooks.json            # command hooks for every event
 ├── scripts/hook.sh             # entry: finds or downloads feedback-gate (see ../../scripts/install-binary.sh), runs `feedback-gate codex <Event>`
 ├── scripts/install-hooks.sh    # copies hooks/hooks.json into ~/.codex/hooks.json etc., since Codex does not run plugin hooks yet (`feedback-gate codex install-hooks`)
-├── scripts/print-rules.sh      # prints what UserPromptSubmit injects, for AGENTS.md where no hook may run (`feedback-gate codex print-rules`)
 └── README.md, README_ja.md
 ```
 
