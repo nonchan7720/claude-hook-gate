@@ -45,131 +45,171 @@ var bhSplitOps = bashSet("|", "||", "&&", ";", "&", "(", ")")
 
 var bhDigitsRe = regexp.MustCompile(`^\d+$`)
 
+// bhTokenizer は 1 行の字句分解の状態（TokenizeLine）。
+type bhTokenizer struct {
+	line    string
+	i       int
+	toks    []bhTok
+	word    strings.Builder
+	dynamic bool
+	quoted  bool
+	has     bool
+}
+
+func (z *bhTokenizer) at(i int) byte {
+	if i < len(z.line) {
+		return z.line[i]
+	}
+	return 0
+}
+
+func (z *bhTokenizer) flush() {
+	if z.has {
+		z.toks = append(z.toks, bhTok{kind: "word", text: z.word.String(), dynamic: z.dynamic, quoted: z.quoted})
+	}
+	z.word.Reset()
+	z.dynamic, z.quoted, z.has = false, false, false
+}
+
+func (z *bhTokenizer) op(text string) { z.toks = append(z.toks, bhTok{kind: "op", text: text}) }
+
+// singleQuoted は '...' を語に足す（閉じていなければ行末まで）。
+func (z *bhTokenizer) singleQuoted() {
+	end := strings.IndexByte(z.line[z.i+1:], '\'')
+	if end == -1 {
+		z.word.WriteString(z.line[z.i+1:])
+		z.i = len(z.line)
+	} else {
+		z.word.WriteString(z.line[z.i+1 : z.i+1+end])
+		z.i = z.i + 1 + end + 1
+	}
+	z.has, z.quoted = true, true
+}
+
+// doubleQuoted は "..." を語に足す。`$` / バッククォートがあれば展開される語（dynamic）。
+func (z *bhTokenizer) doubleQuoted() {
+	z.i++
+	for z.i < len(z.line) && z.line[z.i] != '"' {
+		if z.line[z.i] == '\\' && z.i+1 < len(z.line) {
+			z.i++
+		} else if z.line[z.i] == '$' || z.line[z.i] == '`' {
+			z.dynamic = true
+		}
+		z.word.WriteByte(z.line[z.i])
+		z.i++
+	}
+	z.i++
+	z.has, z.quoted = true, true
+}
+
+// redirect は `<` / `>` から始まる演算子（<、<<、<<-、<<<、>、>>、記述子の複製）を読む。
+func (z *bhTokenizer) redirect(c byte) {
+	// 直前に付いた数字はファイル記述子（2> など）: その語は捨て、リダイレクトは対象外にする
+	fd := z.has && bhDigitsRe.MatchString(z.word.String())
+	if fd {
+		z.word.Reset()
+		z.has = false
+	} else {
+		z.flush()
+	}
+	if c == '<' && z.at(z.i+1) == '<' {
+		z.heredocOp()
+		return
+	}
+	text := string(c)
+	z.i++
+	if c == '>' && z.at(z.i) == '>' {
+		text = ">>"
+		z.i++
+	}
+	if z.at(z.i) == '&' {
+		// `>&2` / `>&-`: 記述子の複製。次の語は書き先ではない
+		text = "fd"
+		z.i++
+	} else if fd {
+		text = "fd"
+	}
+	z.op(text)
+}
+
+// heredocOp は `<<`、`<<-`、`<<<`（here-string）を読む。
+func (z *bhTokenizer) heredocOp() {
+	if z.at(z.i+2) == '<' {
+		z.op("<<<")
+		z.i += 3
+		return
+	}
+	z.i += 2
+	if z.at(z.i) == '-' {
+		z.op("<<-")
+		z.i++
+	} else {
+		z.op("<<")
+	}
+}
+
+// ampRedirect は `&> path` / `&>> path`（stdout と stderr をまとめて書く。内容は本文のままなので対象にする）を読む。
+func (z *bhTokenizer) ampRedirect() {
+	z.flush()
+	z.i += 2
+	if z.at(z.i) == '>' {
+		z.op(">>")
+		z.i++
+	} else {
+		z.op(">")
+	}
+}
+
+// control は `|` / `||` / `&` / `&&` / `;` / `(` / `)` を読む。
+func (z *bhTokenizer) control(c byte) {
+	z.flush()
+	if (c == '|' || c == '&') && z.at(z.i+1) == c {
+		z.op(string(c) + string(c))
+		z.i += 2
+	} else {
+		z.op(string(c))
+		z.i++
+	}
+}
+
 // TokenizeLine は 1 行をクォートを考慮して語と演算子に分ける。クォートは外し、`$` / バッククォートを含む（展開される）語は dynamic。
 func TokenizeLine(line string) []bhTok {
-	toks := []bhTok{}
-	var word strings.Builder
-	dynamic, quoted, has := false, false, false
-	flush := func() {
-		if has {
-			toks = append(toks, bhTok{kind: "word", text: word.String(), dynamic: dynamic, quoted: quoted})
-		}
-		word.Reset()
-		dynamic, quoted, has = false, false, false
-	}
-	op := func(text string) { toks = append(toks, bhTok{kind: "op", text: text}) }
-	at := func(i int) byte {
-		if i < len(line) {
-			return line[i]
-		}
-		return 0
-	}
-	i := 0
-	for i < len(line) {
-		c := line[i]
+	z := &bhTokenizer{line: line, toks: []bhTok{}}
+	for z.i < len(line) {
+		c := line[z.i]
 		switch {
 		case c == ' ' || c == '\t':
-			flush()
-			i++
-		case c == '#' && !has:
-			i = len(line)
+			z.flush()
+			z.i++
+		case c == '#' && !z.has:
+			z.i = len(line)
 		case c == '\'':
-			end := strings.IndexByte(line[i+1:], '\'')
-			if end == -1 {
-				word.WriteString(line[i+1:])
-				i = len(line)
-			} else {
-				word.WriteString(line[i+1 : i+1+end])
-				i = i + 1 + end + 1
-			}
-			has, quoted = true, true
+			z.singleQuoted()
 		case c == '"':
-			i++
-			for i < len(line) && line[i] != '"' {
-				if line[i] == '\\' && i+1 < len(line) {
-					i++
-				} else if line[i] == '$' || line[i] == '`' {
-					dynamic = true
-				}
-				word.WriteByte(line[i])
-				i++
-			}
-			i++
-			has, quoted = true, true
+			z.doubleQuoted()
 		case c == '\\':
-			if i+1 < len(line) {
-				word.WriteByte(line[i+1])
+			if z.i+1 < len(line) {
+				z.word.WriteByte(line[z.i+1])
 			}
-			has, quoted = true, true // `\EOF` は引用扱い
-			i += 2
+			z.has, z.quoted = true, true // `\EOF` は引用扱い
+			z.i += 2
 		case c == '<' || c == '>':
-			// 直前に付いた数字はファイル記述子（2> など）: その語は捨て、リダイレクトは対象外にする
-			fd := has && bhDigitsRe.MatchString(word.String())
-			if fd {
-				word.Reset()
-				has = false
-			} else {
-				flush()
-			}
-			if c == '<' && at(i+1) == '<' && at(i+2) == '<' {
-				op("<<<")
-				i += 3
-				continue
-			}
-			if c == '<' && at(i+1) == '<' {
-				i += 2
-				if at(i) == '-' {
-					op("<<-")
-					i++
-				} else {
-					op("<<")
-				}
-				continue
-			}
-			text := string(c)
-			i++
-			if c == '>' && at(i) == '>' {
-				text = ">>"
-				i++
-			}
-			if at(i) == '&' {
-				// `>&2` / `>&-`: 記述子の複製。次の語は書き先ではない
-				text = "fd"
-				i++
-			} else if fd {
-				text = "fd"
-			}
-			op(text)
-		case c == '&' && at(i+1) == '>':
-			// `&> path` / `&>> path`: stdout と stderr をまとめて書く（内容は本文のままなので対象にする）
-			flush()
-			i += 2
-			if at(i) == '>' {
-				op(">>")
-				i++
-			} else {
-				op(">")
-			}
+			z.redirect(c)
+		case c == '&' && z.at(z.i+1) == '>':
+			z.ampRedirect()
 		case c == '|' || c == '&' || c == ';' || c == '(' || c == ')':
-			flush()
-			if (c == '|' || c == '&') && at(i+1) == c {
-				op(string(c) + string(c))
-				i += 2
-			} else {
-				op(string(c))
-				i++
-			}
+			z.control(c)
 		default:
 			if c == '$' || c == '`' {
-				dynamic = true
+				z.dynamic = true
 			}
-			word.WriteByte(c)
-			has = true
-			i++
+			z.word.WriteByte(c)
+			z.has = true
+			z.i++
 		}
 	}
-	flush()
-	return toks
+	z.flush()
+	return z.toks
 }
 
 type bhHeredoc struct {
@@ -253,11 +293,13 @@ func bhIsPlainCat(words []bhTok) bool {
 
 var bhTeeFlags = bashSet("-i", "--ignore-interrupts", "-p", "--output-error")
 
-// bhTeeTargets は `tee` の書き先（オプション以外の引数）と追記かどうか。tee でなければ ok=false。
-func bhTeeTargets(words []bhTok) (targets []bhTok, appendMode, ok bool) {
+// bhTeeTargets は `tee` の書き先（オプション以外の引数）と追記かどうか。tee でなければ 3 つ目が false。
+func bhTeeTargets(words []bhTok) ([]bhTok, bool, bool) {
 	if bhNameOf(words) != "tee" {
 		return nil, false, false
 	}
+	var targets []bhTok
+	appendMode := false
 	for _, w := range words[1:] {
 		switch {
 		case w.text == "-a" || w.text == "--append":
