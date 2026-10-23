@@ -354,6 +354,22 @@ func TestBashEditsAreCheckedByFeedbackRules(t *testing.T) {
 			})
 		})
 
+		t.Run("a heredoc write judged by PreToolUse is not checked again by pre_edit; post_edit still runs", func(t *testing.T) {
+			fbsRun(t, func(e fbsEnv) {
+				e.initRepo(false)
+				e.noAnyPre(5)
+				e.consoleLogPost(5)
+				command := "cat > src/a.ts <<'EOF'\nexport const y: any = 2\nconsole.log(1)\nEOF"
+				r := e.runBash(func() { e.bashWrite("src/a.ts", "export const y: any = 2\nconsole.log(1)\n") }, e.payload(command, nil))
+				reason := Str(fbsJSON(t, r.Stdout)["reason"])
+				assert.Contains(t, reason, "no_console_log")
+				assert.NotContains(t, reason, "no_any")
+				// 同じコマンドが heredoc 以外でも書いたファイルは、これまでどおり実行後に pre_edit を掛ける
+				r2 := e.runBash(func() { e.bashWrite("src/b.ts", "export const y: any = 2\n") }, e.payload(command+"\npython3 gen.py", Dict{"tool_use_id": "tu2"}))
+				assert.Contains(t, Str(fbsJSON(t, r2.Stdout)["reason"]), "no_any (count: 5): any を書かない (src/b.ts")
+			})
+		})
+
 		t.Run("an ask already answered for the same file in this session is downgraded to warn", func(t *testing.T) {
 			fbsRun(t, func(e fbsEnv) {
 				e.initRepo(false)

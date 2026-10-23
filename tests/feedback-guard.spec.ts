@@ -120,6 +120,113 @@ describe('feedback-guard', () => {
       for (const r of [r1, r2]) expect(decision(r.stdout).permissionDecision).toBe('ask')
     }))
 
+  describe('heredoc writes in Bash are checked by pre_edit before the command runs', () => {
+    const heredoc = (rel: string, body: string) => `cat > ${rel} <<'EOF'\n${body}\nEOF`
+    const noAny = (count: number, severity = '', pathGlob = 'src/**/*.ts') =>
+      writeRule(
+        'no_any.md',
+        count,
+        [
+          'enforce:',
+          '  - event: pre_edit',
+          `    path: '${pathGlob}'`,
+          "    when: ':\\s*any\\b'",
+          "    message: 'any を書かない'",
+          ...(severity ? [`    severity: ${severity}`] : []),
+          '',
+        ].join('\n'),
+      )
+
+    test('ask for a missing test sibling, naming the file', () =>
+      withTmp(async (proj) => {
+        const r = await runGuard({ tool_name: 'Bash', tool_input: { command: heredoc('foo.go', 'package main') }, cwd: proj }, tmp, proj)
+        const hs = decision(r.stdout)
+        expect(hs.permissionDecision).toBe('ask')
+        expect(hs.permissionDecisionReason).toContain('tdd (count: 6): 先にテストファイルを書くこと (foo.go)')
+      }))
+
+    test('the test written by the same command counts as present', () =>
+      withTmp(async (proj) => {
+        const command = `${heredoc('foo_test.go', 'package main')}\n${heredoc('foo.go', 'package main')}`
+        const r = await runGuard({ tool_name: 'Bash', tool_input: { command }, cwd: proj }, tmp, proj)
+        expect(r.stdout.trim()).toBe('')
+        expect(r.stderr).toBe('')
+      }))
+
+    test('deny when the body matches when; a clean body passes', () =>
+      withTmp(async (proj) => {
+        noAny(6, 'deny')
+        fs.mkdirSync(path.join(proj, 'src'))
+        const bad = await runGuard({ tool_name: 'Bash', tool_input: { command: heredoc('src/a.ts', 'export const x: any = 1') }, cwd: proj }, tmp, proj)
+        const hs = decision(bad.stdout)
+        expect(hs.permissionDecision).toBe('deny')
+        expect(hs.permissionDecisionReason).toContain('no_any (count: 6): any を書かない (src/a.ts)')
+        const good = await runGuard({ tool_name: 'Bash', tool_input: { command: heredoc('src/a.ts', 'export const x = 1') }, cwd: proj }, tmp, proj)
+        expect(good.stdout.trim()).toBe('')
+      }))
+
+    test('relative paths are resolved against the cwd of the command, then the session cwd', () =>
+      withTmp(async (proj) => {
+        noAny(6, 'deny', '**/*.ts')
+        const sub = path.join(proj, 'pkg')
+        fs.mkdirSync(path.join(sub, 'src'), { recursive: true })
+        const r = await runGuard({ tool_name: 'Bash', tool_input: { command: heredoc('src/a.ts', 'let x: any') }, cwd: sub }, tmp, proj)
+        expect(decision(r.stdout).permissionDecisionReason).toContain('(pkg/src/a.ts)')
+        const io = makeIo({ projectDir: proj, cwd: sub, env: { CLAUDE_FEEDBACK_DIR: tmp } })
+        const r2 = await feedbackGuard(io, { tool_name: 'Bash', tool_input: { command: heredoc('src/a.ts', 'let x: any') } })
+        expect(decision(r2.stdout).permissionDecisionReason).toContain('(pkg/src/a.ts)')
+      }))
+
+    test('a warn names the file on stderr and lets the command run', () =>
+      withTmp(async (proj) => {
+        noAny(1)
+        fs.mkdirSync(path.join(proj, 'src'))
+        const r = await runGuard({ tool_name: 'Bash', tool_input: { command: heredoc('src/a.ts', 'let x: any') }, cwd: proj }, tmp, proj)
+        expect(r.stdout).toBe('')
+        expect(r.stderr).toContain('[feedback-guard] warn: no_any (count: 1): any を書かない (src/a.ts)')
+      }))
+
+    test('pre_bash and heredoc pre_edit violations are merged; deny wins', () =>
+      withTmp(async (proj) => {
+        const command = "cat > foo.go <<'EOF' && go test ./...\npackage main\nEOF"
+        const r = await runGuard({ tool_name: 'Bash', tool_input: { command }, cwd: proj }, tmp, proj)
+        const hs = decision(r.stdout)
+        expect(hs.permissionDecision).toBe('deny')
+        expect(hs.permissionDecisionReason).toContain('dont_run_tests_manually')
+        expect(hs.permissionDecisionReason).toContain('tdd (count: 6)')
+      }))
+
+    test('a second ask for the same file in the session is downgraded, like Edit', () =>
+      withTmp(async (proj) => {
+        const payload = { session_id: 'sess-heredoc-ask', tool_name: 'Bash', tool_input: { command: heredoc('foo.go', 'package main') }, cwd: proj }
+        const r1 = await runGuard(payload, tmp, proj)
+        expect(decision(r1.stdout).permissionDecision).toBe('ask')
+        const r2 = await runGuard(payload, tmp, proj)
+        expect(r2.stdout.trim()).toBe('')
+        expect(r2.stderr).toContain('warn: tdd')
+        // Write で同じファイルに ask 済みなら、heredoc でも warn に落ちる（鍵は同じ）
+        const w = await runGuard(
+          { session_id: 'sess-heredoc-ask', tool_name: 'Write', tool_input: { file_path: path.join(proj, 'foo.go'), content: 'package main' } },
+          tmp,
+          proj,
+        )
+        expect(w.stdout.trim()).toBe('')
+      }))
+
+    test('writes python / sed -i / dynamic targets are left to the check after the command', () =>
+      withTmp(async (proj) => {
+        noAny(6, 'deny')
+        for (const command of [
+          "python3 - <<'EOF'\nopen('src/a.ts', 'w').write('let x: any')\nEOF",
+          'cat > $OUT <<EOF\nlet x: any\nEOF',
+          "cat > src/a.ts <<'EOF' ... EOF",
+        ]) {
+          const r = await runGuard({ tool_name: 'Bash', tool_input: { command }, cwd: proj }, tmp, proj)
+          expect(r.stdout.trim()).toBe('')
+        }
+      }))
+  })
+
   test('deny violation is not downgraded and repeats', async () => {
     const payload = { session_id: 'sess-deny-repeat', tool_name: 'Bash', tool_input: { command: 'go test ./...' } }
     const r1 = await runGuard(payload, tmp)

@@ -301,6 +301,20 @@ describe('Bash edits are checked by feedback rules', () => {
       expect(good.stdout).toBe('')
     })
 
+    test('a heredoc write judged by PreToolUse is not checked again by pre_edit; post_edit still runs', async () => {
+      initRepo(false)
+      noAnyPre(5)
+      consoleLogPost(5)
+      const command = "cat > src/a.ts <<'EOF'\nexport const y: any = 2\nconsole.log(1)\nEOF"
+      const r = await runBash(() => bashWrite('src/a.ts', 'export const y: any = 2\nconsole.log(1)\n'), payload(command))
+      const reason: string = JSON.parse(r.stdout).reason
+      expect(reason).toContain('no_console_log')
+      expect(reason).not.toContain('no_any')
+      // 同じコマンドが heredoc 以外でも書いたファイルは、これまでどおり実行後に pre_edit を掛ける
+      const r2 = await runBash(() => bashWrite('src/b.ts', 'export const y: any = 2\n'), payload(`${command}\npython3 gen.py`, { tool_use_id: 'tu2' }))
+      expect(JSON.parse(r2.stdout).reason).toContain('no_any (count: 5): any を書かない (src/b.ts')
+    })
+
     test('an ask already answered for the same file in this session is downgraded to warn', async () => {
       initRepo(false)
       noAnyPre(3)
