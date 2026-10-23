@@ -3697,11 +3697,293 @@ async function allStop(io, payload) {
   return { exitCode: 0, stdout, stderr };
 }
 
+// src/bash-heredoc.ts
+var SPLIT_OPS = new Set(["|", "||", "&&", ";", "&", "(", ")"]);
+function tokenizeLine(line) {
+  const toks = [];
+  let word = "";
+  let dynamic = false;
+  let quoted = false;
+  let has = false;
+  const flush = () => {
+    if (has)
+      toks.push({ kind: "word", text: word, dynamic, quoted });
+    word = "";
+    dynamic = false;
+    quoted = false;
+    has = false;
+  };
+  const op = (text) => toks.push({ kind: "op", text, dynamic: false, quoted: false });
+  let i = 0;
+  while (i < line.length) {
+    const c = line[i] ?? "";
+    if (c === " " || c === "\t") {
+      flush();
+      i++;
+      continue;
+    }
+    if (c === "#" && !has)
+      break;
+    if (c === "'") {
+      const end = line.indexOf("'", i + 1);
+      const body = end === -1 ? line.slice(i + 1) : line.slice(i + 1, end);
+      word += body;
+      has = true;
+      quoted = true;
+      i = end === -1 ? line.length : end + 1;
+      continue;
+    }
+    if (c === '"') {
+      i++;
+      while (i < line.length && line[i] !== '"') {
+        if (line[i] === "\\" && i + 1 < line.length) {
+          i++;
+        } else if (line[i] === "$" || line[i] === "`")
+          dynamic = true;
+        word += line[i];
+        i++;
+      }
+      i++;
+      has = true;
+      quoted = true;
+      continue;
+    }
+    if (c === "\\") {
+      if (i + 1 < line.length)
+        word += line[i + 1];
+      has = true;
+      quoted = true;
+      i += 2;
+      continue;
+    }
+    if (c === "<" || c === ">") {
+      const fd = has && /^\d+$/.test(word);
+      if (fd) {
+        word = "";
+        has = false;
+      } else
+        flush();
+      if (c === "<" && line[i + 1] === "<" && line[i + 2] === "<") {
+        op("<<<");
+        i += 3;
+        continue;
+      }
+      if (c === "<" && line[i + 1] === "<") {
+        i += 2;
+        if (line[i] === "-") {
+          op("<<-");
+          i++;
+        } else
+          op("<<");
+        continue;
+      }
+      let text = c;
+      i++;
+      if (c === ">" && line[i] === ">") {
+        text = ">>";
+        i++;
+      }
+      if (line[i] === "&") {
+        text = "fd";
+        i++;
+      } else if (fd)
+        text = "fd";
+      op(text);
+      continue;
+    }
+    if (c === "&" && line[i + 1] === ">") {
+      flush();
+      i += 2;
+      if (line[i] === ">") {
+        op(">>");
+        i++;
+      } else
+        op(">");
+      continue;
+    }
+    if (c === "|" || c === "&" || c === ";" || c === "(" || c === ")") {
+      flush();
+      if ((c === "|" || c === "&") && line[i + 1] === c) {
+        op(c + c);
+        i += 2;
+      } else {
+        op(c);
+        i++;
+      }
+      continue;
+    }
+    if (c === "$" || c === "`")
+      dynamic = true;
+    word += c;
+    has = true;
+    i++;
+  }
+  flush();
+  return toks;
+}
+function segmentsOf(toks) {
+  const segs = [];
+  let cur = { sep: "", words: [], redirects: [], heredocs: [] };
+  for (let i = 0;i < toks.length; i++) {
+    const t = toks[i];
+    if (t.kind === "word") {
+      cur.words.push(t);
+      continue;
+    }
+    if (SPLIT_OPS.has(t.text)) {
+      segs.push(cur);
+      cur = { sep: t.text, words: [], redirects: [], heredocs: [] };
+      continue;
+    }
+    const next = toks[i + 1];
+    const arg = next?.kind === "word" ? next : undefined;
+    if (arg)
+      i++;
+    if (t.text === "<<" || t.text === "<<-") {
+      if (arg)
+        cur.heredocs.push({ delim: arg.text, stripTabs: t.text === "<<-", content: "", terminated: false });
+    } else if (t.text === ">" || t.text === ">>") {
+      if (arg)
+        cur.redirects.push({ append: t.text === ">>", target: arg });
+    }
+  }
+  segs.push(cur);
+  return segs;
+}
+var nameOf = (t) => (t?.text ?? "").replace(/^.*\//, "");
+var isPlainCat = (words) => nameOf(words[0]) === "cat" && words.slice(1).every((w) => w.text === "-" || w.text === "--");
+var TEE_FLAGS = new Set(["-i", "--ignore-interrupts", "-p", "--output-error"]);
+function teeTargets(words) {
+  if (nameOf(words[0]) !== "tee")
+    return;
+  const targets = [];
+  let append = false;
+  for (const w of words.slice(1)) {
+    if (w.text === "-a" || w.text === "--append")
+      append = true;
+    else if (TEE_FLAGS.has(w.text) || w.text.startsWith("--output-error="))
+      continue;
+    else if (w.text.startsWith("-") && !w.quoted && w.text !== "-")
+      return;
+    else
+      targets.push(w);
+  }
+  return { targets, append };
+}
+function resolveTarget(t, cwd, home) {
+  if (t.dynamic || t.text === "" || t.text === "/dev/null" || t.text === "-")
+    return;
+  let p = t.text;
+  if (p.startsWith("~")) {
+    if (!home)
+      return;
+    p = expandUser(p, home);
+  }
+  return isAbsolute(p) ? p : join(cwd, p);
+}
+function heredocWrites(command, cwd, home) {
+  const lines = command.split(`
+`);
+  const out = [];
+  const add = (file, content, append) => {
+    const prev = out.find((w) => w.file === file);
+    if (prev)
+      prev.content += content;
+    else
+      out.push({ file, content, append });
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const segs = segmentsOf(tokenizeLine(lines[i] ?? ""));
+    const heredocs = segs.flatMap((s) => s.heredocs);
+    let next = i + 1;
+    for (const h of heredocs) {
+      const body = [];
+      while (next < lines.length) {
+        const raw = lines[next] ?? "";
+        const l = h.stripTabs ? raw.replace(/^\t+/, "") : raw;
+        next++;
+        if (l === h.delim) {
+          h.terminated = true;
+          break;
+        }
+        body.push(l);
+      }
+      h.content = body.map((l) => `${l}
+`).join("");
+      if (!h.terminated)
+        break;
+    }
+    i = next;
+    for (let s = 0;s < segs.length; s++) {
+      const seg = segs[s];
+      if (seg.heredocs.length === 0)
+        continue;
+      const h = seg.heredocs[seg.heredocs.length - 1];
+      if (!h.terminated)
+        continue;
+      const targets = [];
+      const push = (t, append) => {
+        const file = resolveTarget(t, cwd, home);
+        if (file !== undefined)
+          targets.push({ file, append });
+      };
+      const tee = teeTargets(seg.words);
+      if (tee)
+        for (const t of tee.targets)
+          push(t, tee.append);
+      else if (!isPlainCat(seg.words))
+        continue;
+      const last = seg.redirects[seg.redirects.length - 1];
+      if (last)
+        push(last.target, last.append);
+      for (let p = s + 1;p < segs.length && segs[p].sep === "|"; p++) {
+        const ps = segs[p];
+        const pt = teeTargets(ps.words);
+        if (!pt)
+          break;
+        for (const t of pt.targets)
+          push(t, pt.append);
+        const pr = ps.redirects[ps.redirects.length - 1];
+        if (pr)
+          push(pr.target, pr.append);
+      }
+      for (const t of targets)
+        add(t.file, h.content, t.append);
+    }
+  }
+  return out;
+}
+
 // src/feedback-guard.ts
 var SEVERITY_ORDER = { warn: 0, ask: 1, block: 2, deny: 3 };
 var decisionFor = (severity) => severity === "deny" || severity === "block" ? "deny" : "ask";
-var buildReason = (violations) => violations.map((v) => `${v.rule} (count: ${v.count}): ${v.message}`).join(`
+var fileLabel = (projectDir, file) => {
+  const rel = relpath(file, projectDir);
+  return rel.startsWith("../") || rel === ".." ? file : rel;
+};
+var reasonLine = (v, projectDir) => `${v.rule} (count: ${v.count}): ${v.message}${v.file !== undefined && projectDir !== undefined ? ` (${fileLabel(projectDir, v.file)})` : ""}`;
+var buildReason = (violations, projectDir) => violations.map((v) => reasonLine(v, projectDir)).join(`
 `);
+var MISSING_TEST = "missing test file: ";
+function coveredBySameCommand(v, file, others, projectDir) {
+  if (!v.detail.startsWith(MISSING_TEST))
+    return false;
+  const [root] = splitRoot(projectDir, file);
+  const candidates = v.detail.slice(MISSING_TEST.length).split(", ");
+  const siblings = new Set(candidates.filter((c) => !c.includes("/")));
+  const globs = compileGlobs(candidates);
+  for (const other of others) {
+    if (other === file)
+      continue;
+    if (dirname(other) === dirname(file) && siblings.has(basename(other)))
+      return true;
+    const [otherRoot, rel] = splitRoot(projectDir, other);
+    if (otherRoot === root && globs.some((rx) => rx.test(rel)))
+      return true;
+  }
+  return false;
+}
 var askStatePath = (io, sessionId) => join(feedbackDir(io), ".ask_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
 async function loadAskedKeys(io, sessionId) {
   try {
@@ -3745,20 +4027,32 @@ async function main2(io, payload) {
   const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
   const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
   const rules = await listRules(io);
+  const projectDir = io.projectDir || io.cwd;
   let violations;
   if (toolName === "Bash") {
-    violations = await evalPreBash(io, rules, truthy(toolInput.command) ? String(toolInput.command) : "");
+    const command = truthy(toolInput.command) ? String(toolInput.command) : "";
+    violations = await evalPreBash(io, rules, command);
+    await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
+    const writes = heredocWrites(command, jqStr(payload.cwd) || io.cwd, io.env.HOME);
+    const files = writes.map((w) => w.file);
+    for (const w of writes) {
+      const pre = (await evalPreEdit(io, rules, w.file, w.content)).filter((v) => !coveredBySameCommand(v, w.file, files, projectDir));
+      for (const v of pre)
+        v.file = w.file;
+      await downgradeRepeatedAsks(io, pre, payload.session_id, { file_path: w.file });
+      violations.push(...pre);
+    }
   } else if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit") {
     const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : "";
     if (!filePath)
       return ok();
     violations = await evalPreEdit(io, rules, filePath, extractPreEditContent(toolName, toolInput));
+    await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
   } else {
     return ok();
   }
   if (violations.length === 0)
     return ok();
-  await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
   for (const v of violations)
     await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
   const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
@@ -3771,13 +4065,13 @@ async function main2(io, payload) {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: decisionFor(top.severity),
-        permissionDecisionReason: [buildReason(blocking), ...notes].join(`
+        permissionDecisionReason: [buildReason(blocking, projectDir), ...notes].join(`
 `)
       }
     })}
 `;
   }
-  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}`), ...notes].map((l) => `${l}
+  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${reasonLine(v, projectDir)}`), ...notes].map((l) => `${l}
 `).join("");
   return ok(stdout, stderr);
 }
@@ -3842,11 +4136,15 @@ async function main3(io, payload, files, threshold) {
     return ok();
   const projectDir = io.projectDir || io.cwd;
   const needContent = hasPreEditContent(rules);
+  const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
+  const judged = new Set(heredocWrites(command, jqStr(payload.cwd) || io.cwd, io.env.HOME).map((w) => w.file));
   const found = [];
   for (const file of [...files].sort()) {
     const abs = isAbsolute(file) ? file : join(projectDir, file);
     for (const v of await evalPostEdit(io, rules, abs))
       found.push({ file: abs, v });
+    if (judged.has(abs))
+      continue;
     const content = needContent ? await writtenContent(io, abs, threshold) : "";
     const pre = await evalPreEdit(io, rules, abs, content);
     if (pre.length === 0)
