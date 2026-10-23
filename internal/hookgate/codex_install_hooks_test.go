@@ -186,7 +186,7 @@ func TestCodexInstallHooks(t *testing.T) {
 		text, _ := os.ReadFile(target)
 		assert.Equal(t, "{ not json", string(text))
 
-		for _, args := range [][]string{{"--bogus"}, {"--to"}, {"--print", "--toml"}, {"--print", "--remove"}, {"--to", "a", "--project"}} {
+		for _, args := range [][]string{{"--bogus"}, {"--to"}, {"--print", "--toml"}, {"--toml", "--remove"}, {"--print", "--remove"}, {"--to", "a", "--project"}, {"--to", "a", "--toml"}} {
 			code, _, errOut = installHooks(t, map[string]string{"HOME": dir}, RepoRoot, args...)
 			assert.Equal(t, 1, code, args)
 			assert.Contains(t, errOut, "usage: feedback-gate codex install-hooks", args)
@@ -194,6 +194,40 @@ func TestCodexInstallHooks(t *testing.T) {
 		code, _, errOut = installHooks(t, map[string]string{}, RepoRoot)
 		assert.Equal(t, 1, code)
 		assert.Contains(t, errOut, "neither CODEX_HOME nor HOME")
+	})
+
+	t.Run("--print with --to merges with that file and writes nothing (for a file only root may write)", func(t *testing.T) {
+		dir := TmpDir()
+		defer RmTree(dir)
+		target := filepath.Join(dir, "etc", "hooks.json")
+		require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
+		existing := `{"hooks": {"Stop": [{"hooks": [{"type": "command", "command": "echo admin"}]}]}, "note": "keep"}` + "\n"
+		require.NoError(t, os.WriteFile(target, []byte(existing), 0o644))
+		env := map[string]string{"HOME": dir}
+		code, out, errOut := installHooks(t, env, dir, "--root", RepoRoot, "--print", "--to", target)
+		require.Equal(t, 0, code, errOut)
+		text, _ := os.ReadFile(target)
+		assert.Equal(t, existing, string(text), "the target is not written")
+		var doc Dict
+		require.NoError(t, json.Unmarshal([]byte(out), &doc))
+		assert.Equal(t, "keep", doc["note"])
+		assert.Equal(t, []string{"echo admin", `bash "` + RepoRoot + `/plugins/codex/scripts/hook.sh" Stop`}, hookCommands(t, doc, "Stop"))
+		assert.Len(t, doc["hooks"].(Dict), len(events))
+		// 無いファイルを指しても、テンプレートだけが出る。--remove --print は外した結果を出す。
+		code, out, errOut = installHooks(t, env, dir, "--root", RepoRoot, "--print", "--to", filepath.Join(dir, "none.json"))
+		require.Equal(t, 0, code, errOut)
+		require.NoError(t, json.Unmarshal([]byte(out), &doc))
+		assert.Len(t, doc["hooks"].(Dict), len(events))
+		assert.NoFileExists(t, filepath.Join(dir, "none.json"))
+		code, out, errOut = installHooks(t, env, dir, "--root", RepoRoot, "--print", "--remove", "--to", target)
+		require.Equal(t, 0, code, errOut)
+		require.NoError(t, json.Unmarshal([]byte(out), &doc))
+		assert.Equal(t, []string{"echo admin"}, hookCommands(t, doc, "Stop"))
+		// 対象が壊れた JSON なら、--print でもエラー。
+		require.NoError(t, os.WriteFile(target, []byte("{ nope"), 0o644))
+		code, _, errOut = installHooks(t, env, dir, "--root", RepoRoot, "--print", "--to", target)
+		assert.Equal(t, 1, code)
+		assert.Contains(t, errOut, "not valid JSON")
 	})
 
 	t.Run("MergeCodexHooks: a group is the plugin's only when every command is plugins/codex/scripts/hook.sh", func(t *testing.T) {

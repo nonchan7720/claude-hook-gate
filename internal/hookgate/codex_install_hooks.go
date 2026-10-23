@@ -41,7 +41,8 @@ even where it does not run plugin-bundled hooks. Default target: $CODEX_HOME/hoo
                     default: $PLUGIN_ROOT, $CLAUDE_PLUGIN_ROOT, else the current directory
   --to <file>       write into this hooks.json (merged; other hooks in it are kept)
   --project [<dir>] write into <dir>/.codex/hooks.json (default: the current directory)
-  --print           print the hooks.json to stdout instead (for /etc/codex/hooks.json or a managed copy)
+  --print           print the hooks.json to stdout instead of writing; with --to or --project, print that file merged
+                    with the hooks (for /etc/codex/hooks.json: run as yourself, then install the output as root)
   --toml            print the hooks as [hooks] tables for requirements.toml (allow_managed_hooks_only environments)
   --remove          remove this plugin's hooks from the target instead of adding them
 `
@@ -104,7 +105,6 @@ func parseCodexInstallArgs(args []string, env map[string]string, cwd string) (co
 			targets++
 		case "--print":
 			opts.print = true
-			targets++
 		case "--toml":
 			opts.toml = true
 			targets++
@@ -117,9 +117,12 @@ func parseCodexInstallArgs(args []string, env map[string]string, cwd string) (co
 		}
 	}
 	if targets > 1 {
-		return opts, errors.New("--to, --project, --print and --toml exclude each other")
+		return opts, errors.New("--to, --project and --toml exclude each other")
 	}
-	if opts.remove && (opts.print || opts.toml) {
+	if opts.toml && (opts.print || opts.remove) {
+		return opts, errors.New("--toml takes neither --print nor --remove")
+	}
+	if opts.remove && opts.print && targets == 0 {
 		return opts, errors.New("--remove needs a file target (--to or --project)")
 	}
 	if hasProject {
@@ -294,7 +297,7 @@ func runCodexInstall(opts codexInstallOpts, stdout io.Writer) error {
 		_, _ = io.WriteString(stdout, CodexHooksToml(groups))
 		return nil
 	}
-	if opts.print {
+	if opts.print && opts.target == "" {
 		doc, _, _ := MergeCodexHooks(nil, groups, false)
 		_, _ = io.WriteString(stdout, indentJSON(doc))
 		return nil
@@ -315,6 +318,11 @@ func runCodexInstall(opts codexInstallOpts, stdout io.Writer) error {
 		return fmt.Errorf("%s: %w", opts.target, err)
 	}
 	doc, removed, added := MergeCodexHooks(existing, groups, opts.remove)
+	if opts.print {
+		// 書かずに、対象とマージした結果だけを出す（root が要る場所へは、これを install する）。
+		_, _ = io.WriteString(stdout, indentJSON(doc))
+		return nil
+	}
 	if opts.remove && removed == 0 {
 		_, _ = fmt.Fprintf(stdout, "feedback-gate: no feedback-gate hooks in %s; nothing to do\n", opts.target)
 		return nil

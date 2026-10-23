@@ -38,7 +38,7 @@ Codex は `.agents/` を先に、次に `.claude/` を見ます（Claude Code �
 bash plugins/codex/scripts/install-hooks.sh                  # ~/.codex/hooks.json（$CODEX_HOME/hooks.json）に足す: 通常はこれ
 bash plugins/codex/scripts/install-hooks.sh --project [dir]  # 代わりに <dir>/.codex/hooks.json に足す（既定は現在のディレクトリ）
 bash plugins/codex/scripts/install-hooks.sh --to FILE        # 任意の hooks.json に足す
-bash plugins/codex/scripts/install-hooks.sh --print          # hooks.json の内容を表示（/etc/codex/hooks.json 用。後述）
+bash plugins/codex/scripts/install-hooks.sh --print          # 書かずに hooks.json の内容を表示。--to FILE を添えると FILE にマージした結果を表示（後述）
 bash plugins/codex/scripts/install-hooks.sh --toml           # requirements.toml の [hooks] の形で表示（後述）
 bash plugins/codex/scripts/install-hooks.sh --remove [...]   # 写しからプラグインのフックを外す
 ```
@@ -55,7 +55,7 @@ bash plugins/codex/scripts/install-hooks.sh --remove [...]   # 写しからプ�
 4. **バイナリを入れられなかった。** フックは exit 0 で、標準エラーに 1 行 `feedback-gate: could not install the feedback-gate v<version> binary (<reason>); the hook did nothing`（`no-download-tool`、`no-sha256-tool`、`download-failed` など）を出します: [前提](#前提)を参照。`install-hooks.sh` も同じ行を出して exit 1 するので、上の手順 2 の時点で分かります。
 5. **管理層のフックだけが動く。** `/hooks` でユーザー（とプラグイン）のフックがポリシーで飛ばされていると出る、または管理者の `requirements.toml`（Linux / macOS は `/etc/codex/requirements.toml`、Windows は `%ProgramData%\OpenAI\Codex\requirements.toml`。MDM のプロファイルや ChatGPT ワークスペースのクラウド配布の requirements でも同じ設定ができます）に `allow_managed_hooks_only = true` がある。このとき Codex はユーザー・プロジェクト・セッション・*プラグイン*のフックをすべて飛ばし、管理層のフック、つまり `requirements.toml` の `[hooks]`（スクリプトは `managed_dir` の下）かシステム層の `hooks.json`（`/etc/codex/hooks.json`）だけを走らせます。Claude Code 版で組織のガードが mod のフックを飛ばす状況（[組織管理の環境向けの settings hook](../../README_ja.md#組織管理の環境向けの-settings-hook)）の Codex 版ですが、違いが 1 つあります。Claude Code のプラグインはガードが飛ばさない settings hook を同梱できるのに対し、Codex のプラグインに同梱できるものはこのポリシーを越えられません。`~/.codex/` やプロジェクトに書いたものも動かないので、フックは管理者が配る必要があります（管理層のフックは `/hooks` での信頼が要りません）。渡すものは用意してあります。
 
-   - `bash plugins/codex/scripts/install-hooks.sh --print > hooks.json` を `/etc/codex/hooks.json` として置いてもらう。または
+   - `bash plugins/codex/scripts/install-hooks.sh --print > hooks.json` を `/etc/codex/hooks.json` として置いてもらう（既にあるなら `--print --to /etc/codex/hooks.json` で、そこのフックを残したまま）。または
    - `bash plugins/codex/scripts/install-hooks.sh --toml` の出力を `requirements.toml` に貼ってもらう（ユーザーがフックを切れないよう `[features] hooks = true` も一緒に）。
    - 加えて、出力が指すパスに置いた、全ユーザーが読めるこのリポジトリのチェックアウトを全マシンに（Codex はフックのスクリプトを配布しません。`scripts/hook.sh` は自分の場所からルートを求めるので `PLUGIN_ROOT` は不要です）。バイナリのキャッシュはユーザーごと（`~/.cache/feedback-gate`）なので、各ユーザーの最初のセッションが 1 回ダウンロードします。GitHub に出られないマシンでは、バイナリを共有のパスに置いて全員の `FEEDBACK_GATE_BIN` に指定するか、リリースのファイルのミラーを `FEEDBACK_GATE_RELEASE_BASE_URL` に指定してください。
 
@@ -64,11 +64,11 @@ bash plugins/codex/scripts/install-hooks.sh --remove [...]   # 写しからプ�
 `allow_managed_hooks_only` の下で Codex が見るのはフックの*出どころ*であって、誰が書いたかではありません。管理層から来たフックは走らせ、それ以外は飛ばします。`~/.codex/` の下やプロジェクトのファイルはどれも管理層ではないので、そこで何を調整しても動きません。マシン上の素のファイルとして存在する管理層はシステムの設定フォルダ、Linux と macOS では `/etc/codex/` です。そこの `hooks.json`（またはそこの `config.toml` の `[hooks]`）は管理層のフックとして全ユーザーに対して信頼の確認なしに走り、ポリシーが `/etc/codex/requirements.toml` から来ていても、MDM のプロファイルや ChatGPT ワークスペースから来ていても、飛ばされません。そこに書くにはマシンの管理者権限（`sudo`）が要ります。それがあるなら、管理者がやることを自分でやります。
 
 ```
-bash plugins/codex/scripts/install-hooks.sh --print > /tmp/feedback-gate-hooks.json   # 自分として: バイナリを自分のキャッシュに取り、フックを表示する
-sudo install -D -m 0644 /tmp/feedback-gate-hooks.json /etc/codex/hooks.json          # root として: システム層に置く
+bash plugins/codex/scripts/install-hooks.sh --print --to /etc/codex/hooks.json > /tmp/feedback-gate-hooks.json
+sudo install -D -m 0644 /tmp/feedback-gate-hooks.json /etc/codex/hooks.json
 ```
 
-管理者が既に `/etc/codex/hooks.json` を置いているなら、`sudo bash plugins/codex/scripts/install-hooks.sh --to /etc/codex/hooks.json` がそれにマージします（`FEEDBACK_GATE_BIN` で自分のキャッシュのバイナリを指さない限り、root のキャッシュにもバイナリを取ります）。`--print` と `install` はファイルを置き換えます。フックが指すチェックアウト（`install-hooks.sh` を実行したディレクトリ）はそのままの場所に置き、Codex を使う全ユーザーが読めるようにしておいてください。Codex を再起動すると、`/hooks` にそのフックが管理層のものとして並びます。ポリシーが `requirements.toml` の `[hooks] managed_dir` まで固定している場合は、管理者が `--toml` の出力をそこに貼る形だけが使えます。マシンの管理者権限が無ければ、その管理者だけが経路で、渡すものは上の `--print` / `--toml` の出力です。
+1 行目は自分として動きます。バイナリを自分のキャッシュに取り、`/etc/codex/hooks.json` に入るべき内容、つまり管理者が既に置いたフック（ファイルがあれば。読めれば十分です）にこのプラグインのフックをマージしたものを表示するだけで、何も書きません。2 行目が root の要る唯一の行で、それを配置します。プラグインを更新したりチェックアウトを移したりしたら同じ 2 行をもう一度実行してください。プラグインの分だけが置き換わり、他は残ります。外すときは `--print --remove --to /etc/codex/hooks.json` が、プラグインのフックを除いた内容を表示するので、同じ手順で配置します。フックが指すチェックアウト（`install-hooks.sh` を実行したディレクトリ）はそのままの場所に置き、Codex を使う全ユーザーが読めるようにしておいてください。Codex を再起動すると、`/hooks` にそのフックが管理層のものとして並びます。ポリシーが `requirements.toml` の `[hooks] managed_dir` まで固定している場合は、管理者が `--toml` の出力をそこに貼る形だけが使えます。マシンの管理者権限が無ければ、その管理者だけが経路で、渡すものは上の `--print` / `--toml` の出力です。
 
 ### 二重に走らせない
 
