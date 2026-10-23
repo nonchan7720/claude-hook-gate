@@ -66,10 +66,12 @@ by `/correct` as `broken`); the rest of the rule still works. `enforce` that is 
 | The state of a file after an edit (a leftover `console.log`, a TODO without ticket, a file that fails a formatter) | `post_edit` | The whole file on disk after Edit / Write, or after a Bash command rewrote it. |
 | A condition over the files changed in the session, at stop (every changed Go file gofmt-clean; a changed migration has a down file) | `stop_check` | The list of changed files. |
 
-Files written by Bash (heredoc, `sed -i`, `python`) are checked after the command with
-the `post_edit` entries and with the `pre_edit` entries that can be judged afterwards
-(the added lines for a tracked file, the whole content for a new file); `deny` / `ask`
-become a PostToolUse `block` there.
+A heredoc whose target and body are plain in a Bash command (`cat > path <<'EOF' ... EOF`,
+`tee path <<EOF`) is checked by `pre_edit` before the command runs, like a Write. Every
+other file written by Bash (`sed -i`, `python`, a target in a variable) is checked after
+the command with the `post_edit` entries and with the `pre_edit` entries that can be
+judged afterwards (the added lines for a tracked file, the whole content for a new file);
+`deny` / `ask` become a PostToolUse `block` there.
 
 ### Keys per event
 

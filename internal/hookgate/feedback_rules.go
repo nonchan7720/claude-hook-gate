@@ -130,6 +130,8 @@ type Violation struct {
 	Event    string
 	Message  string
 	Detail   string
+	// File は対象のファイル（Bash の heredoc で複数ファイルを見るときに、どのファイルの違反かを表示するため。他では空）。
+	File string
 }
 
 // FeedbackDir はグローバルの feedback の状態ファイル（.violations.jsonl、.ask_state など）の置き場所:

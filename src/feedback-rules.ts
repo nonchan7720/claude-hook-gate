@@ -118,6 +118,8 @@ export type Violation = {
   event: string
   message: string
   detail: string
+  /** 対象のファイル（Bash の heredoc で複数ファイルを見るときに、どのファイルの違反かを表示するため。他では未設定）。 */
+  file?: string
 }
 
 /** グローバルの feedback の状態ファイル（.violations.jsonl、.ask_state など）の置き場所: ~/<設定ディレクトリ>/feedback。CLAUDE_FEEDBACK_DIR で差し替え可能。 */
