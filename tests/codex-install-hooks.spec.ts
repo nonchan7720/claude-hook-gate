@@ -116,3 +116,37 @@ describe('plugins/codex/scripts/install-hooks.sh', () => {
       expect(JSON.parse(fs.readFileSync(target, 'utf8'))).toEqual({ hooks: {} })
     }))
 })
+
+// plugins/codex/scripts/print-rules.sh: `feedback-gate codex print-rules` を呼ぶ（UserPromptSubmit が注入する内容を AGENTS.md に貼るためのもの）。
+describe('plugins/codex/scripts/print-rules.sh', () => {
+  const PRINT = path.join(REPO_ROOT, 'plugins', 'codex', 'scripts', 'print-rules.sh')
+
+  test('prints the rules file and the confirmed feedback rules of the home and the current project', () =>
+    withDir((home) => {
+      const feedback = path.join(home, 'fb')
+      fs.mkdirSync(feedback, { recursive: true })
+      fs.writeFileSync(path.join(feedback, 'confirmed.md'), '---\nname: confirmed\ndescription: d\ntype: feedback\ncount: 3\n---\n\nAlways confirmed.\n')
+      fs.writeFileSync(path.join(feedback, 'young.md'), '---\nname: young\ndescription: d\ntype: feedback\ncount: 1\n---\n\nNot yet.\n')
+      const proj = path.join(home, 'proj')
+      fs.mkdirSync(path.join(proj, '.agents', 'feedback'), { recursive: true })
+      fs.writeFileSync(path.join(proj, '.agents', 'feedback', 'local.md'), '---\nname: local\ndescription: d\ntype: feedback\ncount: 5\n---\n\nProject rule.\n')
+      const r = spawnSync(BASH, [PRINT], {
+        encoding: 'utf8',
+        cwd: proj,
+        env: {
+          ...base,
+          HOME: home,
+          CLAUDE_FEEDBACK_DIR: feedback,
+          FEEDBACK_GATE_BIN: feedbackGateBin(),
+          FEEDBACK_GATE_LANG: 'en',
+          DOGWOOD_BIN: MISSING_DOGWOOD_BIN,
+        },
+      })
+      expect(r.status).toBe(0)
+      expect(r.stderr).toBe('')
+      expect(r.stdout).toContain(fs.readFileSync(path.join(REPO_ROOT, 'rules', 'feedback_rules.en.md'), 'utf8').trim())
+      expect(r.stdout).toContain('Always confirmed.')
+      expect(r.stdout).toContain('Project rule.')
+      expect(r.stdout).not.toContain('Not yet.')
+    }))
+})
