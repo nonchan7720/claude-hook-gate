@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.10.1...v0.11.0) (2026-10-23)
+
+
+### Features
+
+* bundle feedback and gate skills ([#56](https://github.com/nonchan7720/claude-hook-gate/issues/56)) ([bd4f698](https://github.com/nonchan7720/claude-hook-gate/commit/bd4f69882d672f51036cda3708c8899c046e9b09))
+
 ## [0.10.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.10.0...v0.10.1) (2026-10-21)
 
 
