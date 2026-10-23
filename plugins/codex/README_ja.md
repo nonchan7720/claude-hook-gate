@@ -20,20 +20,31 @@ codex plugin marketplace add nonchan7720/claude-hook-gate
 
 プラグインのルートはリポジトリそのものです。ルートの Codex 用マニフェスト（`.codex-plugin/plugin.json`、`plugin.json`）が `plugins/codex/hooks/hooks.json` を指し、`rules/`、`scripts/dogwood/`、`hooks/vendor/` は Claude Code 版とコピーせず共有します。
 
-お使いの Codex がプラグイン同梱のフックを走らせない場合（[openai/codex#16430](https://github.com/openai/codex/issues/16430)）は、`hooks/hooks.json` の各イベントを `~/.codex/hooks.json`（またはプロジェクトの `.codex/hooks.json`）に写し、`${PLUGIN_ROOT}` をチェックアウトかインストール先（`~/.codex/plugins/cache/hook-gate/feedback-gate/<version>`）のパスに置き換えてください。`PLUGIN_ROOT` が無いときは `scripts/hook.sh` が自分の場所からルートを求めます。
+### Codex がプラグインのフックを走らせない環境
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|apply_patch|spawn_agent|send_input",
-        "hooks": [{ "type": "command", "command": "bash /path/to/claude-hook-gate/plugins/codex/scripts/hook.sh PreToolUse" }]
-      }
-    ]
-  }
-}
+Codex が `plugins/codex/hooks/hooks.json` のフックを走らせるのは、`plugin_hooks` の機能が有効で、かつ `/hooks` で信頼したときだけです。プラグインの側からは変えられない設定が 2 つあり、どちらも Claude Code 版で組織のガードが mod のフックを飛ばす状況（[組織管理の環境向けの settings hook](../../README_ja.md#組織管理の環境向けの-settings-hook)）の Codex 版にあたります。違いは、Claude Code のプラグインはガードが飛ばさない settings hook を同梱できるのに対し、Codex のプラグインに同梱できるものはこれらの設定を越えられないことです。Codex が読む設定層にフックを登録する必要があります。
+
+- **`plugin_hooks` が無効。** 現在の Codex はプラグイン同梱のフックを `plugin_hooks` の機能フラグの後ろに置いたままです（`codex features list` で開発中と表示されます。[openai/codex#16430](https://github.com/openai/codex/issues/16430)、発見の実装は [openai/codex#19705](https://github.com/openai/codex/pull/19705)）。プラグインは入り `/plugins` にも出ますが、`hooks/hooks.json` は読まれません。ユーザーとプロジェクトのフック（`~/.codex/hooks.json`、`<repo>/.codex/hooks.json`、またはその隣の `config.toml` の `[hooks]`）は `/hooks` で信頼すれば動きます。
+- **管理者の `requirements.toml` の `allow_managed_hooks_only = true`**（Linux / macOS は `/etc/codex/requirements.toml`、Windows は `%ProgramData%\OpenAI\Codex\requirements.toml`、MDM のプロファイル、ChatGPT ワークスペースのクラウド配布の requirements）。このとき Codex はユーザー・プロジェクト・セッション・*プラグイン*のフックをすべて飛ばし、管理層のフック、つまり `requirements.toml` の `[hooks]`（スクリプトは `managed_dir` の下）かシステム層の `hooks.json`（`/etc/codex/hooks.json`）だけを走らせます。ユーザーが `~/.codex/` やプロジェクトに書いたものも動かないので、管理者が配る必要があります（`/hooks` での信頼は要りません）。
+
+`plugins/codex/scripts/install-hooks.sh`（`feedback-gate` バイナリの `install-hooks` サブコマンド、`internal/hookgate/codex_install_hooks.go`）が、プラグインのフックを Codex が読む場所に書きます。`${PLUGIN_ROOT}` は、実行したチェックアウトかインストール先（`~/.codex/plugins/cache/hook-gate/feedback-gate/<version>`）の絶対パスに置き換えます。
+
 ```
+bash plugins/codex/scripts/install-hooks.sh                  # ~/.codex/hooks.json（$CODEX_HOME/hooks.json）に足す
+bash plugins/codex/scripts/install-hooks.sh --project [dir]  # <dir>/.codex/hooks.json に足す（既定は現在のディレクトリ）
+bash plugins/codex/scripts/install-hooks.sh --to FILE        # 任意の hooks.json に足す
+bash plugins/codex/scripts/install-hooks.sh --print          # hooks.json の内容を表示（/etc/codex/hooks.json 用）
+bash plugins/codex/scripts/install-hooks.sh --toml           # requirements.toml の [hooks] の形で表示
+bash plugins/codex/scripts/install-hooks.sh --remove [...]   # 写しからプラグインのフックを外す
+```
+
+書き込みはマージです。ファイルの他のフックとキーは順序ごと残し、このプラグインのグループ（command が `plugins/codex/scripts/hook.sh` を動かすもの）だけを置き換えるので、チェックアウトを移したりプラグインを更新したりしたあとにもう一度実行しても 1 組のままです。対象は正しい JSON か、存在しないファイルである必要があり、書き込みはアトミックです。写したフックも、管理層以外のフックと同じく `/hooks` での信頼が要り、その後の最初のフックが[前提](#前提)のとおりバイナリをダウンロードします（`install-hooks.sh` 自身もバイナリを使うので同じ方法で取ってきます。`FEEDBACK_GATE_BIN` で省けます）。管理者が配る場合は、`--print`（`/etc/codex/hooks.json` として）か `--toml`（`requirements.toml` に貼る。ユーザーがフックを切れないよう `[features].hooks = true` も固定する）の出力と、全マシンの同じパスに置いた、全ユーザーが読めるこのリポジトリのチェックアウトを渡してください。Codex はフックのスクリプトを配布しません。`PLUGIN_ROOT` が無いとき `scripts/hook.sh` は自分の場所からルートを求めます。バイナリのキャッシュはユーザーごと（`~/.cache/feedback-gate`）なので、各ユーザーの最初のセッションが 1 回ダウンロードします。
+
+**二重に走らせない。** Codex は一致したフックを全ファイル分すべて走らせるので、プラグイン同梱のフックが動く環境に写しが残っていると、各イベントが 2 回ずつ走ります（gate の実行も通知も 2 回）。`scripts/hook.sh` は、どの層から呼ばれたかをバイナリに伝えます（`FEEDBACK_GATE_HOOK_SOURCE`: Codex が `PLUGIN_ROOT` を渡していれば `plugin`。Codex がこれを渡すのはプラグイン同梱のフックだけです。それ以外は `config`）。プラグイン層の呼び出しは毎イベント、マーカー `~/{.agents,.claude}/feedback/.codex_plugin_seen/<session_id>`（`CLAUDE_FEEDBACK_DIR` を尊重します）を書き、`config` の呼び出しは自分のセッションのマーカーがあれば何も出さず exit 0 します（`internal/hookgate/host_codex.go` の `CodexHookSourceAllows`）。プラグイン同梱のフックが動かない環境（上の 2 つの場合、または未信頼）ではマーカーが無いので、写しが働きます。両方が走りうるのはセッション最初の SessionStart だけで、その reset は冪等です。24 時間より古いマーカーはセッション開始時に消します（Claude Code 版の `.classic_seen` と同じ）。設定は要りません。写しが不要になったら `--remove` で外してください。
+
+### Codex のサンドボックスとルール・`gate.yaml` の編集
+
+フックは Codex の素の子プロセスとしてサンドボックスの外で動くので、フックが書くもの（`~/{.agents,.claude}/feedback/` の状態、`<project>/{.agents,.claude}/.gate-status/`、ルールの `count` 行、バイナリのキャッシュ）はサンドボックスのモードにも組織のサンドボックス方針にも制限されません。制限されるのは Codex 自身です。`workspace-write` モードでは `<writable_root>/.agents` と `<writable_root>/.codex` が（`.git` と同じく）再帰的に読み取り専用になります。そのため Codex に `.agents/feedback/` のプロジェクトのルールや `.agents/gate.yaml` の追加・編集を頼むと、その書き込みには承認（か `danger-full-access`）が要り、組織の requirements がそれを禁じていることもあります。`.claude/` は保護されません。Codex 自身にルールを育てさせたいプロジェクトでは、`<project>/.claude/feedback/` と `<project>/.claude/gate.yaml` に置いてください。このプラグインはそちらも読みます（`.agents/` が先、次に `.claude/`。同名のルールは `.agents/` 側が勝ちます）。グローバルの `~/.agents/feedback/` と `~/.claude/feedback/` はどちらにせよプロジェクトの書き込み可能なルートの外なので、Codex は承認があるときだけ編集します。自分だけが変えるべきルールは `.agents/` に置くのが向いています。サンドボックスがまさにそれを強制するからです。
 
 ## 前提
 
@@ -90,6 +101,7 @@ plugin.json                     # ポータブルな Agent Plugins のマニフ�
 plugins/codex/
 ├── hooks/hooks.json            # 全イベントの command hook
 ├── scripts/hook.sh             # 入口: feedback-gate を探すかダウンロードし（../../scripts/install-binary.sh）、`feedback-gate codex <Event>` を動かす
+├── scripts/install-hooks.sh    # Codex がプラグインのフックを走らせない環境向けに hooks/hooks.json を ~/.codex/hooks.json などに写す（`feedback-gate codex install-hooks`）
 └── README.md, README_ja.md
 ```
 

@@ -20,20 +20,31 @@ This registers the repository as the `hook-gate` marketplace (`.agents/plugins/m
 
 The plugin root is the repository itself: the Codex manifests at the root (`.codex-plugin/plugin.json`, `plugin.json`) point at `plugins/codex/hooks/hooks.json`, and `rules/`, `scripts/dogwood/` and `hooks/vendor/` are shared with the Claude Code plugin rather than copied.
 
-If your Codex build does not run plugin-bundled hooks (see [openai/codex#16430](https://github.com/openai/codex/issues/16430)), copy the events of `hooks/hooks.json` into `~/.codex/hooks.json` (or the project's `.codex/hooks.json`) with `${PLUGIN_ROOT}` replaced by the path of a checkout or of the installed copy (`~/.codex/plugins/cache/hook-gate/feedback-gate/<version>`). `scripts/hook.sh` also finds the root from its own location when `PLUGIN_ROOT` is unset:
+### Where Codex does not run the plugin's hooks
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash|apply_patch|spawn_agent|send_input",
-        "hooks": [{ "type": "command", "command": "bash /path/to/claude-hook-gate/plugins/codex/scripts/hook.sh PreToolUse" }]
-      }
-    ]
-  }
-}
+Codex runs the hooks of `plugins/codex/hooks/hooks.json` only when its `plugin_hooks` feature is on and you trusted them in `/hooks`. Two settings outside the plugin's reach stop them. Both are the Codex counterpart of the organization guard that skips the Claude Code plugin's mod hooks ([Settings hooks for managed environments](../../README.md#settings-hooks-for-managed-environments)), with one difference: a Claude Code plugin can carry a settings hook that the guard does not skip, while nothing a Codex plugin bundles survives these policies. The hooks have to be registered in a config layer that Codex does read:
+
+- **`plugin_hooks` off.** Current Codex builds keep plugin-bundled hooks behind the `plugin_hooks` feature (`codex features list` shows it as under development; [openai/codex#16430](https://github.com/openai/codex/issues/16430), discovery added by [openai/codex#19705](https://github.com/openai/codex/pull/19705)). The plugin installs and `/plugins` shows it, but `hooks/hooks.json` is never loaded. User and project hooks (`~/.codex/hooks.json`, `<repo>/.codex/hooks.json`, or `[hooks]` in the `config.toml` next to them) do run, once trusted in `/hooks`.
+- **`allow_managed_hooks_only = true`** in the administrator's `requirements.toml` (`/etc/codex/requirements.toml` on Linux / macOS, `%ProgramData%\OpenAI\Codex\requirements.toml` on Windows, an MDM profile, or the ChatGPT workspace's cloud requirements). Codex then skips user, project, session *and plugin* hooks and runs only managed hooks: the `[hooks]` tables of `requirements.toml` (scripts under its `managed_dir`), or the system layer's `hooks.json` (`/etc/codex/hooks.json`). Nothing a user writes under `~/.codex/` or the project runs either, so the hooks must be deployed by the administrator; they need no trust in `/hooks`.
+
+`plugins/codex/scripts/install-hooks.sh` (the `install-hooks` subcommand of the `feedback-gate` binary, `internal/hookgate/codex_install_hooks.go`) writes the plugin's hooks where Codex reads them, with `${PLUGIN_ROOT}` replaced by the absolute path of the checkout or installed copy (`~/.codex/plugins/cache/hook-gate/feedback-gate/<version>`) it is run from:
+
 ```
+bash plugins/codex/scripts/install-hooks.sh                  # add to ~/.codex/hooks.json ($CODEX_HOME/hooks.json)
+bash plugins/codex/scripts/install-hooks.sh --project [dir]  # add to <dir>/.codex/hooks.json (default: the current directory)
+bash plugins/codex/scripts/install-hooks.sh --to FILE        # add to any hooks.json
+bash plugins/codex/scripts/install-hooks.sh --print          # print the hooks.json (for /etc/codex/hooks.json)
+bash plugins/codex/scripts/install-hooks.sh --toml           # print [hooks] tables for requirements.toml
+bash plugins/codex/scripts/install-hooks.sh --remove [...]   # take the plugin's hooks out of the target again
+```
+
+It merges: the other hooks and keys of the file are kept in their order, and the plugin's own groups (those whose commands run `plugins/codex/scripts/hook.sh`) are replaced, so running it again after moving the checkout or updating the plugin leaves one copy. The target must be valid JSON or absent; the file is written atomically. A copied hook needs the same trust in `/hooks` as any non-managed hook, and the first hook after that downloads the binary as described under [Requirements](#requirements) (`install-hooks.sh` itself needs the binary too, so it downloads it the same way; `FEEDBACK_GATE_BIN` skips that). For a managed deployment hand `--print` (as `/etc/codex/hooks.json`) or `--toml` (pasted into `requirements.toml`, with `[features].hooks = true` pinned so a user cannot turn hooks off) to the administrator, together with a checkout of this repository at the same path on every machine, readable by every user; Codex does not distribute hook scripts, and `scripts/hook.sh` finds the root from its own location when `PLUGIN_ROOT` is unset. The binary cache is per user (`~/.cache/feedback-gate`), so each user's first session downloads it once.
+
+**No double runs.** Codex runs every matching hook of every file, so where plugin-bundled hooks do run and a copy is still installed, each event would run twice (two gate runs, two notifications). `scripts/hook.sh` tells the binary which layer called it (`FEEDBACK_GATE_HOOK_SOURCE`: `plugin` when Codex passed `PLUGIN_ROOT`, which it does only for plugin-bundled hooks; `config` otherwise). A plugin-layer call writes the marker `~/{.agents,.claude}/feedback/.codex_plugin_seen/<session_id>` (`CLAUDE_FEEDBACK_DIR` is respected) on every event, and a `config` call that finds the marker of its session exits 0 with no output (`CodexHookSourceAllows` in `internal/hookgate/host_codex.go`). Where the plugin-bundled hooks do not run (the two cases above, or not yet trusted), no marker exists and the copy does the work. The two can both run only on the first SessionStart of a session, whose reset is idempotent. Markers older than 24h are removed at session start, like `.classic_seen` of the Claude Code plugin. Nothing needs configuring; use `--remove` once a copy is no longer wanted.
+
+### Rules and `gate.yaml` under the Codex sandbox
+
+The hooks run as plain child processes of Codex, outside its sandbox, so what they write (`~/{.agents,.claude}/feedback/` state, `<project>/{.agents,.claude}/.gate-status/`, the `count` line of a rule, the binary cache) is not limited by the sandbox mode or by an organization's sandbox policy. What the sandbox limits is Codex itself: in `workspace-write` mode, `<writable_root>/.agents` and `<writable_root>/.codex` (like `.git`) are read-only, recursively. So when Codex is asked to add or edit a project rule under `.agents/feedback/` or `.agents/gate.yaml`, the write needs an approval (or `danger-full-access`), which an organization's requirements can forbid. `.claude/` is not protected: for a project whose rules Codex should be able to maintain itself, keep them in `<project>/.claude/feedback/` and `<project>/.claude/gate.yaml`, which this plugin reads as well (`.agents/` first, then `.claude/`; a rule of the same name in `.agents/` wins). The global `~/.agents/feedback/` and `~/.claude/feedback/` are outside the project's writable roots either way, so Codex edits them only with approval. A rule that only you should change is best kept under `.agents/`, where the sandbox enforces exactly that.
 
 ## Requirements
 
@@ -90,6 +101,7 @@ plugin.json                     # portable Agent Plugins manifest (repository ro
 plugins/codex/
 ├── hooks/hooks.json            # command hooks for every event
 ├── scripts/hook.sh             # entry: finds or downloads feedback-gate (see ../../scripts/install-binary.sh), runs `feedback-gate codex <Event>`
+├── scripts/install-hooks.sh    # copies hooks/hooks.json into ~/.codex/hooks.json etc. where Codex does not run plugin hooks (`feedback-gate codex install-hooks`)
 └── README.md, README_ja.md
 ```
 

@@ -101,11 +101,15 @@ func ResetGate(io Io, payload Dict) ScriptResult {
 	}
 	// classic.* が走った印のマーカー（<feedbackDir>/.classic_seen/<session>。register.ts が書き、scripts/hook.sh が見る）も、
 	// 24h 超は掃除する。classic.Notification のたびに書き直されるので、動いているセッションのものは消えない。
-	seenDir := Join(FeedbackDir(io), ".classic_seen")
+	// Codex のプラグイン層の hook が走った印（<feedbackDir>/.codex_plugin_seen/<session>。host_codex.go が書き、
+	// ~/.codex/hooks.json などへの写しが見る）も同じ。
 	stale := []string{}
-	for _, e := range io.List(seenDir) {
-		if e.Kind == KindFile && e.MtimeMs < now-fbResetDayMs {
-			stale = append(stale, Join(seenDir, e.Name))
+	for _, name := range []string{".classic_seen", CodexPluginSeenDir} {
+		seenDir := Join(FeedbackDir(io), name)
+		for _, e := range io.List(seenDir) {
+			if e.Kind == KindFile && e.MtimeMs < now-fbResetDayMs {
+				stale = append(stale, Join(seenDir, e.Name))
+			}
 		}
 	}
 	io.RemoveFiles(stale)
