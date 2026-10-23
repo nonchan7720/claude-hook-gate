@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "feedback-gate",
-  "version": "0.10.1",
+  "version": "0.11.0",
   "description": "Codex hooks that inject feedback rules, enforce them on tool calls and at stop time, and run per-project quality gates defined in .agents/gate.yaml",
   "author": {
     "name": "nonchan7720"
