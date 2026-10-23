@@ -98,6 +98,7 @@ func MakeIo(opts IoOpts) Io {
 		{&env.TermProgram, &o.TermProgram}, {&env.CFBundleID, &o.CFBundleID}, {&env.FeedbackGateLang, &o.FeedbackGateLang},
 		{&env.LCAll, &o.LCAll}, {&env.LCMessages, &o.LCMessages}, {&env.LangEnv, &o.LangEnv},
 		{&env.FeedbackGateAskAgentTypes, &o.FeedbackGateAskAgentTypes}, {&env.FeedbackGateAllowRecipients, &o.FeedbackGateAllowRecipients},
+		{&env.FeedbackGateHookSource, &o.FeedbackGateHookSource},
 	} {
 		if *f.src != "" {
 			*f.dst = *f.src

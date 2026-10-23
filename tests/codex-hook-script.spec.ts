@@ -72,6 +72,18 @@ describe('plugins/codex/scripts/hook.sh', () => {
       expect(calls(s)).toBe(`feedback-gate|codex Stop|/compat|${payload}\nfeedback-gate|codex Stop|${REPO_ROOT}|${payload}\n`)
     }))
 
+  test('tells the binary which layer called it: FEEDBACK_GATE_HOOK_SOURCE=plugin under PLUGIN_ROOT (the plugin-bundled hooks.json), config otherwise (a copy written by install-hooks.sh)', () =>
+    withSetup((s, run) => {
+      fs.writeFileSync(s.fake, `#!/bin/sh\nprintf '%s|%s\\n' "$*" "$FEEDBACK_GATE_HOOK_SOURCE" >> "${s.calls}"\n`)
+      fs.chmodSync(s.fake, 0o755)
+      run('Stop', payload, { PLUGIN_ROOT: '/plugin' })
+      run('Stop', payload, { CLAUDE_PLUGIN_ROOT: '/compat' })
+      run('Stop', payload)
+      // 呼び出し側の環境にある値は使わない（層は PLUGIN_ROOT の有無で決まる）。
+      run('Stop', payload, { FEEDBACK_GATE_HOOK_SOURCE: 'plugin' })
+      expect(calls(s)).toBe('codex Stop|plugin\ncodex Stop|config\ncodex Stop|config\ncodex Stop|config\n')
+    }))
+
   test('no event: exit 0 without calling the binary', () =>
     withSetup((s, run) => {
       fakeBinary(s)
