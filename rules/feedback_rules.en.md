@@ -3,6 +3,7 @@
 ## Feedback management rules
 
 - When you receive feedback, a correction, a pointer or a preference from the user, **always save it before replying** as a Markdown file in `~/.claude/feedback/` or `.claude/feedback/`. If you forget to save it, the user has to repeat the same point in the next conversation.
+  The procedure for saving, updating and reviewing rules is in the `feedback` skill (`/feedback-gate:feedback`); follow it when it is available.
 
 ### Before starting work
 

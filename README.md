@@ -7,6 +7,7 @@ A Claude Code plugin made of function hooks. It does three things:
 - Injects your feedback rules (`~/{.claude,.agents}/feedback/*.md`) into each prompt and enforces them on tool calls and when Claude stops.
 - Runs per-project quality gates (lint, tests, etc.) defined in `{.claude,.agents}/gate.yaml` after file edits and when Claude stops.
 - Sends a desktop notification when Claude waits for you or stops (macOS).
+- Ships two skills, `/feedback-gate:feedback` and `/feedback-gate:gate`, that write those two kinds of files for you: feedback rules (create, update, periodic review) and a `.claude/gate.yaml` fitted to the project (its languages, task runner and CI).
 
 ## Hooks
 
@@ -139,6 +140,34 @@ Unknown arguments are ignored. There are five kinds of proposals, listed in this
 `apply` rewrites only the `count:` line inside the frontmatter of the `bump` rules, and lists the changed files. Nothing else in the files is touched. `enforce` (and `stale` / `expired`) are proposals only: Claude is told to show them to you and to ask before editing any file.
 
 With the automatic increase (`autoCount`) on, `count` goes up by 1 per session in which the rule is violated. A `bump` proposal instead jumps to 3 or 5 based on the violations in the window; it always starts from the current `count`, and `apply` only rewrites a file whose `count` still matches the proposal, so the two never add up twice.
+
+## Skills
+
+Two skills are bundled under `skills/`. Claude Code loads them with the plugin; invoke them as `/feedback-gate:<name>` or let Claude pick them up from their descriptions. Each is a `SKILL.md` with the procedure plus reference files it reads when needed; the hooks do not depend on them.
+
+### `/feedback-gate:feedback`
+
+Creates, updates and reviews the feedback rule files (`~/.claude/feedback/*.md`, `<project>/.claude/feedback/*.md`).
+
+```
+/feedback-gate:feedback [create|update|review] [topic or rule name]
+```
+
+- `create`: when you give feedback, a correction or a preference. Confirms that you want it saved, picks global or project scope (or a scoped global rule via `projects` / `when_exists` / `expires`), turns the concrete remark into an abstract rule whose first paragraph is what the hook injects, names the file in snake_case, sets `count` (1 provisional, 3 confirmed), adds `enforce` only when a hook can detect the violation (choosing the event, testing the regular expression), and reads the file back to check the frontmatter.
+- `update`: the same feedback again (raises `count` by 1, unless the hook already did in this session), a rule that fired wrongly (narrowed with `unless` / `exclude_path` instead of deleted), a confirmed rule without `enforce`, rewording, rescoping.
+- `review`: the periodic inventory (`skills/feedback/review.md`). Runs `/correct`, counts the violations per rule from `.violations.jsonl`, and presents one table with a proposal per rule: keep, promote, fix, narrow, merge, rescope or retire (expired, obsolete, or now covered by `gate.yaml` or a linter). Nothing is deleted or merged without asking.
+
+The format reference (`skills/feedback/reference.md`) and complete examples for the four `enforce` events (`skills/feedback/examples.md`) travel with the skill. The skill edits only rule files, never the hooks' state files.
+
+### `/feedback-gate:gate`
+
+Writes or updates the project's `.claude/gate.yaml`.
+
+```
+/feedback-gate:gate [init|update|review]
+```
+
+It first reads what the project already runs instead of guessing: the manifests (language and package manager), the task runner (`Makefile`, `justfile`, `Taskfile.yml`, `mise` tasks, `package.json` scripts), the CI configuration (GitHub Actions, GitLab CI, CircleCI, ...) and pre-commit style hooks, and the repository layout (single package, workspaces, one directory per package). It then maps those to the gate: file-scoped lint / format / typecheck and package tests in `rules` (with `$CLAUDE_GATE_FILES` where the tool accepts files), whole-project tests and builds in `consistency_checks` referenced by `run_checks`, `per_file_dir` for monorepos, a `name` on every command, `parallel` groups, `timeout` from measured durations and `files: false` for whole-project commands; CI-only steps (coverage upload, deploys, steps that need services or secrets) are left out and listed in the report. Before handing over it runs every command once on the current tree (through the normal permission flow), checks the file against the schema's key set and makes sure `.claude/.gate-status/` is in `.gitignore`. `review` reports the drift between the current file and CI without editing. The field reference, the discovery checklist and per-toolchain recipes (TypeScript, workspaces, Python, Go, Rust, Ruby, JVM, Terraform, shell, Makefile-driven) are in `skills/gate/`.
 
 ## Install
 
