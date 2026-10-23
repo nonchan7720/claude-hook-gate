@@ -212,3 +212,35 @@ func TestCodexInstallHooks(t *testing.T) {
 		assert.Len(t, stop, 2)
 	})
 }
+
+// `feedback-gate codex print-rules`（codex_print_rules.go）: UserPromptSubmit が context に足すもの（rules ファイル + 確定したルール）を出す。
+func TestCodexPrintRules(t *testing.T) {
+	proj := TmpDir()
+	feedback := TmpDir()
+	defer RmTree(proj)
+	defer RmTree(feedback)
+	hostWriteRule(feedback, "global-rule", 3, "")
+	hostWriteRule(feedback, "unconfirmed", 1, "")
+	require.NoError(t, os.MkdirAll(filepath.Join(proj, ".agents", "feedback"), 0o755))
+	hostWriteRule(filepath.Join(proj, ".agents", "feedback"), "project-rule", 4, "")
+	env := map[string]string{"HOME": TestHome, "CLAUDE_FEEDBACK_DIR": feedback, "CLAUDE_PLUGIN_ROOT": RepoRoot, "FEEDBACK_GATE_LANG": "en", "DOGWOOD_BIN": MissingDogwoodBin}
+
+	var out, errOut bytes.Buffer
+	code := CodexPrintRules(nil, env, proj, &out, &errOut)
+	require.Equal(t, 0, code, errOut.String())
+	assert.Equal(t, "", errOut.String())
+	text := out.String()
+	// 同梱の rules ファイル（英語）と、count >= 3 のルールだけ。
+	bundled, err := os.ReadFile(filepath.Join(RepoRoot, "rules", "feedback_rules.en.md"))
+	require.NoError(t, err)
+	assert.Contains(t, text, strings.TrimSpace(string(bundled)))
+	assert.Contains(t, text, "global-rule")
+	assert.Contains(t, text, "project-rule")
+	assert.NotContains(t, text, "unconfirmed")
+	assert.True(t, strings.HasSuffix(text, "\n"))
+
+	out.Reset()
+	errOut.Reset()
+	assert.Equal(t, 1, CodexPrintRules([]string{"--x"}, env, proj, &out, &errOut))
+	assert.Contains(t, errOut.String(), "usage: feedback-gate codex print-rules")
+}
