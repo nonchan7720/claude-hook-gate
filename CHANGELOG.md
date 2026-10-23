@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.10.0...v0.10.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* keep another session's edits in the same working tree out of this session's Bash changes ([#66](https://github.com/nonchan7720/claude-hook-gate/issues/66)) ([b150d98](https://github.com/nonchan7720/claude-hook-gate/commit/b150d98c5a2b0cdeb59c419fb9ff6bc462aea5c1))
+
 ## [0.10.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.9.1...v0.10.0) (2026-10-21)
 
 
