@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.11.0...v0.12.0) (2026-10-23)
+
+
+### Features
+
+* check heredoc writes in Bash with pre_edit before the command runs ([#70](https://github.com/nonchan7720/claude-hook-gate/issues/70)) ([de9e1c0](https://github.com/nonchan7720/claude-hook-gate/commit/de9e1c085a602a77d6e974c56f78a98ee5446a7f))
+
 ## [0.11.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.10.1...v0.11.0) (2026-10-23)
 
 

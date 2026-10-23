@@ -15,7 +15,7 @@ import (
 // version is the plugin version (release-please rewrites the line marked x-release-please-version together with
 // .claude-plugin/plugin.json); GoReleaser overrides it with -ldflags "-X main.version=<tag>" so a release build and the
 // manifest always agree.
-var version = "0.11.0" // x-release-please-version
+var version = "0.12.0" // x-release-please-version
 
 func main() {
 	os.Exit(run(os.Args[1:]))
