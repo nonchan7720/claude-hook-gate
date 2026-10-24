@@ -205,6 +205,27 @@ describe('the share key', () => {
       expect(fs.readFileSync(seen, 'utf8').trim()).toBe('same')
     }))
 
+  test('file lists of the agents that wait for a run with the same name are batched into the next run', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const c = `echo "$CLAUDE_GATE_FILES" >> ${marker}; sleep 0.4`
+      const p1 = run(proj, 'a1', c, proj, filesEnv(['x.py']))
+      await waitForSharedLock(proj)
+      await Promise.all([p1, run(proj, 'a2', c, proj, filesEnv(['y.py'])), run(proj, 'a3', c, proj, filesEnv(['z.py']))])
+      // a1 の実行中に来た a2 と a3 は、a1 が終わったあと 1 回にまとめて走る（対象ファイルは和集合）。
+      expect(fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean)).toEqual(['x.py', 'y.py z.py'])
+    }))
+
+  test('max_parallel in gate.yaml caps the commands running at once, even inside a parallel block', () =>
+    withTmp(async (proj) => {
+      const marker = path.join(proj, 'm.txt')
+      const c = (tag: string) => `echo start >> ${marker}; sleep 0.3; echo end >> ${marker} # ${tag}`
+      writeGateYaml(proj, { max_parallel: 1, rules: [{ match: '**/*.py', run: [{ parallel: [c('a'), c('b'), c('c')] }] }] })
+      writeChangedFiles(proj, 'sess1--a1', 'x.py')
+      await rules(proj, 'sess1', { agentId: 'a1' })
+      expect(fs.readFileSync(marker, 'utf8').split('\n').filter(Boolean)).toEqual(['start', 'end', 'start', 'end', 'start', 'end'])
+    }))
+
   test('share: false is not serialized', () =>
     withTmp(async (proj) => {
       const marker = path.join(proj, 'm.txt')

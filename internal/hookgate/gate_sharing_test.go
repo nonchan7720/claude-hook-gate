@@ -338,6 +338,35 @@ func TestGateSharing(t *testing.T) {
 			assert.Equal(t, "same", strings.TrimSpace(Read(seen)))
 		})
 
+		t.Run("file lists of the agents that wait for a run with the same name are batched into the next run", func(t *testing.T) {
+			proj := tmpProj(t)
+			marker := filepath.Join(proj, "m.txt")
+			c := `echo "$CLAUDE_GATE_FILES" >> ` + marker + "; sleep 0.4"
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() { defer wg.Done(); run(proj, "a1", c, proj, FilesEnv([]string{"x.py"})) }()
+			require.NoError(t, WaitForSharedLock(proj))
+			concurrently(
+				func() { run(proj, "a2", c, proj, FilesEnv([]string{"y.py"})) },
+				func() { run(proj, "a3", c, proj, FilesEnv([]string{"z.py"})) },
+			)
+			wg.Wait()
+			// a1 の実行中に来た a2 と a3 は、a1 が終わったあと 1 回にまとめて走る（対象ファイルは和集合）。
+			assert.Equal(t, []string{"x.py", "y.py z.py"}, Lines(marker))
+		})
+
+		t.Run("max_parallel in gate.yaml caps the commands running at once, even inside a parallel block", func(t *testing.T) {
+			proj := tmpProj(t)
+			marker := filepath.Join(proj, "m.txt")
+			c := func(tag string) string {
+				return "echo start >> " + marker + "; sleep 0.3; echo end >> " + marker + " # " + tag
+			}
+			WriteGateYaml(proj, Dict{"max_parallel": 1, "rules": gList(Dict{"match": "**/*.py", "run": gList(Dict{"parallel": gList(c("a"), c("b"), c("c"))})})})
+			WriteChangedFiles(proj, "sess1--a1", "x.py")
+			rules(proj, GateOpts{Session: "sess1", AgentID: "a1"})
+			assert.Equal(t, []string{"start", "end", "start", "end", "start", "end"}, Lines(marker))
+		})
+
 		t.Run("share: false is not serialized", func(t *testing.T) {
 			proj := tmpProj(t)
 			marker := filepath.Join(proj, "m.txt")

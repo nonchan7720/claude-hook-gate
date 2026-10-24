@@ -12,6 +12,7 @@ Unknown keys are invalid everywhere (`additionalProperties: false`).
 | `report_success` | boolean, default `true` | When the checks phase actually ran at least one command and all passed, block the stop once with a summary so the agent reports it and finishes. `false` turns the report off. |
 | `policy` | path or `false` | dogwood policy (`.dw`) applied to every command before it runs. Omitted → the bundled default (same `name` at most once per 2 minutes; paused after 3 failures within 10 minutes). `false` → run every time. Relative to the project / worktree root; `~` and absolute paths allowed. Needs the optional `dogwood` binary; without it the default policy runs every time and a custom policy defers the commands. |
 | `policy_schema` | path | Cedar schema for `policy`. Default: the bundled `scripts/dogwood/gate.cedarschema`. |
+| `max_parallel` | integer >= 1 or `false`, default `2` | How many gate commands may run at the same time across all agents and worktrees of the project (one slot per running command; receiving a shared result needs none). Applies inside `parallel` blocks and to `share: false` commands too. `false` removes the cap. Keeps many subagents from running whole-project tests all at once and slowing each other down. |
 
 ## rule
 
@@ -45,7 +46,7 @@ string or a mapping:
 | `cmd` | string, **required** | Run with `sh -c`. |
 | `name` | string | Label in the band, the status line and the log file name. Also the serialization unit between agents: two commands with the same `name` never run at the same time (without `name`, `cmd` is the unit). |
 | `timeout` | integer seconds | Overrides the rule / check timeout. Precedence: command > rule / check > 300. On expiry the process group is killed and the command fails. |
-| `share` | boolean, default `true` | When another agent is already running the same command (same root, cwd, `cmd`, environment) on a superset of this agent's files, wait for it and reuse its result instead of starting again; otherwise wait for a run with the same `name` to finish before starting. `false`: always start at once, never serialize. |
+| `share` | boolean, default `true` | When another agent is already running the same command (same root, cwd, `cmd`, environment) on a superset of this agent's files, wait for it and reuse its result instead of starting again; otherwise wait for a run with the same `name` to finish before starting; the file lists of the agents waiting for it are batched into that next run (one run on the union of their files, received by all of them). `false`: always start at once, never serialize (the `max_parallel` cap still applies). |
 | `files` | boolean, default `true` | `false` declares that the command does not use `CLAUDE_GATE_FILES`, so sharing ignores the file list (whole-project commands). The variable is still passed. `share: false` wins over `files: false`. |
 
 ## Environment of a command
@@ -66,6 +67,8 @@ Plus the user's environment. Output goes to `.claude/.gate-status/logs/<state>/<
 - The gate itself never edits files. A failed rule returns the command output to Claude.
 - After 5 blocked stops in a row the gate gives up on those failures (the files stay
   tracked and are rechecked on the next edit).
-- Several agents of one session share the band; identical runs are merged (see `share`).
+- Several agents of one session share the band; identical runs are merged (see `share`),
+  waiting agents' file lists are batched into the next run, and at most `max_parallel`
+  commands run at once across the whole project.
 - Git history and working-tree operations (`checkout`, `rebase`, `merge`, ...) are not
   treated as edits and record nothing.

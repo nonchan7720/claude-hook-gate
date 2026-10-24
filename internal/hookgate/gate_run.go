@@ -67,7 +67,9 @@ func (g *Gate) RunCmd(cmd, cwd string, timeout float64, name string, extraEnv Ga
 // 共有せず従来どおり自分で実行する。onWait は待機側になったときに呼ばれる。
 func (g *Gate) runCmdShared(cmd, cwd string, timeout float64, name string, extraEnv GateEnv, scope ExecScope, onWait func()) SharedOutcome {
 	if !scope.shareOn() {
-		return g.RunCmd(cmd, cwd, timeout, name, extraEnv, nil)
+		return RunWithSlot(g.Io, g.maxParallel, gateTimeoutMs(timeout), func(pidFiles []string) SharedOutcome {
+			return g.RunCmd(cmd, cwd, timeout, name, extraEnv, pidFiles)
+		})
 	}
 	env := GateEnv{}
 	for k, v := range g.BaseEnv {
@@ -82,8 +84,15 @@ func (g *Gate) runCmdShared(cmd, cwd string, timeout float64, name string, extra
 		key,
 		ShareFiles(env, scope.filesOn()),
 		gateTimeoutMs(timeout),
-		func(pidFiles []string) SharedOutcome { return g.RunCmd(cmd, cwd, timeout, name, extraEnv, pidFiles) },
-		SharedHooks{OnWait: onWait, Serial: SerialKey(name, cmd)},
+		func(pidFiles []string, files []string) SharedOutcome {
+			// 実行側になったときの対象ファイルは、待っている側の分をまとめた和集合（自分の分だけなら元のまま）。
+			runEnv := extraEnv
+			if scope.filesOn() && len(files) > 0 {
+				runEnv = MergeFilesEnv(extraEnv, FilesEnv(files))
+			}
+			return g.RunCmd(cmd, cwd, timeout, name, runEnv, pidFiles)
+		},
+		SharedHooks{OnWait: onWait, Serial: SerialKey(name, cmd), MaxParallel: g.maxParallel},
 	)
 	if !r.Shared {
 		return r.Outcome

@@ -27,6 +27,14 @@ package hookgate
 // それが終わるのを待ってから、改めて受け取れる実行を探すか自分で実行する。重いコマンド（go test ./... など）を
 // エージェントの数だけ同時に走らせないため。
 //
+// 待つ側が多いときに順に 1 本ずつ走らせないよう、待っている側の対象ファイル一覧はまとめる（batching）:
+//   - <serial のハッシュ>.queue/<ShareID>.json   待つ側が置くキーと対象ファイル一覧。次に実行側になった者が同じキーの分を
+//     自分の一覧に足して（和集合で）走らせ、置かれた分を消す。待っていた側はその実行に含まれるので結果を受け取る。
+//
+// さらに、違うコマンドの同時実行数にも上限を置く（max_parallel。gate.yaml のトップレベル、既定 2）:
+//   - slot.<i>/   同時実行枠（i は 0 から枠数 - 1）。実行側になる者（と共有しない実行）は枠を 1 つ取ってから走らせ、
+//     終わったら消す。中の info.json と pid でロックと同じように生死を判定する。受け取るだけなら枠は要らない。
+//
 // これらのファイルは同じリポジトリのすべての git worktree で共通の場所（~/.claude/.gate-status/shared/<project_id>/。
 // SharedDir）に置く。サブエージェントが別の worktree で動いても、直列化（serial）は worktree をまたいで効く。
 // キーには root・cwd が入るので、worktree が違えば結果は共有されない（別のコードを見ているため）。
@@ -140,10 +148,16 @@ func computeSharedDir(io Io, base, home string) string {
 }
 
 // SharedHooks は RunShared の任意の指定。Serial は直列化の単位（省略時は key）。OnWait は待機側になったとき（最初の 1 回）に呼ばれる。
+// MaxParallel は同時実行枠の数（0 以下は無制限）。実行側になるとき（と共有しない実行）はこの枠を 1 つ取ってから走らせる。
 type SharedHooks struct {
-	OnWait func()
-	Serial string
+	OnWait      func()
+	Serial      string
+	MaxParallel int
 }
+
+// SharedExecute は実行側になったときに呼ばれる。pidFiles はロックの pid ファイル（コマンドを走らせるシェルの PID を書かせる）、
+// files はこの実行が対象にするファイル一覧（待っている側の分をまとめた和集合。対象ファイルを使わない実行では空）。
+type SharedExecute func(pidFiles []string, files []string) SharedOutcome
 
 // SharedResult は RunShared の結果。Shared は「他の側の結果を受け取った」こと。
 type SharedResult struct {
@@ -214,25 +228,31 @@ type sharedRun struct {
 	key        string
 	mine       []string
 	timeoutMs  int64
-	execute    func(pidFiles []string) SharedOutcome
+	execute    SharedExecute
 	hooks      SharedHooks
 	dir        string
 	keyPrefix  string
 	ownLock    string
 	serialLock string
-	announced  bool
+	// queueDir は同じ直列化の単位を待つ側が対象ファイル一覧を置く場所、request はその中の自分の分（出していなければ ""）。
+	queueDir  string
+	request   string
+	announced bool
 }
 
 func resultOf(lock string) string { return strings.TrimSuffix(lock, ".run") + ".result.json" }
 
-func (r *sharedRun) mkdirAtomic(path string) bool {
-	return r.io.Run([]string{"sh", "-c", `mkdir -p "$1" && mkdir "$2"`, "sh", r.dir, path}, RunOptions{}).ExitCode == 0
+func mkdirAtomic(io Io, dir, path string) bool {
+	return io.Run([]string{"sh", "-c", `mkdir -p "$1" && mkdir "$2"`, "sh", dir, path}, RunOptions{}).ExitCode == 0
 }
 
-// lead は排他ロックを持った状態で実行し、結果を書いてから両方のロックを外す。
-func (r *sharedRun) lead() SharedOutcome {
+func (r *sharedRun) mkdirAtomic(path string) bool { return mkdirAtomic(r.io, r.dir, path) }
+
+// lead は排他ロック（と同時実行枠）を持った状態で実行し、結果を書いてから全部のロックを外す。
+func (r *sharedRun) lead(slot string) SharedOutcome {
 	io := r.io
 	resultFile := resultOf(r.ownLock)
+	defer releaseSlot(io, slot)
 	defer io.RemoveTree(r.serialLock)
 	started := io.Now()
 	// 実行のロックの info を先に書く。排他ロックの info が見えた時点で、待つ側が受け取れる実行かを判定できるように。
@@ -240,11 +260,160 @@ func (r *sharedRun) lead() SharedOutcome {
 	_ = io.WriteFile(Join(r.serialLock, "info.json"), JSONStringify(OMap{{"started", started}, {"timeoutMs", r.timeoutMs}}))
 	io.RemoveFiles([]string{resultFile})
 	defer io.RemoveTree(r.ownLock)
-	outcome := r.execute([]string{Join(r.serialLock, "pid"), Join(r.ownLock, "pid")})
+	pidFiles := []string{Join(r.serialLock, "pid"), Join(r.ownLock, "pid")}
+	if slot != "" {
+		pidFiles = append(pidFiles, Join(slot, "pid"))
+	}
+	outcome := r.execute(pidFiles, r.mine)
 	_ = io.WriteFile(resultFile, JSONStringify(OMap{
 		{"key", r.key}, {"files", r.mine}, {"out", outcome.Out}, {"ok", outcome.Ok}, {"timedOut", outcome.TimedOut}, {"logpath", outcome.Logpath},
 	}))
 	return outcome
+}
+
+// ---- 待っている側の対象ファイルをまとめる（batching） ----
+//
+// 受け取れない（対象ファイルを含まない）同じ直列化の単位の実行を待つ側は、自分のキーと対象ファイル一覧を
+// <serial のハッシュ>.queue/<ShareID>.json に置く。次に実行側になった者は、同じキーの分を自分の一覧に足して
+// （和集合で）走らせ、置かれた分を消す。待っていた側は、その実行が自分の一覧を含むので受け取れる。
+// 同じコマンドをエージェントの数だけ順に走らせる代わりに、溜まった分を 1 回で済ませるため。
+// 置いた分は RunShared を抜けるときに自分で消す（実行側に消されていればそれでよい）。
+
+const requestStaleMs = maxWaitMs + graceMs // これより古い置き分は、落ちた待ち側の残骸とみなす
+
+// postRequest は自分の対象ファイル一覧を queue に置く（1 回だけ。一覧が空なら置かない: 空の一覧は何にでも含まれる）。
+func (r *sharedRun) postRequest() {
+	if r.request != "" || len(r.mine) == 0 {
+		return
+	}
+	r.request = Join(r.queueDir, ShareID(r.key, r.mine)+".json")
+	_ = r.io.WriteFile(r.request, JSONStringify(OMap{{"started", r.io.Now()}, {"key", r.key}, {"files", r.mine}}))
+}
+
+func (r *sharedRun) withdrawRequest() {
+	if r.request != "" {
+		r.io.RemoveFiles([]string{r.request})
+		r.request = ""
+	}
+}
+
+// absorbRequests は queue に置かれた同じキーの一覧を自分の一覧に足し、置かれた分を消す。排他ロックを取った直後、
+// 実行のロックを作る前に呼ぶ（一覧が変わると実行のロックの名前も変わる）。自分の一覧が空なら何もしない。
+func (r *sharedRun) absorbRequests() {
+	if len(r.mine) == 0 {
+		return
+	}
+	now := r.io.Now()
+	union := append([]string{}, r.mine...)
+	var consumed []string
+	for _, e := range r.io.List(r.queueDir) {
+		if e.Kind != KindFile || !strings.HasSuffix(e.Name, ".json") {
+			continue
+		}
+		path := Join(r.queueDir, e.Name)
+		text, ok := r.io.ReadFile(path)
+		if !ok {
+			continue
+		}
+		var v any
+		if err := json.Unmarshal([]byte(text), &v); err != nil {
+			continue
+		}
+		d, ok := AsDict(v)
+		if !ok {
+			continue
+		}
+		if s := jsNumber(d["started"]); finite(s) && int64(s) < now-requestStaleMs {
+			consumed = append(consumed, path)
+			continue
+		}
+		arr, ok := d["files"].([]any)
+		if d["key"] != r.key || !ok {
+			continue
+		}
+		for _, f := range arr {
+			union = append(union, Str(f))
+		}
+		consumed = append(consumed, path)
+	}
+	if len(consumed) > 0 {
+		r.io.RemoveFiles(consumed)
+	}
+	r.mine = normalizeFiles(union)
+	r.ownLock = Join(r.dir, ShareID(r.key, r.mine)+".run")
+}
+
+// ---- 同時実行枠（max_parallel） ----
+//
+// <共有ディレクトリ>/slot.<i>/（i は 0 から枠数 - 1）を mkdir で取り合う。実行側になる者（と共有しない実行）は
+// 枠を 1 つ取ってから走らせ、終わったら消す。中の info.json と pid でロックと同じように生死を判定する。
+// 重いコマンドをエージェントの数だけ同時に走らせると CPU の取り合いで全員が何倍も遅くなるので、
+// 直列化（同じコマンドは 1 本）に加えて、違うコマンドの同時実行数にも上限を置く。
+
+const slotWaitMs = 5000 // 枠が空くのを 1 回に待つ長さ。超えたら死んだ枠を片付けてから待ち直す
+
+func slotPath(dir string, i int) string { return Join(dir, "slot."+strconv.Itoa(i)) }
+
+// takeSlot は空いている枠を 1 つ取る。死んだ枠は片付けて取り直す。取れなければ ""。枠数が 0 以下（無制限）なら ("", true)。
+func takeSlot(io Io, dir string, maxParallel, timeoutMs int64) (string, bool) {
+	if maxParallel <= 0 {
+		return "", true
+	}
+	for i := range int(maxParallel) {
+		slot := slotPath(dir, i)
+		if mkdirAtomic(io, dir, slot) {
+			_ = io.WriteFile(Join(slot, "info.json"), JSONStringify(OMap{{"started", io.Now()}, {"timeoutMs", timeoutMs}}))
+			return slot, true
+		}
+		if !io.Exists(slot) {
+			return "", true // 枠を作れない（共有ディレクトリに書けないなど）。上限なしで走らせる
+		}
+		info, hasInfo := (&sharedRun{io: io}).readInfo(slot)
+		if (&sharedRun{io: io}).remainingMs(slot, info, hasInfo) <= 0 {
+			io.RemoveTree(slot)
+			if mkdirAtomic(io, dir, slot) {
+				_ = io.WriteFile(Join(slot, "info.json"), JSONStringify(OMap{{"started", io.Now()}, {"timeoutMs", timeoutMs}}))
+				return slot, true
+			}
+		}
+	}
+	return "", false
+}
+
+func releaseSlot(io Io, slot string) {
+	if slot != "" {
+		io.RemoveTree(slot)
+	}
+}
+
+// waitSlot はどれかの枠が空くまで（最長 slotWaitMs）待つ。
+func waitSlot(io Io, dir string, maxParallel int64) {
+	var checks []string
+	for i := range int(maxParallel) {
+		checks = append(checks, `[ -d "$1/slot.`+strconv.Itoa(i)+`" ]`)
+	}
+	script := "while " + strings.Join(checks, " && ") + "; do sleep " + pollSeconds + "; done"
+	io.Run([]string{"sh", "-c", script, "sh", dir}, RunOptions{TimeoutMs: slotWaitMs})
+}
+
+// RunWithSlot は共有も直列化もしない実行を、同時実行枠だけ取って走らせる（share: false 用）。
+func RunWithSlot(io Io, maxParallel int, timeoutMs int64, execute func(pidFiles []string) SharedOutcome) SharedOutcome {
+	if maxParallel <= 0 {
+		return execute(nil)
+	}
+	dir := SharedDir(io)
+	for {
+		slot, ok := takeSlot(io, dir, int64(maxParallel), timeoutMs)
+		if ok {
+			defer releaseSlot(io, slot)
+			var pidFiles []string
+			if slot != "" {
+				pidFiles = []string{Join(slot, "pid")}
+			}
+			return execute(pidFiles)
+		}
+		waitSlot(io, dir, int64(maxParallel))
+	}
 }
 
 func (r *sharedRun) readInfo(lock string) (lockInfo, bool) {
@@ -421,10 +590,15 @@ func (r *sharedRun) announce() {
 	}
 }
 
-// waitGone はロックが消えるか、そのコマンドのプロセスが終わるまで待つ。終わっていたら、呼び出し側が次のラウンドで奪い直す。
+// waitGone はロックが消えるか、そのコマンドのプロセスが終わるか、ロックが別の実行のものに替わるまで待つ。終わっていたら、
+// 呼び出し側が次のラウンドで奪い直す。消えてから次の実行側が同じパスで作り直すのがポーリングの間に収まると「消えた」
+// ことを見逃すので、待ち始めたときの info.json の中身を覚えておき、変わったら起きる（次のラウンドで新しい実行を見に行く）。
 func (r *sharedRun) waitGone(path string, left int64) {
-	script := fmt.Sprintf(`while [ -d "$1" ]; do if [ -s "$1/pid" ] && ! kill -0 "$(cat "$1/pid")" 2>/dev/null; then exit 3; fi; sleep %s; done`, pollSeconds)
-	r.io.Run([]string{"sh", "-c", script, "sh", path}, RunOptions{TimeoutMs: min(max(left, 1), maxWaitMs)})
+	info, _ := r.io.ReadFile(Join(path, "info.json"))
+	script := fmt.Sprintf(`while [ -d "$1" ]; do `+
+		`if [ -n "$2" ] && [ "$(cat "$1/info.json" 2>/dev/null)" != "$2" ]; then exit 4; fi; `+
+		`if [ -s "$1/pid" ] && ! kill -0 "$(cat "$1/pid")" 2>/dev/null; then exit 3; fi; sleep %s; done`, pollSeconds)
+	r.io.Run([]string{"sh", "-c", script, "sh", path, info}, RunOptions{TimeoutMs: min(max(left, 1), maxWaitMs)})
 }
 
 func (r *sharedRun) sleepPoll() {
@@ -443,14 +617,24 @@ const (
 
 // acquire は受け取れる実行が無いときの処理: 排他ロックを取って実行側になるか、先行する実行を待つ対象にする。
 func (r *sharedRun) acquire() (roundAction, string, SharedOutcome) {
+	// 実行側になるには同時実行枠が要る。空いていなければ空くのを待って探し直す（その間に受け取れる実行が
+	// 始まっていれば、次のラウンドでそれを待つ）。ラウンドは消費しない。
+	slot, ok := takeSlot(r.io, r.dir, int64(r.hooks.MaxParallel), r.timeoutMs)
+	if !ok {
+		waitSlot(r.io, r.dir, int64(r.hooks.MaxParallel))
+		return roundRetry, "", SharedOutcome{}
+	}
 	// 同じ直列化の単位の実行が走っていれば、終わるまで待ってから探し直す。
 	if r.mkdirAtomic(r.serialLock) {
+		r.absorbRequests()
 		if r.mkdirAtomic(r.ownLock) {
-			return roundDone, "", r.lead()
+			return roundDone, "", r.lead(slot)
 		}
+		releaseSlot(r.io, slot)
 		r.io.RemoveTree(r.serialLock)
 		return roundContinue, r.ownLock, SharedOutcome{} // 同じ一覧の実行が info を書く前だった場合など。そのロックを待つ
 	}
+	releaseSlot(r.io, slot)
 	info, hasInfo := r.readInfo(r.serialLock)
 	left := r.remainingMs(r.serialLock, info, hasInfo)
 	if left <= 0 {
@@ -469,6 +653,8 @@ func (r *sharedRun) acquire() (roundAction, string, SharedOutcome) {
 	// info があれば実行のロックの info も書かれている。受け取れる実行なら、それを待つ。
 	again := r.findRunning()
 	if again.lock == "" {
+		// 受け取れない実行を待つ。自分の一覧を置いておき、次の実行側にまとめて走らせてもらう。
+		r.postRequest()
 		r.announce()
 		r.waitGone(r.serialLock, left)
 		return roundNext, "", SharedOutcome{}
@@ -517,7 +703,7 @@ func RunShared(
 	key string,
 	files []string,
 	timeoutMs int64,
-	execute func(pidFiles []string) SharedOutcome,
+	execute SharedExecute,
 	hooks SharedHooks,
 ) SharedResult {
 	mine := normalizeFiles(files)
@@ -531,7 +717,9 @@ func RunShared(
 		keyPrefix:  HashKey(key) + ".",
 		ownLock:    Join(dir, ShareID(key, mine)+".run"),
 		serialLock: Join(dir, HashKey(serial)+".serial"),
+		queueDir:   Join(dir, HashKey(serial)+".queue"),
 	}
+	defer r.withdrawRequest()
 	for round := 0; round < maxRounds; round++ {
 		action, res := r.round()
 		switch action {
@@ -542,5 +730,5 @@ func RunShared(
 		case roundNext, roundContinue:
 		}
 	}
-	return SharedResult{Outcome: execute(nil), Shared: false}
+	return SharedResult{Outcome: RunWithSlot(io, hooks.MaxParallel, timeoutMs, func(pidFiles []string) SharedOutcome { return execute(pidFiles, mine) }), Shared: false}
 }

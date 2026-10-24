@@ -24,6 +24,14 @@
 // それが終わるのを待ってから、改めて受け取れる実行を探すか自分で実行する。重いコマンド（go test ./... など）を
 // エージェントの数だけ同時に走らせないため。
 //
+// 待つ側が多いときに順に 1 本ずつ走らせないよう、待っている側の対象ファイル一覧はまとめる（batching）:
+//   - <serial のハッシュ>.queue/<ShareID>.json   待つ側が置くキーと対象ファイル一覧。次に実行側になった者が同じキーの分を
+//     自分の一覧に足して（和集合で）走らせ、置かれた分を消す。待っていた側はその実行に含まれるので結果を受け取る。
+//
+// さらに、違うコマンドの同時実行数にも上限を置く（max_parallel。gate.yaml のトップレベル、既定 2）:
+//   - slot.<i>/   同時実行枠（i は 0 から枠数 - 1）。実行側になる者（と共有しない実行）は枠を 1 つ取ってから走らせ、
+//     終わったら消す。中の info.json と pid でロックと同じように生死を判定する。受け取るだけなら枠は要らない。
+//
 // これらのファイルは同じリポジトリのすべての git worktree で共通の場所（~/.claude/.gate-status/shared/<project_id>/。
 // sharedDir）に置く。サブエージェントが別の worktree で動いても、直列化（serial）は worktree をまたいで効く。
 // キーには root・cwd が入るので、worktree が違えば結果は共有されない（別のコードを見ているため）。
@@ -90,8 +98,121 @@ export function sharedDir(io: Io): Promise<string> {
   return cached
 }
 
-/** serial: 直列化の単位（省略時は key）。onWait: 待機側になったとき（最初の 1 回）に呼ばれる。 */
-type Hooks = { onWait?: () => void | Promise<void>; serial?: string }
+/**
+ * serial: 直列化の単位（省略時は key）。onWait: 待機側になったとき（最初の 1 回）に呼ばれる。
+ * maxParallel: 同時実行枠の数（0 以下・省略は無制限）。実行側になるとき（と共有しない実行）はこの枠を 1 つ取ってから走らせる。
+ */
+type Hooks = { onWait?: () => void | Promise<void>; serial?: string; maxParallel?: number }
+
+/**
+ * 実行側になったときに呼ばれる。pidFiles はロックの pid ファイル（コマンドを走らせるシェルの PID を書かせる）、
+ * files はこの実行が対象にするファイル一覧（待っている側の分をまとめた和集合。対象ファイルを使わない実行では空）。
+ */
+export type SharedExecute = (pidFiles: string[], files: string[]) => Promise<SharedOutcome>
+
+const REQUEST_STALE_MS = MAX_WAIT_MS + GRACE_MS // これより古い置き分は、落ちた待ち側の残骸とみなす
+const SLOT_WAIT_MS = 5000 // 枠が空くのを 1 回に待つ長さ。超えたら死んだ枠を片付けてから待ち直す
+
+const mkdirAtomicIn = async (io: Io, dir: string, path: string): Promise<boolean> =>
+  (await io.run(['sh', '-c', 'mkdir -p "$1" && mkdir "$2"', 'sh', dir, path])).exitCode === 0
+
+type Info = { started?: number; limit: number; key?: string; files?: string[] }
+
+const readInfoOf = async (io: Io, lock: string): Promise<Info | undefined> => {
+  const text = await io.readFile(join(lock, 'info.json'))
+  try {
+    const info: unknown = text === undefined ? undefined : JSON.parse(text)
+    if (!isDict(info)) return undefined
+    return {
+      started: Number.isFinite(Number(info.started)) ? Number(info.started) : undefined,
+      limit: Number(info.timeoutMs) || 0,
+      key: typeof info.key === 'string' ? info.key : undefined,
+      files: Array.isArray(info.files) ? info.files.map(String) : undefined,
+    }
+  } catch {
+    return undefined // 書きかけは info 無しと同じに扱う
+  }
+}
+
+/** ロックが生きている残り時間。期限切れ、またはコマンドのプロセスが終わっていれば 0 以下。 */
+const remainingMsOf = async (io: Io, lock: string, info: Info | undefined): Promise<number> => {
+  const now = await io.now()
+  const started = info?.started ?? (await io.stat(lock))?.mtimeMs ?? now
+  const left = started + (info?.limit ?? 0) + GRACE_MS - now
+  if (left <= 0) return left
+  const pid = (await io.readFile(join(lock, 'pid')))?.trim()
+  if (pid) {
+    if (/^\d+$/.test(pid) && (await io.run(['sh', '-c', 'kill -0 "$1" 2>/dev/null', 'sh', pid])).exitCode === 0) return left
+    // コマンドは終わっている。実行側が結果を書いてロックを外す途中かもしれないので、少しの間ロックが消えるのを待つ。
+    // 消えたら生きている扱いで返す（呼び出し側は待機に入り、消えているのですぐ抜けて結果を読む）。消えなければ死亡。
+    const polls = Math.ceil(DEAD_GRACE_MS / (Number(POLL_SECONDS) * 1000))
+    const script = `i=0; while [ -d "$1" ] && [ "$i" -lt ${polls} ]; do sleep ${POLL_SECONDS}; i=$((i+1)); done; [ ! -d "$1" ]`
+    return (await io.run(['sh', '-c', script, 'sh', lock])).exitCode === 0 ? GRACE_MS : 0
+  }
+  // PID がまだ無い。info があるのに GRACE_MS を過ぎても書かれないなら、コマンドを起動する前に止められている。
+  return info && now - started > GRACE_MS ? 0 : left
+}
+
+// ---- 同時実行枠（max_parallel） ----
+//
+// <共有ディレクトリ>/slot.<i>/（i は 0 から枠数 - 1）を mkdir で取り合う。実行側になる者（と共有しない実行）は
+// 枠を 1 つ取ってから走らせ、終わったら消す。中の info.json と pid でロックと同じように生死を判定する。
+// 重いコマンドをエージェントの数だけ同時に走らせると CPU の取り合いで全員が何倍も遅くなるので、
+// 直列化（同じコマンドは 1 本）に加えて、違うコマンドの同時実行数にも上限を置く。
+
+const slotPath = (dir: string, i: number): string => join(dir, `slot.${i}`)
+
+/** 空いている枠を 1 つ取る。死んだ枠は片付けて取り直す。取れなければ undefined。枠数が 0 以下（無制限）なら { slot: undefined, ok: true }。 */
+async function takeSlot(io: Io, dir: string, maxParallel: number, timeoutMs: number): Promise<{ slot?: string; ok: boolean }> {
+  if (maxParallel <= 0) return { ok: true }
+  const claimSlot = async (slot: string): Promise<boolean> => {
+    if (!(await mkdirAtomicIn(io, dir, slot))) return false
+    await io.writeFile(join(slot, 'info.json'), JSON.stringify({ started: await io.now(), timeoutMs }))
+    return true
+  }
+  for (let i = 0; i < maxParallel; i++) {
+    const slot = slotPath(dir, i)
+    if (await claimSlot(slot)) return { slot, ok: true }
+    if (!(await io.exists(slot))) return { ok: true } // 枠を作れない（共有ディレクトリに書けないなど）。上限なしで走らせる
+    if ((await remainingMsOf(io, slot, await readInfoOf(io, slot))) <= 0) {
+      await io.removeTree(slot)
+      if (await claimSlot(slot)) return { slot, ok: true }
+    }
+  }
+  return { ok: false }
+}
+
+const releaseSlot = async (io: Io, slot: string | undefined): Promise<void> => {
+  if (slot) await io.removeTree(slot)
+}
+
+/** どれかの枠が空くまで（最長 SLOT_WAIT_MS）待つ。 */
+async function waitSlot(io: Io, dir: string, maxParallel: number): Promise<void> {
+  const checks = Array.from({ length: maxParallel }, (_, i) => `[ -d "$1/slot.${i}" ]`)
+  await io.run(['sh', '-c', `while ${checks.join(' && ')}; do sleep ${POLL_SECONDS}; done`, 'sh', dir], { timeoutMs: SLOT_WAIT_MS })
+}
+
+/** 共有も直列化もしない実行を、同時実行枠だけ取って走らせる（share: false 用）。 */
+export async function runWithSlot(
+  io: Io,
+  maxParallel: number,
+  timeoutMs: number,
+  execute: (pidFiles: string[]) => Promise<SharedOutcome>,
+): Promise<SharedOutcome> {
+  if (maxParallel <= 0) return execute([])
+  const dir = await sharedDir(io)
+  for (;;) {
+    const { slot, ok } = await takeSlot(io, dir, maxParallel, timeoutMs)
+    if (ok) {
+      try {
+        return await execute(slot ? [join(slot, 'pid')] : [])
+      } finally {
+        await releaseSlot(io, slot)
+      }
+    }
+    await waitSlot(io, dir, maxParallel)
+  }
+}
 
 /** ファイル一覧を昇順・重複なしにそろえる。 */
 const normalizeFiles = (files: readonly string[]): string[] => [...new Set(files)].sort()
@@ -99,30 +220,32 @@ const normalizeFiles = (files: readonly string[]): string[] => [...new Set(files
 /** ロック・結果ファイルの名前の元になる、キーとファイル一覧の組のハッシュ。 */
 export const shareId = (key: string, files: readonly string[]): string => `${hashKey(key)}.${hashKey(JSON.stringify(normalizeFiles(files)))}`
 
-type Info = { started?: number; limit: number; key?: string; files?: string[] }
-
 /** key の実行を共有する。files はこの実行が対象にするファイル一覧。戻り値の shared は「他の側の結果を受け取った」こと。 */
 export async function runShared(
   io: Io,
   key: string,
   files: readonly string[],
   timeoutMs: number,
-  execute: (pidFiles: string[]) => Promise<SharedOutcome>,
+  execute: SharedExecute,
   hooks: Hooks = {},
 ): Promise<{ outcome: SharedOutcome; shared: boolean }> {
-  const mine = normalizeFiles(files)
+  let mine = normalizeFiles(files)
   const dir = await sharedDir(io)
   const keyPrefix = `${hashKey(key)}.`
-  const ownLock = join(dir, `${shareId(key, mine)}.run`)
+  let ownLock = join(dir, `${shareId(key, mine)}.run`)
   const resultOf = (lock: string): string => `${lock.slice(0, -'.run'.length)}.result.json`
+  const maxParallel = hooks.maxParallel ?? 0
 
   const serialLock = join(dir, `${hashKey(hooks.serial ?? key)}.serial`)
+  // 待っている側が対象ファイル一覧を置く場所と、その中の自分の分（出していなければ undefined）。
+  const queueDir = join(dir, `${hashKey(hooks.serial ?? key)}.queue`)
+  let request: string | undefined
 
-  const mkdirAtomic = async (path: string): Promise<boolean> => (await io.run(['sh', '-c', 'mkdir -p "$1" && mkdir "$2"', 'sh', dir, path])).exitCode === 0
+  const mkdirAtomic = (path: string): Promise<boolean> => mkdirAtomicIn(io, dir, path)
   const claim = (): Promise<boolean> => mkdirAtomic(ownLock)
 
-  /** 排他ロックを持った状態で実行し、結果を書いてから両方のロックを外す。 */
-  const lead = async (): Promise<SharedOutcome> => {
+  /** 排他ロック（と同時実行枠）を持った状態で実行し、結果を書いてから全部のロックを外す。 */
+  const lead = async (slot: string | undefined): Promise<SharedOutcome> => {
     const resultFile = resultOf(ownLock)
     try {
       const started = await io.now()
@@ -131,7 +254,8 @@ export async function runShared(
       await io.writeFile(join(serialLock, 'info.json'), JSON.stringify({ started, timeoutMs }))
       await io.removeFiles([resultFile])
       try {
-        const outcome = await execute([join(serialLock, 'pid'), join(ownLock, 'pid')])
+        const pidFiles = [join(serialLock, 'pid'), join(ownLock, 'pid'), ...(slot ? [join(slot, 'pid')] : [])]
+        const outcome = await execute(pidFiles, mine)
         await io.writeFile(resultFile, JSON.stringify({ key, files: mine, ...outcome }))
         return outcome
       } finally {
@@ -139,42 +263,65 @@ export async function runShared(
       }
     } finally {
       await io.removeTree(serialLock)
+      await releaseSlot(io, slot)
     }
   }
 
-  const readInfo = async (lock: string): Promise<Info | undefined> => {
-    const text = await io.readFile(join(lock, 'info.json'))
-    try {
-      const info: unknown = text === undefined ? undefined : JSON.parse(text)
-      if (!isDict(info)) return undefined
-      return {
-        started: Number.isFinite(Number(info.started)) ? Number(info.started) : undefined,
-        limit: Number(info.timeoutMs) || 0,
-        key: typeof info.key === 'string' ? info.key : undefined,
-        files: Array.isArray(info.files) ? info.files.map(String) : undefined,
-      }
-    } catch {
-      return undefined // 書きかけは info 無しと同じに扱う
-    }
-  }
+  const readInfo = (lock: string): Promise<Info | undefined> => readInfoOf(io, lock)
+  const remainingMs = (lock: string, info: Info | undefined): Promise<number> => remainingMsOf(io, lock, info)
 
-  /** ロックが生きている残り時間。期限切れ、またはコマンドのプロセスが終わっていれば 0 以下。 */
-  const remainingMs = async (lock: string, info: Info | undefined): Promise<number> => {
+  // ---- 待っている側の対象ファイルをまとめる（batching） ----
+  //
+  // 受け取れない（対象ファイルを含まない）同じ直列化の単位の実行を待つ側は、自分のキーと対象ファイル一覧を
+  // <serial のハッシュ>.queue/<shareId>.json に置く。次に実行側になった者は、同じキーの分を自分の一覧に足して
+  // （和集合で）走らせ、置かれた分を消す。待っていた側は、その実行が自分の一覧を含むので受け取れる。
+  // 同じコマンドをエージェントの数だけ順に走らせる代わりに、溜まった分を 1 回で済ませるため。
+  // 置いた分は runShared を抜けるときに自分で消す（実行側に消されていればそれでよい）。
+
+  /** 自分の対象ファイル一覧を queue に置く（1 回だけ。一覧が空なら置かない: 空の一覧は何にでも含まれる）。 */
+  const postRequest = async (): Promise<void> => {
+    if (request !== undefined || mine.length === 0) return
+    request = join(queueDir, `${shareId(key, mine)}.json`)
+    await io.writeFile(request, JSON.stringify({ started: await io.now(), key, files: mine }))
+  }
+  const withdrawRequest = async (): Promise<void> => {
+    if (request === undefined) return
+    await io.removeFiles([request])
+    request = undefined
+  }
+  /**
+   * queue に置かれた同じキーの一覧を自分の一覧に足し、置かれた分を消す。排他ロックを取った直後、実行のロックを作る前に
+   * 呼ぶ（一覧が変わると実行のロックの名前も変わる）。自分の一覧が空なら何もしない。
+   */
+  const absorbRequests = async (): Promise<void> => {
+    if (mine.length === 0) return
     const now = await io.now()
-    const started = info?.started ?? (await io.stat(lock))?.mtimeMs ?? now
-    const left = started + (info?.limit ?? 0) + GRACE_MS - now
-    if (left <= 0) return left
-    const pid = (await io.readFile(join(lock, 'pid')))?.trim()
-    if (pid) {
-      if (/^\d+$/.test(pid) && (await io.run(['sh', '-c', 'kill -0 "$1" 2>/dev/null', 'sh', pid])).exitCode === 0) return left
-      // コマンドは終わっている。実行側が結果を書いてロックを外す途中かもしれないので、少しの間ロックが消えるのを待つ。
-      // 消えたら生きている扱いで返す（呼び出し側は待機に入り、消えているのですぐ抜けて結果を読む）。消えなければ死亡。
-      const polls = Math.ceil(DEAD_GRACE_MS / (Number(POLL_SECONDS) * 1000))
-      const script = `i=0; while [ -d "$1" ] && [ "$i" -lt ${polls} ]; do sleep ${POLL_SECONDS}; i=$((i+1)); done; [ ! -d "$1" ]`
-      return (await io.run(['sh', '-c', script, 'sh', lock])).exitCode === 0 ? GRACE_MS : 0
+    const union = [...mine]
+    const consumed: string[] = []
+    for (const e of await io.list(queueDir)) {
+      if (e.kind !== 'file' || !e.name.endsWith('.json')) continue
+      const path = join(queueDir, e.name)
+      const text = await io.readFile(path)
+      if (text === undefined) continue
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(text)
+      } catch {
+        continue
+      }
+      if (!isDict(parsed)) continue
+      const started = Number(parsed.started)
+      if (Number.isFinite(started) && started < now - REQUEST_STALE_MS) {
+        consumed.push(path)
+        continue
+      }
+      if (parsed.key !== key || !Array.isArray(parsed.files)) continue
+      union.push(...parsed.files.map(String))
+      consumed.push(path)
     }
-    // PID がまだ無い。info があるのに GRACE_MS を過ぎても書かれないなら、コマンドを起動する前に止められている。
-    return info && now - started > GRACE_MS ? 0 : left
+    if (consumed.length > 0) await io.removeFiles(consumed)
+    mine = normalizeFiles(union)
+    ownLock = join(dir, `${shareId(key, mine)}.run`)
   }
 
   const covers = (theirs: readonly string[] | undefined): boolean => theirs !== undefined && mine.every((f) => theirs.includes(f))
@@ -222,63 +369,91 @@ export async function runShared(
     announced = true
     await hooks.onWait?.()
   }
-  /** ロックが消えるか、そのコマンドのプロセスが終わるまで待つ。終わっていたら、呼び出し側が次のラウンドで奪い直す。 */
+  /**
+   * ロックが消えるか、そのコマンドのプロセスが終わるか、ロックが別の実行のものに替わるまで待つ。終わっていたら、呼び出し側が
+   * 次のラウンドで奪い直す。消えてから次の実行側が同じパスで作り直すのがポーリングの間に収まると「消えた」ことを見逃すので、
+   * 待ち始めたときの info.json の中身を覚えておき、変わったら起きる（次のラウンドで新しい実行を見に行く）。
+   */
   const waitGone = async (path: string, left: number): Promise<void> => {
-    const script = `while [ -d "$1" ]; do if [ -s "$1/pid" ] && ! kill -0 "$(cat "$1/pid")" 2>/dev/null; then exit 3; fi; sleep ${POLL_SECONDS}; done`
-    await io.run(['sh', '-c', script, 'sh', path], { timeoutMs: Math.min(Math.max(left, 1), MAX_WAIT_MS) })
+    const info = (await io.readFile(join(path, 'info.json'))) ?? ''
+    const script =
+      'while [ -d "$1" ]; do ' +
+      'if [ -n "$2" ] && [ "$(cat "$1/info.json" 2>/dev/null)" != "$2" ]; then exit 4; fi; ' +
+      `if [ -s "$1/pid" ] && ! kill -0 "$(cat "$1/pid")" 2>/dev/null; then exit 3; fi; sleep ${POLL_SECONDS}; done`
+    await io.run(['sh', '-c', script, 'sh', path, info], { timeoutMs: Math.min(Math.max(left, 1), MAX_WAIT_MS) })
   }
 
-  for (let round = 0; round < MAX_ROUNDS; round++) {
-    const found = await findRunning()
-    if (!found.lock && found.pending) {
-      // info が現れるのを待って探し直す。猶予を過ぎれば pending でなくなるので、ラウンドは消費しない
-      await io.run(['sleep', POLL_SECONDS])
-      round--
-      continue
-    }
-    let target = found.lock
-    if (!target) {
-      // 受け取れる実行が無い。同じ直列化の単位の実行が走っていれば、終わるまで待ってから探し直す。
-      if (!(await mkdirAtomic(serialLock))) {
-        const info = await readInfo(serialLock)
-        const left = await remainingMs(serialLock, info)
-        if (left <= 0) {
-          await io.removeTree(serialLock)
-          continue
-        }
-        if (!info) {
-          // ロックが無いのに作れない（.gate-status に書けないなど）。ラウンドを消費して、尽きたら共有せず自分で実行する
-          if (!(await io.exists(serialLock))) continue
-          // 実行側が排他ロックを取ってから info を書くまでの隙間。書かれるのを待って探し直す（ラウンドは消費しない）
-          await io.run(['sleep', POLL_SECONDS])
+  try {
+    return await rounds()
+  } finally {
+    await withdrawRequest()
+  }
+
+  async function rounds(): Promise<{ outcome: SharedOutcome; shared: boolean }> {
+    for (let round = 0; round < MAX_ROUNDS; round++) {
+      const found = await findRunning()
+      if (!found.lock && found.pending) {
+        // info が現れるのを待って探し直す。猶予を過ぎれば pending でなくなるので、ラウンドは消費しない
+        await io.run(['sleep', POLL_SECONDS])
+        round--
+        continue
+      }
+      let target = found.lock
+      if (!target) {
+        // 実行側になるには同時実行枠が要る。空いていなければ空くのを待って探し直す（その間に受け取れる実行が
+        // 始まっていれば、次のラウンドでそれを待つ）。ラウンドは消費しない。
+        const { slot, ok } = await takeSlot(io, dir, maxParallel, timeoutMs)
+        if (!ok) {
+          await waitSlot(io, dir, maxParallel)
           round--
           continue
         }
-        // info があれば実行のロックの info も書かれている。受け取れる実行なら、それを待つ。
-        const again = await findRunning()
-        if (!again.lock) {
-          await announce()
-          await waitGone(serialLock, left)
-          continue
+        // 受け取れる実行が無い。同じ直列化の単位の実行が走っていれば、終わるまで待ってから探し直す。
+        if (!(await mkdirAtomic(serialLock))) {
+          await releaseSlot(io, slot)
+          const info = await readInfo(serialLock)
+          const left = await remainingMs(serialLock, info)
+          if (left <= 0) {
+            await io.removeTree(serialLock)
+            continue
+          }
+          if (!info) {
+            // ロックが無いのに作れない（.gate-status に書けないなど）。ラウンドを消費して、尽きたら共有せず自分で実行する
+            if (!(await io.exists(serialLock))) continue
+            // 実行側が排他ロックを取ってから info を書くまでの隙間。書かれるのを待って探し直す（ラウンドは消費しない）
+            await io.run(['sleep', POLL_SECONDS])
+            round--
+            continue
+          }
+          // info があれば実行のロックの info も書かれている。受け取れる実行なら、それを待つ。
+          const again = await findRunning()
+          if (!again.lock) {
+            // 受け取れない実行を待つ。自分の一覧を置いておき、次の実行側にまとめて走らせてもらう。
+            await postRequest()
+            await announce()
+            await waitGone(serialLock, left)
+            continue
+          }
+          target = again.lock
+        } else {
+          await absorbRequests()
+          if (await claim()) return { outcome: await lead(slot), shared: false }
+          await releaseSlot(io, slot)
+          await io.removeTree(serialLock)
+          target = ownLock // 同じ一覧の実行が info を書く前だった場合など。そのロックを待つ
         }
-        target = again.lock
-      } else if (await claim()) {
-        return { outcome: await lead(), shared: false }
-      } else {
-        await io.removeTree(serialLock)
-        target = ownLock // 同じ一覧の実行が info を書く前だった場合など。そのロックを待つ
       }
+      const left = await remainingMs(target, await readInfo(target))
+      if (left <= 0) {
+        await io.removeTree(target)
+        continue
+      }
+      await announce()
+      await waitGone(target, left)
+      if (await io.exists(target)) continue
+      const outcome = await readOutcome(resultOf(target))
+      if (outcome) return { outcome, shared: true }
     }
-    const left = await remainingMs(target, await readInfo(target))
-    if (left <= 0) {
-      await io.removeTree(target)
-      continue
-    }
-    await announce()
-    await waitGone(target, left)
-    if (await io.exists(target)) continue
-    const outcome = await readOutcome(resultOf(target))
-    if (outcome) return { outcome, shared: true }
+    return { outcome: await runWithSlot(io, maxParallel, timeoutMs, (pidFiles) => execute(pidFiles, mine)), shared: false }
   }
-  return { outcome: await execute([]), shared: false }
 }
