@@ -59,11 +59,18 @@
 //              実行中でも待たずに自分で実行する（既定は共有: 進行中の実行があれば起動せず完了を待って同じ結果を
 //              受け取る。ただし進行中の実行の対象ファイルが自分の対象ファイルをすべて含むときだけ。含まないときや
 //              環境変数・root・cwd が違うときも、name（無ければ cmd）が同じ実行が走っている間は起動せず、終わるのを待って
-//              から実行する＝同じコマンドは直列。同じリポジトリの別の git worktree で動くエージェントの間でも直列になる
+//              から実行する＝同じコマンドは直列。待っている間に自分の対象ファイル一覧を置いておき、次に実行側になった
+//              エージェントが待っている分をまとめて（対象ファイルの和集合で）1 回走らせるので、待っていた側はその結果を
+//              受け取る（エージェントの数だけ順に走らせない）。同じリポジトリの別の git worktree で動くエージェントの間でも直列になる
 //              （ロックは ~/.claude/.gate-status/shared/<project_id>/ に置く）。src/shared-run.ts）。
 //              files: false を書くと、そのコマンドは対象ファイルを使わないものとして、共有の判定上の対象ファイルを
 //              空として扱う（対象ファイルが違っても共有される）。CLAUDE_GATE_FILES 自体は従来どおり渡る。
 //              share: false と併記した場合は share: false が優先される。
+// max_parallel: トップレベル。プロジェクト全体（全エージェント・全 worktree）で同時に走らせる gate コマンドの数の上限
+//              （既定 2。false で無制限）。実行側になるエージェントは先に枠（~/.claude/.gate-status/shared/<project_id>/slot.<i>/）
+//              を 1 つ取り、空いていなければ空くのを待つ。共有の結果を受け取るだけなら枠は要らない。parallel の中の
+//              コマンドや share: false のコマンドにも効く。重いコマンドをエージェントの数だけ同時に走らせて CPU を取り合い、
+//              全員が何倍も遅くなる（タイムアウトする）のを防ぐため。
 // CLAUDE_GATE_FILES:
 //              run / consistency_checks の各コマンドには、そのとき対象になっているファイルのルート相対
 //              パスが環境変数 CLAUDE_GATE_FILES で渡る。値は shlex 引用済み・重複排除・昇順で、空白区切りの
@@ -118,7 +125,7 @@ import {
   saveSummary,
   withdrawRunning,
 } from './running-registry.ts'
-import { runShared, sharedDir } from './shared-run.ts'
+import { runShared, runWithSlot, sharedDir } from './shared-run.ts'
 import { shellQuote, shellSplit } from './shell.ts'
 import { which } from './which.ts'
 
@@ -137,6 +144,8 @@ const FAIL_TAIL_LINES = 60 // 失敗コマンド1本あたりに載せる出力�
 const FAIL_DETAIL_MAX = 12000 // 失敗詳細全体の最大文字数
 const UNMATCHED_SHOWN = 5 // どのルールにもマッチしなかったファイルを 1 行に列挙する最大数
 const MAX_TIMEOUT_MS = 600_000 // $.process.run の上限（10 分）
+/** プロジェクト全体（全エージェント・全 worktree）で同時に走らせる gate コマンドの数の既定値。gate.yaml の max_parallel で上書き可（false で無制限）。 */
+export const DEFAULT_MAX_PARALLEL = 2
 
 // ---- 設定の型（YAML はユーザー入力なので、実行時は緩く扱う） ----
 export type RunItem = string | { cmd?: string; name?: string; timeout?: number; share?: boolean; files?: boolean } | { parallel?: RunItem[] }
@@ -150,7 +159,16 @@ export type GateRule = Setting & {
   timeout?: number
 }
 export type GateCheck = Setting & { name: string; dir?: string; run?: RunItem[]; timeout?: number }
-export type GateConfig = Setting & { report_success?: boolean; rules?: GateRule[]; consistency_checks?: GateCheck[] }
+export type GateConfig = Setting & { report_success?: boolean; max_parallel?: number | false; rules?: GateRule[]; consistency_checks?: GateCheck[] }
+
+/** gate.yaml の max_parallel（同時実行枠の数）。省略時は DEFAULT_MAX_PARALLEL、false か 0 以下は無制限（0）。数値でない値は既定値として扱う。 */
+export function maxParallelOf(cfg: GateConfig | null | undefined): number {
+  const v = cfg?.max_parallel
+  if (v === undefined || v === null) return DEFAULT_MAX_PARALLEL
+  if (v === false) return 0
+  if (typeof v !== 'number' || !Number.isFinite(v)) return DEFAULT_MAX_PARALLEL
+  return Math.max(0, Math.trunc(v))
+}
 type Key = string // `${root}\0${rel}`
 type Env = Record<string, string>
 type Pending = Record<string, Record<string, string[]>>
@@ -411,6 +429,8 @@ export class Gate {
   private stopTicking: (() => void) | undefined
   /** 全エージェントの実行中一覧（running-registry）の中での、この Gate の持ち分の名前。 */
   private readonly runningOwner: string
+  /** 同時実行枠の数（gate.yaml の max_parallel。loadAction が設定する。0 は無制限）。 */
+  private maxParallel = DEFAULT_MAX_PARALLEL
   /** この Gate が実行した（または共有で結果を受け取った）コマンドの (root, cwd, cmd) キー。同じ回で控えを二重に走らせないために使う。 */
   private readonly ranThisRun = new Set<string>()
   /** この Gate が実際に実行した（または共有で結果を受け取った）コマンドの表示名。成功報告に使う。 */
@@ -790,18 +810,24 @@ export class Gate {
     scope: ExecScope,
     onWait: () => Promise<void>,
   ): Promise<Awaited<ReturnType<Gate['runCmd']>>> {
-    if (scope.share === false) return this.runCmd(cmd, cwd, timeout, name, extraEnv)
+    const timeoutMs = Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS)
+    if (scope.share === false) return runWithSlot(this.io, this.maxParallel, timeoutMs, (pidFiles) => this.runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles))
     const env = { ...this.baseEnv, ...extraEnv }
     const key = shareKey(scope.root, cwd, cmd, env)
     const r = await runShared(
       this.io,
       key,
       shareFiles(env, scope.files !== false),
-      Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS),
-      (pidFiles) => this.runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles),
+      timeoutMs,
+      (pidFiles, files) => {
+        // 実行側になったときの対象ファイルは、待っている側の分をまとめた和集合（自分の分だけなら元のまま）。
+        const runEnv = scope.files !== false && files.length > 0 ? mergeFilesEnv(extraEnv ?? {}, filesEnv(files)) : extraEnv
+        return this.runCmd(cmd, cwd, timeout, name, runEnv, pidFiles)
+      },
       {
         onWait,
         serial: serialKey(name, cmd),
+        maxParallel: this.maxParallel,
       },
     )
     if (!r.shared) return r.outcome
@@ -1079,7 +1105,9 @@ export class Gate {
   async loadAction(path: string): Promise<GateConfig | null> {
     const text = await this.io.readFile(path)
     if (text === undefined) throw new Error(this.t('gate.cannotReadYaml', { path }))
-    return parseYaml(text) as GateConfig | null
+    const cfg = parseYaml(text) as GateConfig | null
+    if (path === this.action) this.maxParallel = maxParallelOf(cfg)
+    return cfg
   }
 
   // ---- rules フェーズ ----

@@ -44,7 +44,7 @@ func TestRunShared(t *testing.T) {
 	t.Run("concurrent callers with the same key execute once and share the outcome", func(t *testing.T) {
 		WithTmp(func(proj string) {
 			var runs atomic.Int32
-			execute := func([]string) SharedOutcome {
+			execute := func([]string, []string) SharedOutcome {
 				n := runs.Add(1)
 				sleepMs(400)
 				return outcomeOf(fmt.Sprintf("run%d", n), false)
@@ -65,7 +65,7 @@ func TestRunShared(t *testing.T) {
 	t.Run("different keys execute in parallel", func(t *testing.T) {
 		WithTmp(func(proj string) {
 			var runs atomic.Int32
-			execute := func([]string) SharedOutcome {
+			execute := func([]string, []string) SharedOutcome {
 				runs.Add(1)
 				sleepMs(300)
 				return outcomeOf("x")
@@ -81,7 +81,7 @@ func TestRunShared(t *testing.T) {
 	t.Run("a finished run is not reused", func(t *testing.T) {
 		WithTmp(func(proj string) {
 			runs := 0
-			execute := func([]string) SharedOutcome { runs++; return outcomeOf(fmt.Sprintf("run%d", runs)) }
+			execute := func([]string, []string) SharedOutcome { runs++; return outcomeOf(fmt.Sprintf("run%d", runs)) }
 			first := RunShared(newIo(proj), "k", nil, 10_000, execute, SharedHooks{})
 			second := RunShared(newIo(proj), "k", nil, 10_000, execute, SharedHooks{})
 			assert.Equal(t, []string{"run1", "run2"}, []string{first.Outcome.Out, second.Outcome.Out})
@@ -94,7 +94,7 @@ func TestRunShared(t *testing.T) {
 			lock := filepath.Join(SharedDirOf(proj), ShareID("k", nil)+".run")
 			require.NoError(t, os.MkdirAll(lock, 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(lock, "info.json"), []byte(`{"started":1000,"timeoutMs":1000,"key":"k","files":[]}`), 0o644))
-			r := RunShared(newIo(proj), "k", nil, 10_000, func([]string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
+			r := RunShared(newIo(proj), "k", nil, 10_000, func([]string, []string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
 			assert.Equal(t, "mine", r.Outcome.Out)
 			assert.False(t, r.Shared)
 		})
@@ -103,7 +103,7 @@ func TestRunShared(t *testing.T) {
 	t.Run("when the executing side throws, the waiting side runs it itself", func(t *testing.T) {
 		WithTmp(func(proj string) {
 			var runs atomic.Int32
-			execute := func([]string) SharedOutcome {
+			execute := func([]string, []string) SharedOutcome {
 				if runs.Add(1) == 1 {
 					sleepMs(300)
 					panic("boom")
@@ -147,7 +147,7 @@ func TestRunSharedWithFileLists(t *testing.T) {
 	overlap := func(t *testing.T, proj string, leaderFiles, waiterFiles []string) (int32, SharedResult) {
 		t.Helper()
 		var n atomic.Int32
-		execute := func([]string) SharedOutcome {
+		execute := func([]string, []string) SharedOutcome {
 			v := n.Add(1)
 			sleepMs(500)
 			return outcomeOf(fmt.Sprintf("run%d", v))
@@ -211,10 +211,12 @@ func TestRunSharedWithFileLists(t *testing.T) {
 		})
 	})
 
-	t.Run("runs that cannot be shared do not overlap: the second starts after the first ends", func(t *testing.T) {
+	t.Run("runs that cannot be shared do not overlap, and the waiters' file lists are batched into the next run", func(t *testing.T) {
 		WithTmp(func(proj string) {
 			var active, peak, runs, waited atomic.Int32
-			execute := func([]string) SharedOutcome {
+			var mu sync.Mutex
+			var ranWith [][]string
+			execute := func(_ []string, files []string) SharedOutcome {
 				n := runs.Add(1)
 				cur := active.Add(1)
 				for {
@@ -223,6 +225,9 @@ func TestRunSharedWithFileLists(t *testing.T) {
 						break
 					}
 				}
+				mu.Lock()
+				ranWith = append(ranWith, files)
+				mu.Unlock()
 				sleepMs(300)
 				active.Add(-1)
 				return outcomeOf(fmt.Sprintf("run%d", n))
@@ -232,17 +237,43 @@ func TestRunSharedWithFileLists(t *testing.T) {
 					return RunShared(newIo(proj), "k", files, 10_000, execute, SharedHooks{OnWait: func() { waited.Add(1) }})
 				}
 			}
-			parallel(call("a.py"), call("b.py"), call("c.py"))
-			assert.EqualValues(t, 3, runs.Load())
+			first := call("a.py")
+			results := parallel(first, func() SharedResult {
+				sleepMs(100) // a.py が実行側になってから b.py と c.py が来る
+				return parallel(call("b.py"), call("c.py"))[0]
+			})
+			// a.py の実行中に来た b.py と c.py は受け取れないので待ち、終わったあと 1 回にまとめて走る（一方が実行側、他方が受け取る）。
+			assert.EqualValues(t, 2, runs.Load())
 			assert.EqualValues(t, 1, peak.Load())
 			assert.EqualValues(t, 2, waited.Load())
+			assert.Equal(t, [][]string{{"a.py"}, {"b.py", "c.py"}}, ranWith)
+			assert.False(t, results[0].Shared)
+			// 置かれた一覧は消えている
+			assert.Empty(t, listNames(SharedDirOf(proj), ".queue"))
+		})
+	})
+
+	t.Run("a stale request left by a dead waiter is dropped, not batched", func(t *testing.T) {
+		WithTmp(func(proj string) {
+			queue := filepath.Join(SharedDirOf(proj), HashKey("k")+".queue")
+			require.NoError(t, os.MkdirAll(queue, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(queue, "old.json"), []byte(`{"started":1000,"key":"k","files":["z.py"]}`), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(queue, "other.json"), []byte(JSONStringify(OMap{{"started", time.Now().UnixMilli()}, {"key", "other"}, {"files", []string{"o.py"}}})), 0o644))
+			var ranWith []string
+			RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func(_ []string, files []string) SharedOutcome {
+				ranWith = files
+				return outcomeOf("x")
+			}, SharedHooks{})
+			assert.Equal(t, []string{"a.py"}, ranWith)
+			assert.False(t, exists(filepath.Join(queue, "old.json")))
+			assert.True(t, exists(filepath.Join(queue, "other.json")), "another key's request is left for its own leader")
 		})
 	})
 
 	t.Run("different keys with the same serial do not overlap", func(t *testing.T) {
 		WithTmp(func(proj string) {
 			var active, peak atomic.Int32
-			execute := func([]string) SharedOutcome {
+			execute := func([]string, []string) SharedOutcome {
 				cur := active.Add(1)
 				for {
 					p := peak.Load()
@@ -267,7 +298,7 @@ func TestRunSharedWithFileLists(t *testing.T) {
 			lock := filepath.Join(SharedDirOf(proj), HashKey("k")+".serial")
 			require.NoError(t, os.MkdirAll(lock, 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(lock, "info.json"), []byte(`{"started":1000,"timeoutMs":1000}`), 0o644))
-			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
+			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string, []string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
 			assert.Equal(t, "mine", r.Outcome.Out)
 			assert.False(t, Exists(lock))
 		})
@@ -304,7 +335,7 @@ func TestRunSharedLeftoverLocks(t *testing.T) {
 		WithTmp(func(proj string) {
 			lock := leftLock(t, proj, "k", infoNow(600_000, 0), deadPid(t))
 			t0 := time.Now()
-			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
+			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string, []string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
 			assert.Equal(t, "mine", r.Outcome.Out)
 			assert.Less(t, time.Since(t0), 3*time.Second)
 			assert.False(t, Exists(lock))
@@ -315,7 +346,7 @@ func TestRunSharedLeftoverLocks(t *testing.T) {
 		WithTmp(func(proj string) {
 			leftLock(t, proj, "k", infoNow(600_000, 60_000), 0)
 			t0 := time.Now()
-			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
+			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string, []string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
 			assert.Equal(t, "mine", r.Outcome.Out)
 			assert.Less(t, time.Since(t0), 3*time.Second)
 		})
@@ -332,7 +363,7 @@ func TestRunSharedLeftoverLocks(t *testing.T) {
 			}()
 			lock := leftLock(t, proj, "k", infoNow(600_000, 0), child.Process.Pid)
 			var startedAt int64
-			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string) SharedOutcome {
+			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string, []string) SharedOutcome {
 				startedAt = time.Now().UnixNano()
 				return outcomeOf("mine")
 			}, SharedHooks{})
@@ -351,7 +382,7 @@ func TestRunSharedLeftoverLocks(t *testing.T) {
 			require.NoError(t, os.WriteFile(shared, nil, 0o644))
 			done := make(chan SharedResult, 1)
 			go func() {
-				done <- RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
+				done <- RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string, []string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
 			}()
 			select {
 			case r := <-done:
@@ -386,7 +417,7 @@ func TestRunSharedLeftoverLocks(t *testing.T) {
 				require.NoError(t, os.RemoveAll(serial))
 			}()
 			runs := 0
-			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string) SharedOutcome { runs++; return outcomeOf("mine") }, SharedHooks{})
+			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string, []string) SharedOutcome { runs++; return outcomeOf("mine") }, SharedHooks{})
 			<-finished
 			assert.Equal(t, 0, runs)
 			assert.True(t, r.Shared)
@@ -397,7 +428,7 @@ func TestRunSharedLeftoverLocks(t *testing.T) {
 	t.Run("the leader passes pid files inside both locks to execute, and both locks are gone afterwards", func(t *testing.T) {
 		WithTmp(func(proj string) {
 			var got []string
-			RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func(pidFiles []string) SharedOutcome {
+			RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func(pidFiles []string, _ []string) SharedOutcome {
 				got = pidFiles
 				return outcomeOf("x")
 			}, SharedHooks{})
@@ -420,7 +451,7 @@ func TestRunSharedLeftoverLocks(t *testing.T) {
 	t.Run("a run with a different key is not joined even when the files match", func(t *testing.T) {
 		WithTmp(func(proj string) {
 			var runs atomic.Int32
-			execute := func([]string) SharedOutcome { runs.Add(1); sleepMs(300); return outcomeOf("x") }
+			execute := func([]string, []string) SharedOutcome { runs.Add(1); sleepMs(300); return outcomeOf("x") }
 			call := func(k string) func() SharedResult {
 				return func() SharedResult {
 					return RunShared(newIo(proj), k, []string{"a.py"}, 10_000, execute, SharedHooks{})
@@ -436,7 +467,7 @@ func TestRunSharedLeftoverLocks(t *testing.T) {
 			lock := filepath.Join(SharedDirOf(proj), ShareID("k", []string{"a.py", "b.py"})+".run")
 			require.NoError(t, os.MkdirAll(lock, 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(lock, "info.json"), []byte(`{"started":1000,"timeoutMs":1000,"key":"k","files":["a.py","b.py"]}`), 0o644))
-			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
+			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string, []string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
 			assert.Equal(t, "mine", r.Outcome.Out)
 			assert.False(t, r.Shared)
 		})
@@ -449,7 +480,7 @@ func TestRunSharedLeftoverLocks(t *testing.T) {
 			var runs atomic.Int32
 			waiter := make(chan SharedResult, 1)
 			go func() {
-				waiter <- RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string) SharedOutcome {
+				waiter <- RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string, []string) SharedOutcome {
 					return outcomeOf(fmt.Sprintf("run%d", runs.Add(1)))
 				}, SharedHooks{})
 			}()
@@ -474,7 +505,7 @@ func TestRunSharedLeftoverLocks(t *testing.T) {
 			require.NoError(t, os.MkdirAll(lock, 0o755))
 			old := time.Now().Add(-60 * time.Second)
 			require.NoError(t, os.Chtimes(lock, old, old))
-			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
+			r := RunShared(newIo(proj), "k", []string{"a.py"}, 10_000, func([]string, []string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{})
 			assert.Equal(t, "mine", r.Outcome.Out)
 			assert.False(t, r.Shared)
 		})
@@ -486,5 +517,98 @@ func TestHashKey(t *testing.T) {
 		assert.Len(t, HashKey("k"), 14)
 		assert.Equal(t, HashKey("k"), HashKey("k"))
 		assert.NotEqual(t, HashKey("k1"), HashKey("k2"))
+	})
+}
+
+// listNames は dir 直下の suffix で終わる名前の一覧。
+func listNames(dir, suffix string) []string {
+	var out []string
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), suffix) {
+			if inner, _ := os.ReadDir(filepath.Join(dir, e.Name())); len(inner) > 0 {
+				out = append(out, e.Name())
+			}
+		}
+	}
+	return out
+}
+
+func exists(path string) bool { _, err := os.Stat(path); return err == nil }
+
+func TestMaxParallel(t *testing.T) {
+	// 同時に走っている数のピークを数える execute。
+	counter := func(active, peak *atomic.Int32, ms int) SharedExecute {
+		return func([]string, []string) SharedOutcome {
+			cur := active.Add(1)
+			for {
+				p := peak.Load()
+				if cur <= p || peak.CompareAndSwap(p, cur) {
+					break
+				}
+			}
+			sleepMs(ms)
+			active.Add(-1)
+			return outcomeOf("x")
+		}
+	}
+
+	t.Run("different commands run at most max_parallel at a time, and all of them run", func(t *testing.T) {
+		WithTmp(func(proj string) {
+			var active, peak, runs atomic.Int32
+			execute := counter(&active, &peak, 250)
+			call := func(k string) func() SharedResult {
+				return func() SharedResult {
+					r := RunShared(newIo(proj), k, nil, 10_000, func(p []string, f []string) SharedOutcome { runs.Add(1); return execute(p, f) }, SharedHooks{MaxParallel: 2})
+					return r
+				}
+			}
+			parallel(call("k1"), call("k2"), call("k3"), call("k4"))
+			assert.EqualValues(t, 4, runs.Load())
+			assert.EqualValues(t, 2, peak.Load())
+			assert.Empty(t, listNames(SharedDirOf(proj), ""), "slots and locks are released")
+		})
+	})
+
+	t.Run("max_parallel 0 means no limit", func(t *testing.T) {
+		WithTmp(func(proj string) {
+			var active, peak atomic.Int32
+			execute := counter(&active, &peak, 250)
+			call := func(k string) func() SharedResult {
+				return func() SharedResult {
+					return RunShared(newIo(proj), k, nil, 10_000, execute, SharedHooks{MaxParallel: 0})
+				}
+			}
+			parallel(call("k1"), call("k2"), call("k3"))
+			assert.EqualValues(t, 3, peak.Load())
+		})
+	})
+
+	t.Run("a slot left by a dead process is taken over", func(t *testing.T) {
+		WithTmp(func(proj string) {
+			slot := filepath.Join(SharedDirOf(proj), "slot.0")
+			require.NoError(t, os.MkdirAll(slot, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(slot, "info.json"), []byte(`{"started":1000,"timeoutMs":1000}`), 0o644))
+			r := RunShared(newIo(proj), "k", nil, 10_000, func([]string, []string) SharedOutcome { return outcomeOf("mine") }, SharedHooks{MaxParallel: 1})
+			assert.Equal(t, "mine", r.Outcome.Out)
+			assert.False(t, exists(slot))
+		})
+	})
+
+	t.Run("RunWithSlot (share: false) takes a slot too and writes the command's pid into it", func(t *testing.T) {
+		WithTmp(func(proj string) {
+			var active, peak atomic.Int32
+			execute := counter(&active, &peak, 250)
+			var pidFiles []string
+			call := func() func() SharedOutcome {
+				return func() SharedOutcome {
+					return RunWithSlot(newIo(proj), 1, 10_000, func(p []string) SharedOutcome { pidFiles = p; return execute(p, nil) })
+				}
+			}
+			parallel(call(), call())
+			assert.EqualValues(t, 1, peak.Load())
+			assert.Equal(t, []string{filepath.Join(SharedDirOf(proj), "slot.0", "pid")}, pidFiles)
+			assert.False(t, exists(filepath.Join(SharedDirOf(proj), "slot.0")))
+		})
 	})
 }

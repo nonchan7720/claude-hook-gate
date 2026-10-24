@@ -227,6 +227,14 @@ When several agents (the main session and subagents) run the same command at the
 
 When there is no run it can receive (its files are not covered, or the environment, root or cwd differ), the same command still runs only once at a time. The unit is the `name` (or the `cmd` when there is no name): while it is running in another agent, the gate does not start it but waits for that run to end, then looks again for a run to receive or runs it itself (the band shows it as waiting meanwhile). Running a heavy command such as `go test ./...` once per agent at the same time makes every run several times slower as they fight over the CPU. Different commands given the same `name` also run one at a time. This also holds between agents working in different git worktrees of the same repository: the locks live in `~/.claude/.gate-status/shared/<project_id>/`, where the project id is derived from the repository's common git directory (results are still received only within the same worktree, since the root and cwd differ). Whether a lock is alive is decided by the command's process: if the hook is stopped (for example with ESC) and leaves its lock behind, the next agent takes it over as soon as the command has exited, and waits for the command while it is still running. A lock is also treated as dead once the command's `timeout` has passed. A command with `share: false` is neither shared nor serialized; it always starts at once.
 
+Two more things keep that waiting short when many agents stop at about the same time. First, the file lists of the agents waiting for a run with the same `name` are batched: while it waits, each agent leaves its key and file list under `<serial>.queue/`, and the next agent to start that command runs it once on the union of its own files and theirs (`CLAUDE_GATE_FILES` carries the union), so all of them receive that one result instead of running one after the other. Such a run covers files of other agents too; a failure in those files fails every agent that receives it, exactly as with a received superset run. Second, `max_parallel` at the top level of `gate.yaml` caps how many gate commands run at the same time across all agents and worktrees of the project (default `2`; `false` for no cap). An agent about to start a command first takes one of the `slot.<i>/` directories under the shared directory and waits for a free one otherwise; receiving a shared result needs no slot. The cap also applies inside a `parallel` block and to `share: false` commands. With ten subagents and whole-project tests, it keeps each run close to its standalone duration instead of all of them crawling (and timing out) together:
+
+```yaml
+max_parallel: 2   # default; false for no cap
+rules:
+  - ...
+```
+
 To opt a command out of sharing (and serializing), set `share: false` on its `run` element (`{cmd, name, timeout, share, files}`):
 
 ```yaml

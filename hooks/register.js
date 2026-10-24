@@ -2211,18 +2211,104 @@ function sharedDir(io) {
   }
   return cached;
 }
+var REQUEST_STALE_MS = MAX_WAIT_MS + GRACE_MS;
+var SLOT_WAIT_MS = 5000;
+var mkdirAtomicIn = async (io, dir, path) => (await io.run(["sh", "-c", 'mkdir -p "$1" && mkdir "$2"', "sh", dir, path])).exitCode === 0;
+var readInfoOf = async (io, lock) => {
+  const text = await io.readFile(join(lock, "info.json"));
+  try {
+    const info = text === undefined ? undefined : JSON.parse(text);
+    if (!isDict(info))
+      return;
+    return {
+      started: Number.isFinite(Number(info.started)) ? Number(info.started) : undefined,
+      limit: Number(info.timeoutMs) || 0,
+      key: typeof info.key === "string" ? info.key : undefined,
+      files: Array.isArray(info.files) ? info.files.map(String) : undefined
+    };
+  } catch {
+    return;
+  }
+};
+var remainingMsOf = async (io, lock, info) => {
+  const now = await io.now();
+  const started = info?.started ?? (await io.stat(lock))?.mtimeMs ?? now;
+  const left = started + (info?.limit ?? 0) + GRACE_MS - now;
+  if (left <= 0)
+    return left;
+  const pid = (await io.readFile(join(lock, "pid")))?.trim();
+  if (pid) {
+    if (/^\d+$/.test(pid) && (await io.run(["sh", "-c", 'kill -0 "$1" 2>/dev/null', "sh", pid])).exitCode === 0)
+      return left;
+    const polls = Math.ceil(DEAD_GRACE_MS / (Number(POLL_SECONDS) * 1000));
+    const script = `i=0; while [ -d "$1" ] && [ "$i" -lt ${polls} ]; do sleep ${POLL_SECONDS}; i=$((i+1)); done; [ ! -d "$1" ]`;
+    return (await io.run(["sh", "-c", script, "sh", lock])).exitCode === 0 ? GRACE_MS : 0;
+  }
+  return info && now - started > GRACE_MS ? 0 : left;
+};
+var slotPath = (dir, i) => join(dir, `slot.${i}`);
+async function takeSlot(io, dir, maxParallel, timeoutMs) {
+  if (maxParallel <= 0)
+    return { ok: true };
+  const claimSlot = async (slot) => {
+    if (!await mkdirAtomicIn(io, dir, slot))
+      return false;
+    await io.writeFile(join(slot, "info.json"), JSON.stringify({ started: await io.now(), timeoutMs }));
+    return true;
+  };
+  for (let i = 0;i < maxParallel; i++) {
+    const slot = slotPath(dir, i);
+    if (await claimSlot(slot))
+      return { slot, ok: true };
+    if (!await io.exists(slot))
+      return { ok: true };
+    if (await remainingMsOf(io, slot, await readInfoOf(io, slot)) <= 0) {
+      await io.removeTree(slot);
+      if (await claimSlot(slot))
+        return { slot, ok: true };
+    }
+  }
+  return { ok: false };
+}
+var releaseSlot = async (io, slot) => {
+  if (slot)
+    await io.removeTree(slot);
+};
+async function waitSlot(io, dir, maxParallel) {
+  const checks = Array.from({ length: maxParallel }, (_, i) => `[ -d "$1/slot.${i}" ]`);
+  await io.run(["sh", "-c", `while ${checks.join(" && ")}; do sleep ${POLL_SECONDS}; done`, "sh", dir], { timeoutMs: SLOT_WAIT_MS });
+}
+async function runWithSlot(io, maxParallel, timeoutMs, execute) {
+  if (maxParallel <= 0)
+    return execute([]);
+  const dir = await sharedDir(io);
+  for (;; ) {
+    const { slot, ok } = await takeSlot(io, dir, maxParallel, timeoutMs);
+    if (ok) {
+      try {
+        return await execute(slot ? [join(slot, "pid")] : []);
+      } finally {
+        await releaseSlot(io, slot);
+      }
+    }
+    await waitSlot(io, dir, maxParallel);
+  }
+}
 var normalizeFiles = (files) => [...new Set(files)].sort();
 var shareId = (key, files) => `${hashKey(key)}.${hashKey(JSON.stringify(normalizeFiles(files)))}`;
 async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
-  const mine = normalizeFiles(files);
+  let mine = normalizeFiles(files);
   const dir = await sharedDir(io);
   const keyPrefix = `${hashKey(key)}.`;
-  const ownLock = join(dir, `${shareId(key, mine)}.run`);
+  let ownLock = join(dir, `${shareId(key, mine)}.run`);
   const resultOf = (lock) => `${lock.slice(0, -".run".length)}.result.json`;
+  const maxParallel = hooks.maxParallel ?? 0;
   const serialLock = join(dir, `${hashKey(hooks.serial ?? key)}.serial`);
-  const mkdirAtomic = async (path) => (await io.run(["sh", "-c", 'mkdir -p "$1" && mkdir "$2"', "sh", dir, path])).exitCode === 0;
+  const queueDir = join(dir, `${hashKey(hooks.serial ?? key)}.queue`);
+  let request;
+  const mkdirAtomic = (path) => mkdirAtomicIn(io, dir, path);
   const claim = () => mkdirAtomic(ownLock);
-  const lead = async () => {
+  const lead = async (slot) => {
     const resultFile = resultOf(ownLock);
     try {
       const started = await io.now();
@@ -2230,7 +2316,8 @@ async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
       await io.writeFile(join(serialLock, "info.json"), JSON.stringify({ started, timeoutMs }));
       await io.removeFiles([resultFile]);
       try {
-        const outcome = await execute([join(serialLock, "pid"), join(ownLock, "pid")]);
+        const pidFiles = [join(serialLock, "pid"), join(ownLock, "pid"), ...slot ? [join(slot, "pid")] : []];
+        const outcome = await execute(pidFiles, mine);
         await io.writeFile(resultFile, JSON.stringify({ key, files: mine, ...outcome }));
         return outcome;
       } finally {
@@ -2238,39 +2325,58 @@ async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
       }
     } finally {
       await io.removeTree(serialLock);
+      await releaseSlot(io, slot);
     }
   };
-  const readInfo = async (lock) => {
-    const text = await io.readFile(join(lock, "info.json"));
-    try {
-      const info = text === undefined ? undefined : JSON.parse(text);
-      if (!isDict(info))
-        return;
-      return {
-        started: Number.isFinite(Number(info.started)) ? Number(info.started) : undefined,
-        limit: Number(info.timeoutMs) || 0,
-        key: typeof info.key === "string" ? info.key : undefined,
-        files: Array.isArray(info.files) ? info.files.map(String) : undefined
-      };
-    } catch {
+  const readInfo = (lock) => readInfoOf(io, lock);
+  const remainingMs = (lock, info) => remainingMsOf(io, lock, info);
+  const postRequest = async () => {
+    if (request !== undefined || mine.length === 0)
       return;
-    }
+    request = join(queueDir, `${shareId(key, mine)}.json`);
+    await io.writeFile(request, JSON.stringify({ started: await io.now(), key, files: mine }));
   };
-  const remainingMs = async (lock, info) => {
+  const withdrawRequest = async () => {
+    if (request === undefined)
+      return;
+    await io.removeFiles([request]);
+    request = undefined;
+  };
+  const absorbRequests = async () => {
+    if (mine.length === 0)
+      return;
     const now = await io.now();
-    const started = info?.started ?? (await io.stat(lock))?.mtimeMs ?? now;
-    const left = started + (info?.limit ?? 0) + GRACE_MS - now;
-    if (left <= 0)
-      return left;
-    const pid = (await io.readFile(join(lock, "pid")))?.trim();
-    if (pid) {
-      if (/^\d+$/.test(pid) && (await io.run(["sh", "-c", 'kill -0 "$1" 2>/dev/null', "sh", pid])).exitCode === 0)
-        return left;
-      const polls = Math.ceil(DEAD_GRACE_MS / (Number(POLL_SECONDS) * 1000));
-      const script = `i=0; while [ -d "$1" ] && [ "$i" -lt ${polls} ]; do sleep ${POLL_SECONDS}; i=$((i+1)); done; [ ! -d "$1" ]`;
-      return (await io.run(["sh", "-c", script, "sh", lock])).exitCode === 0 ? GRACE_MS : 0;
+    const union = [...mine];
+    const consumed = [];
+    for (const e of await io.list(queueDir)) {
+      if (e.kind !== "file" || !e.name.endsWith(".json"))
+        continue;
+      const path = join(queueDir, e.name);
+      const text = await io.readFile(path);
+      if (text === undefined)
+        continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        continue;
+      }
+      if (!isDict(parsed))
+        continue;
+      const started = Number(parsed.started);
+      if (Number.isFinite(started) && started < now - REQUEST_STALE_MS) {
+        consumed.push(path);
+        continue;
+      }
+      if (parsed.key !== key || !Array.isArray(parsed.files))
+        continue;
+      union.push(...parsed.files.map(String));
+      consumed.push(path);
     }
-    return info && now - started > GRACE_MS ? 0 : left;
+    if (consumed.length > 0)
+      await io.removeFiles(consumed);
+    mine = normalizeFiles(union);
+    ownLock = join(dir, `${shareId(key, mine)}.run`);
   };
   const covers = (theirs) => theirs !== undefined && mine.every((f) => theirs.includes(f));
   const findRunning = async () => {
@@ -2317,60 +2423,78 @@ async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
     await hooks.onWait?.();
   };
   const waitGone = async (path, left) => {
-    const script = `while [ -d "$1" ]; do if [ -s "$1/pid" ] && ! kill -0 "$(cat "$1/pid")" 2>/dev/null; then exit 3; fi; sleep ${POLL_SECONDS}; done`;
-    await io.run(["sh", "-c", script, "sh", path], { timeoutMs: Math.min(Math.max(left, 1), MAX_WAIT_MS) });
+    const info = await io.readFile(join(path, "info.json")) ?? "";
+    const script = 'while [ -d "$1" ]; do ' + 'if [ -n "$2" ] && [ "$(cat "$1/info.json" 2>/dev/null)" != "$2" ]; then exit 4; fi; ' + `if [ -s "$1/pid" ] && ! kill -0 "$(cat "$1/pid")" 2>/dev/null; then exit 3; fi; sleep ${POLL_SECONDS}; done`;
+    await io.run(["sh", "-c", script, "sh", path, info], { timeoutMs: Math.min(Math.max(left, 1), MAX_WAIT_MS) });
   };
-  for (let round = 0;round < MAX_ROUNDS; round++) {
-    const found = await findRunning();
-    if (!found.lock && found.pending) {
-      await io.run(["sleep", POLL_SECONDS]);
-      round--;
-      continue;
-    }
-    let target = found.lock;
-    if (!target) {
-      if (!await mkdirAtomic(serialLock)) {
-        const info = await readInfo(serialLock);
-        const left = await remainingMs(serialLock, info);
-        if (left <= 0) {
-          await io.removeTree(serialLock);
-          continue;
-        }
-        if (!info) {
-          if (!await io.exists(serialLock))
-            continue;
-          await io.run(["sleep", POLL_SECONDS]);
+  try {
+    return await rounds();
+  } finally {
+    await withdrawRequest();
+  }
+  async function rounds() {
+    for (let round = 0;round < MAX_ROUNDS; round++) {
+      const found = await findRunning();
+      if (!found.lock && found.pending) {
+        await io.run(["sleep", POLL_SECONDS]);
+        round--;
+        continue;
+      }
+      let target = found.lock;
+      if (!target) {
+        const { slot, ok } = await takeSlot(io, dir, maxParallel, timeoutMs);
+        if (!ok) {
+          await waitSlot(io, dir, maxParallel);
           round--;
           continue;
         }
-        const again = await findRunning();
-        if (!again.lock) {
-          await announce();
-          await waitGone(serialLock, left);
-          continue;
+        if (!await mkdirAtomic(serialLock)) {
+          await releaseSlot(io, slot);
+          const info = await readInfo(serialLock);
+          const left = await remainingMs(serialLock, info);
+          if (left <= 0) {
+            await io.removeTree(serialLock);
+            continue;
+          }
+          if (!info) {
+            if (!await io.exists(serialLock))
+              continue;
+            await io.run(["sleep", POLL_SECONDS]);
+            round--;
+            continue;
+          }
+          const again = await findRunning();
+          if (!again.lock) {
+            await postRequest();
+            await announce();
+            await waitGone(serialLock, left);
+            continue;
+          }
+          target = again.lock;
+        } else {
+          await absorbRequests();
+          if (await claim())
+            return { outcome: await lead(slot), shared: false };
+          await releaseSlot(io, slot);
+          await io.removeTree(serialLock);
+          target = ownLock;
         }
-        target = again.lock;
-      } else if (await claim()) {
-        return { outcome: await lead(), shared: false };
-      } else {
-        await io.removeTree(serialLock);
-        target = ownLock;
       }
+      const left = await remainingMs(target, await readInfo(target));
+      if (left <= 0) {
+        await io.removeTree(target);
+        continue;
+      }
+      await announce();
+      await waitGone(target, left);
+      if (await io.exists(target))
+        continue;
+      const outcome = await readOutcome(resultOf(target));
+      if (outcome)
+        return { outcome, shared: true };
     }
-    const left = await remainingMs(target, await readInfo(target));
-    if (left <= 0) {
-      await io.removeTree(target);
-      continue;
-    }
-    await announce();
-    await waitGone(target, left);
-    if (await io.exists(target))
-      continue;
-    const outcome = await readOutcome(resultOf(target));
-    if (outcome)
-      return { outcome, shared: true };
+    return { outcome: await runWithSlot(io, maxParallel, timeoutMs, (pidFiles) => execute(pidFiles, mine)), shared: false };
   }
-  return { outcome: await execute([]), shared: false };
 }
 
 // src/gate.ts
@@ -2388,6 +2512,17 @@ var FAIL_TAIL_LINES = 60;
 var FAIL_DETAIL_MAX = 12000;
 var UNMATCHED_SHOWN = 5;
 var MAX_TIMEOUT_MS = 600000;
+var DEFAULT_MAX_PARALLEL = 2;
+function maxParallelOf(cfg) {
+  const v = cfg?.max_parallel;
+  if (v === undefined || v === null)
+    return DEFAULT_MAX_PARALLEL;
+  if (v === false)
+    return 0;
+  if (typeof v !== "number" || !Number.isFinite(v))
+    return DEFAULT_MAX_PARALLEL;
+  return Math.max(0, Math.trunc(v));
+}
 var mk = (root, rel) => `${root}\x00${rel}`;
 var unmk = (k) => {
   const i = k.indexOf("\x00");
@@ -2578,6 +2713,7 @@ class Gate {
   running = [];
   stopTicking;
   runningOwner;
+  maxParallel = DEFAULT_MAX_PARALLEL;
   ranThisRun = new Set;
   executedLabels = [];
   constructor(io, opts = {}) {
@@ -2892,13 +3028,18 @@ class Gate {
     return { out, ok: r.exitCode === 0 && !timedOut && r.error === undefined, timedOut, logpath };
   }
   async runCmdShared(cmd, cwd, timeout, name, extraEnv, scope, onWait) {
+    const timeoutMs = Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS);
     if (scope.share === false)
-      return this.runCmd(cmd, cwd, timeout, name, extraEnv);
+      return runWithSlot(this.io, this.maxParallel, timeoutMs, (pidFiles) => this.runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles));
     const env = { ...this.baseEnv, ...extraEnv };
     const key = shareKey(scope.root, cwd, cmd, env);
-    const r = await runShared(this.io, key, shareFiles(env, scope.files !== false), Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS), (pidFiles) => this.runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles), {
+    const r = await runShared(this.io, key, shareFiles(env, scope.files !== false), timeoutMs, (pidFiles, files) => {
+      const runEnv = scope.files !== false && files.length > 0 ? mergeFilesEnv(extraEnv ?? {}, filesEnv(files)) : extraEnv;
+      return this.runCmd(cmd, cwd, timeout, name, runEnv, pidFiles);
+    }, {
       onWait,
-      serial: serialKey(name, cmd)
+      serial: serialKey(name, cmd),
+      maxParallel: this.maxParallel
     });
     if (!r.shared)
       return r.outcome;
@@ -3135,7 +3276,10 @@ ${details}` : "");
     const text = await this.io.readFile(path);
     if (text === undefined)
       throw new Error(this.t("gate.cannotReadYaml", { path }));
-    return parseYaml(text);
+    const cfg = parseYaml(text);
+    if (path === this.action)
+      this.maxParallel = maxParallelOf(cfg);
+    return cfg;
   }
   noteUnmatchedFiles(rels, triggered) {
     const covered = new Set;

@@ -106,4 +106,4 @@ which directory each runs in.
 Tell the user, in a few lines: which rules run on which files, which checks run at stop,
 the measured durations and timeouts, what CI runs that the gate deliberately leaves out
 (and why), and how to tune it (`policy: false`, `share: false`, `report_success: false`,
-`timeout`). For `review`, the same plus the drift list and a proposed diff.
+`max_parallel`, `timeout`). For `review`, the same plus the drift list and a proposed diff.
