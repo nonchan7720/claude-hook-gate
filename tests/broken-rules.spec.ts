@@ -176,7 +176,7 @@ describe('broken rules do not disable the other rules', () => {
 describe('enforce entries that throw while evaluating are skipped one by one', () => {
   // listRules を通さずに作った Rule（検証されていない enforce）でも、評価関数が例外で止まらないこと。
   const raw = (name: string, enforce: unknown): Rule =>
-    ({ name, count: 6, description: '', enforce, path: `/fb/${name}.md`, projects: [], whenExists: [] }) as Rule
+    ({ name, count: 6, description: '', enforce, path: `/fb/${name}.md`, projects: [], whenExists: [], files: [], excludeFiles: [] }) as Rule
   let dir: string
   beforeEach(() => {
     dir = tmpDir()

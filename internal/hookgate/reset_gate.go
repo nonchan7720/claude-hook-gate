@@ -101,18 +101,33 @@ func ResetGate(io Io, payload Dict) ScriptResult {
 	}
 	// classic.* が走った印のマーカー（<feedbackDir>/.classic_seen/<session>。register.ts が書き、scripts/hook.sh が見る）も、
 	// 24h 超は掃除する。classic.Notification のたびに書き直されるので、動いているセッションのものは消えない。
-	seenDir := Join(FeedbackDir(io), ".classic_seen")
-	stale := []string{}
-	for _, e := range io.List(seenDir) {
-		if e.Kind == KindFile && e.MtimeMs < now-fbResetDayMs {
-			stale = append(stale, Join(seenDir, e.Name))
-		}
-	}
-	io.RemoveFiles(stale)
+	fbSweepStaleFiles(io, Join(FeedbackDir(io), ".classic_seen"), now)
+	fbResetInjectState(io, sessionID, source, now)
 
 	// 旧パスのログ置き場が空になったら片付ける。
 	io.RemoveDir(Join(claudeDir, "hooks", "logs"))
 	io.RemoveDir(Join(claudeDir, "hooks"))
 
 	return Ok("", "")
+}
+
+// fbSweepStaleFiles は dir 直下の 24h 超のファイルを消す。
+func fbSweepStaleFiles(io Io, dir string, now int64) {
+	stale := []string{}
+	for _, e := range io.List(dir) {
+		if e.Kind == KindFile && e.MtimeMs < now-fbResetDayMs {
+			stale = append(stale, Join(dir, e.Name))
+		}
+	}
+	io.RemoveFiles(stale)
+}
+
+// fbResetInjectState は files 付き feedback ルールの「このターンに注入済み」（<feedbackDir>/.inject_state/<session>[--<agent>].json）を、
+// 文脈が新しくなる startup / clear に加えて compact でも消す（要約の後にまた届くように）。resume は文脈が残っているので消さない。
+// 24h 超のものはどの source でも掃除する。
+func fbResetInjectState(io Io, sessionID, source string, now int64) {
+	if source == "startup" || source == "clear" || source == "compact" {
+		ClearInjected(io, sessionID)
+	}
+	fbSweepStaleFiles(io, Join(FeedbackDir(io), ".inject_state"), now)
 }

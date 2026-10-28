@@ -73,6 +73,13 @@
 // when_exists: ['go.mod', '**/*.go']  # 任意。文字列または配列。プロジェクトルート相対の glob。
 //                            # 1つでも存在すれば適用。未指定・空なら制限なし
 //
+// 対象ファイル（frontmatter の任意キー。有効/無効ではなく「どこで注入するか」を決める）
+//
+// files: ['**/*.go']         # 任意。文字列または配列。プロジェクトルート相対の glob。指定したルールは UserPromptSubmit では
+//                            # 注入されず、マッチするファイルを Read / Edit / Write したとき（PostToolUse）に注入される
+//                            # （feedback-file-inject.ts）。pre_edit / post_edit の enforce で path を省略すると files を使う
+// exclude_files: ['**/*_test.go']  # 任意。files にマッチしてもこれにマッチするファイルは対象外
+//
 // このフィルタは listRules を feedbackDirPath 省略で呼んだとき（グローバル＋プロジェクトのマージ後）にだけ
 // かかる。ディレクトリを明示したときは無加工で返す。
 //
@@ -109,6 +116,10 @@ export type Rule = {
   projects: string[]
   /** プロジェクトルート相対の glob。空なら制限なし。 */
   whenExists: string[]
+  /** 対象ファイルの glob（プロジェクトルート相対）。空ならファイル種別のスコープ無し（毎プロンプトに注入）。 */
+  files: string[]
+  /** files にマッチしても対象外にする glob。 */
+  excludeFiles: string[]
 }
 
 export type Violation = {
@@ -235,18 +246,56 @@ export async function loadRule(io: Io, path: string): Promise<Rule | null> {
   if (!m) return null
   const data = loadYamlText(m[1] ?? '')
   if (!isDict(data) || !truthy(data.name)) return null
+  const files = stringList(data.files)
+  const excludeFiles = stringList(data.exclude_files)
   const { enforce, problems } = normalizeEnforce(io, data.enforce)
   return {
     name: String(data.name),
     description: truthy(data.description) ? String(data.description) : '',
     count: toCount(data.count),
-    enforce,
+    enforce: inheritFiles(enforce, files, excludeFiles),
     ...(problems.length > 0 ? { problems } : {}),
     path,
     expires: parseExpires(data.expires),
     projects: stringList(data.projects),
     whenExists: stringList(data.when_exists),
+    files,
+    excludeFiles,
   }
+}
+
+/** path を見る enforce のイベント（pre_edit / post_edit）。 */
+const PATH_EVENTS = new Set(['pre_edit', 'post_edit'])
+
+/**
+ * pre_edit / post_edit の enforce で path が無い要素に、ルールの files / exclude_files を補う（同じ glob を二度書かなくてよいように）。
+ * files が無ければ何もしない（path の無い要素は従来どおりどのファイルにもマッチしない）。
+ */
+export function inheritFiles(enforce: Dict[], files: string[], excludeFiles: string[]): Dict[] {
+  if (files.length === 0) return enforce
+  return enforce.map((entry) => {
+    if (typeof entry.event !== 'string' || !PATH_EVENTS.has(entry.event) || truthy(entry.path)) return entry
+    const out: Dict = { ...entry, path: [...files] }
+    if (!truthy(entry.exclude_path) && excludeFiles.length > 0) out.exclude_path = [...excludeFiles]
+    return out
+  })
+}
+
+/** files を持つ（ファイル種別にスコープされた）ルールか。毎プロンプトの注入からは外れ、対象ファイルに触れたときに注入される。 */
+export const isFileScoped = (rule: Rule): boolean => rule.files.length > 0
+
+/**
+ * filePath（絶対 or projectDir 相対）に files がマッチし、exclude_files にマッチしないルールだけを返す（順序は保つ）。
+ * worktree 内のファイルは、そのルート相対のパスで判定する（enforce の path と同じ）。files の無いルールは返さない。
+ */
+export function rulesForFile(io: Io, rules: Rule[], filePath: string, projectDir?: string): Rule[] {
+  const dir = projectDir || io.projectDir || io.cwd
+  const [, rel] = splitRoot(dir, filePath)
+  return rules.filter((rule) => {
+    if (rule.files.length === 0) return false
+    if (!compileGlobs(rule.files).some((rx) => rx.test(rel))) return false
+    return !(rule.excludeFiles.length > 0 && compileGlobs(rule.excludeFiles).some((rx) => rx.test(rel)))
+  })
 }
 
 /** 先頭の ~ を HOME に展開する（HOME が無ければそのまま）。 */
@@ -474,6 +523,52 @@ export async function writeFileAtomic(io: Io, path: string, text: string): Promi
 }
 
 export type CountBump = { rule: string; path: string; from: number; to: number }
+
+// ---- ファイル種別スコープのルールの注入状態 ----
+/** session_id と agent_id から状態ファイルの ID を作る（gate の状態ファイルと同じ `<session>--<agent>`）。使えない文字は落とす。 */
+export function injectStateId(sessionId: unknown, agentId?: unknown): string {
+  const clean = (v: unknown): string => String(v ?? '').replace(/[^A-Za-z0-9_-]/g, '')
+  const sid = clean(sessionId)
+  const aid = clean(agentId)
+  return aid !== '' ? `${sid}--${aid}` : sid
+}
+
+/** このターンに注入済みの files 付きルール名を持つ状態ファイル（~/.claude/feedback/.inject_state/<id>.json）。 */
+export const injectStatePath = (io: Io, stateId: string): string => join(feedbackDir(io), '.inject_state', `${stateId}.json`)
+
+export async function loadInjected(io: Io, stateId: string): Promise<Set<string>> {
+  try {
+    const text = await io.readFile(injectStatePath(io, stateId))
+    if (text === undefined) return new Set()
+    const data: unknown = JSON.parse(text)
+    if (isDict(data) && Array.isArray(data.injected)) return new Set(data.injected.map(String))
+  } catch {
+    // 壊れた状態ファイルは空扱い
+  }
+  return new Set()
+}
+
+export async function saveInjected(io: Io, stateId: string, injected: Set<string>): Promise<void> {
+  try {
+    await io.writeFile(injectStatePath(io, stateId), JSON.stringify({ injected: [...injected].sort() }))
+  } catch {
+    // 状態の保存失敗で hook を止めない
+  }
+}
+
+/**
+ * セッションの注入状態を消す（UserPromptSubmit ごと、SessionStart の startup / clear / compact）。
+ * サブエージェント分（<session>--<agent>.json）も一緒に消す。
+ */
+export async function clearInjected(io: Io, sessionId: unknown): Promise<void> {
+  const sid = injectStateId(sessionId)
+  if (sid === '') return
+  const dir = join(feedbackDir(io), '.inject_state')
+  const doomed = (await io.list(dir))
+    .filter((e) => e.name === `${sid}.json` || (e.name.startsWith(`${sid}--`) && e.name.endsWith('.json')))
+    .map((e) => join(dir, e.name))
+  await io.removeFiles(doomed)
+}
 
 /** セッション内で count を自動で上げ済みのルール名を持つ状態ファイル（~/.claude/feedback/.count_state/<session>.json）。 */
 export const countStatePath = (io: Io, sessionId: string): string => join(feedbackDir(io), '.count_state', `${sessionId.replace(/[^A-Za-z0-9_-]/g, '')}.json`)

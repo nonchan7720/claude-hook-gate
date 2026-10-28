@@ -7,6 +7,7 @@ import type { PluginOptions } from 'claude-code'
 import { agentLaunchGuard, agentLaunchLists } from './agent-launch-guard.ts'
 import { allStop } from './all-stop.ts'
 import { bashChangeSteps, bashStarted } from './bash-changes.ts'
+import { feedbackFileInject } from './feedback-file-inject.ts'
 import { feedbackGuard } from './feedback-guard.ts'
 import { feedbackInject } from './feedback-inject.ts'
 import { feedbackPostEdit } from './feedback-post-edit.ts'
@@ -85,7 +86,7 @@ export const sessionStart = (io: Io, sessionId: string, payload: Dict): Promise<
 /** UserPromptSubmit: rules ファイル（rulesFile か同梱のもの）と、確定した feedback ルールを context に足す。 */
 export async function userPromptSubmit(io: Io, sessionId: string, options: PluginOptions): Promise<HookRun> {
   const text = await loadRules(io, options.rulesFile)
-  return runSteps(io, sessionId, 'UserPromptSubmit', [(i) => feedbackInject(i)], text === '' ? {} : { additionalContext: [text] })
+  return runSteps(io, sessionId, 'UserPromptSubmit', [(i) => feedbackInject(i, sessionId)], text === '' ? {} : { additionalContext: [text] })
 }
 
 /** PreToolUse の判定の対象: Bash / Edit / Write / MultiEdit と、agentLaunchGuard が有効なら Agent / SendMessage。 */
@@ -105,18 +106,24 @@ export function preToolUse(io: Io, sessionId: string, options: PluginOptions, pa
   return runSteps(io, sessionId, 'PreToolUse', tool === 'Bash' ? [(i) => bashStarted(i, payload), step] : [step])
 }
 
-/** PostToolUse: 変更ファイルの記録、post_edit の検査、gate の rules フェーズ。Agent / Task はサブエージェントの結果の受け渡し。対象外は何もしない。 */
+/**
+ * PostToolUse: 変更ファイルの記録、post_edit の検査、gate の rules フェーズ。Agent / Task はサブエージェントの結果の受け渡し。
+ * Read と、Edit / Write / MultiEdit / Bash（heredoc）の書き先では、files 付きの feedback ルールの注入（feedback-file-inject.ts）を先に行う。対象外は何もしない。
+ */
 export function postToolUse(io: Io, sessionId: string, payload: Dict): Promise<HookRun> {
   const tool = str(payload.tool_name)
   const run = (steps: Step[]) => runSteps(io, sessionId, 'PostToolUse', steps)
   // 終わったサブエージェントの SubagentStop で走った hook の結果を、呼び出し元の context へ渡す（gate のログを読ませない）。
   if (/^(Agent|Task)$/.test(tool)) return run([(i) => subagentReport(i, payload)])
+  const inject: Step = (i) => feedbackFileInject(i, payload)
+  // 読んだファイルにスコープされたルールを、編集の前に届ける。
+  if (tool === 'Read') return run([inject])
   // Bash が実際に書き換えたファイルを拾い、Edit / Write と同じく feedback の post_edit（と、実行後に判定できる
   // pre_edit）で検査してから、メモに記録できたときだけ rules フェーズを走らせる。gate.yaml が無くても feedback の検査は動く。
-  if (tool === 'Bash') return run(bashChangeSteps(payload))
+  if (tool === 'Bash') return run([inject, ...bashChangeSteps(payload)])
   if (!/^(Write|Edit|MultiEdit)$/.test(tool)) return Promise.resolve(none)
   // gate の実行より先に、軽い feedback の post_edit 検査を済ませる。
-  return run([(i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, 'rules', payload)])
+  return run([inject, (i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, 'rules', payload)])
 }
 
 /** 複数ファイルを 1 回で編集するツール向け: ファイルごとに preToolUse を走らせ、deny > ask で 1 つの判定にする。 */
@@ -135,7 +142,7 @@ export async function preToolUseEdits(io: Io, sessionId: string, options: Plugin
 export function postToolUseEdits(io: Io, sessionId: string, payloads: Dict[]): Promise<HookRun> {
   const [first] = payloads
   if (!first) return Promise.resolve(none)
-  const steps: Step[] = payloads.flatMap((p): Step[] => [(i) => recordChanges(i, p), (i) => feedbackPostEdit(i, p)])
+  const steps: Step[] = payloads.flatMap((p): Step[] => [(i) => feedbackFileInject(i, p), (i) => recordChanges(i, p), (i) => feedbackPostEdit(i, p)])
   steps.push((i) => stopTestGate(i, 'rules', first))
   return runSteps(io, sessionId, 'PostToolUse', steps)
 }

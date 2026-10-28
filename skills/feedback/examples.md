@@ -131,7 +131,36 @@ Do not modify files under `internal/api/v1/` until the migration freeze ends; pu
 **How to apply:** Only the `api-*` repositories, until the end of 2026.
 ```
 
-## 6. A rule that cannot be enforced mechanically
+## 6. Language-scoped rule (`files`): shown when a Go file is read or edited
+
+`~/.claude/feedback/go_wrap_errors.md`
+
+```markdown
+---
+name: go_wrap_errors
+description: Wrap errors you return with the operation that failed; never return a bare err.
+type: feedback
+count: 3
+files: ['**/*.go']
+exclude_files: ['**/*_test.go']
+enforce:
+  - event: pre_edit
+    when: '^\s*return (.*, )?err\s*$'
+    unless: 'errors\.(Is|As)\('
+    message: 'Wrap the error: return fmt.Errorf("<what you were doing>: %w", err).'
+---
+
+When a Go function returns an error from a callee, wrap it: `return fmt.Errorf("open config: %w", err)`. A bare `return err` loses the context the caller needs. Exception: a function that only forwards the error one level inside the same package.
+
+**Excuse:** The caller would log it anyway.
+**Pointer:** The log line then says only "no such file" with no hint of which file or step.
+
+**Why:** Two incidents took an hour each to locate because the error had no context.
+
+**How to apply:** Every `.go` file except tests. The rule is not on every prompt; it is injected the first time a Go file is read or edited in a turn, and the `pre_edit` entry (which inherits `files` as its `path`) asks before a bare `return err` is written.
+```
+
+## 7. A rule that cannot be enforced mechanically
 
 `~/.claude/feedback/answer_first.md`
 

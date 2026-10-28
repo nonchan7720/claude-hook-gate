@@ -120,6 +120,10 @@ type Rule struct {
 	Projects []string
 	// WhenExists はプロジェクトルート相対の glob。空なら制限なし。
 	WhenExists []string
+	// Files は対象ファイルの glob（プロジェクトルート相対）。空ならファイル種別のスコープ無し（毎プロンプトに注入）。
+	Files []string
+	// ExcludeFiles は Files にマッチしても対象外にする glob。
+	ExcludeFiles []string
 }
 
 // Violation は enforce の違反 1 件。
@@ -535,14 +539,18 @@ func LoadRule(io Io, path string) (Rule, bool, error) {
 	if !isDict || !Truthy(data["name"]) {
 		return Rule{}, false, nil
 	}
+	files := fbStringList(data["files"])
+	excludeFiles := fbStringList(data["exclude_files"])
 	enforce, problems := NormalizeEnforce(io, data["enforce"])
 	rule := Rule{
-		Name:       Str(data["name"]),
-		Count:      ToCount(data["count"]),
-		Enforce:    enforce,
-		Path:       path,
-		Projects:   fbStringList(data["projects"]),
-		WhenExists: fbStringList(data["when_exists"]),
+		Name:         Str(data["name"]),
+		Count:        ToCount(data["count"]),
+		Enforce:      InheritFiles(enforce, files, excludeFiles),
+		Path:         path,
+		Projects:     fbStringList(data["projects"]),
+		WhenExists:   fbStringList(data["when_exists"]),
+		Files:        files,
+		ExcludeFiles: excludeFiles,
 	}
 	if Truthy(data["description"]) {
 		rule.Description = Str(data["description"])
@@ -554,6 +562,118 @@ func LoadRule(io Io, path string) (Rule, bool, error) {
 		rule.Expires = &ms
 	}
 	return rule, true, nil
+}
+
+// fbPathEvents は path を見る enforce のイベント（pre_edit / post_edit）。
+var fbPathEvents = map[string]bool{"pre_edit": true, "post_edit": true}
+
+func fbStringsToAny(list []string) []any {
+	out := make([]any, len(list))
+	for i, s := range list {
+		out[i] = s
+	}
+	return out
+}
+
+// InheritFiles は pre_edit / post_edit の enforce で path が無い要素に、ルールの files / exclude_files を補う
+// （同じ glob を二度書かなくてよいように）。files が無ければ何もしない（path の無い要素は従来どおりどのファイルにもマッチしない）。
+func InheritFiles(enforce []Dict, files, excludeFiles []string) []Dict {
+	if len(files) == 0 {
+		return enforce
+	}
+	out := make([]Dict, len(enforce))
+	for i, entry := range enforce {
+		event, _ := entry["event"].(string)
+		if !fbPathEvents[event] || Truthy(entry["path"]) {
+			out[i] = entry
+			continue
+		}
+		d := make(Dict, len(entry)+2)
+		for k, v := range entry {
+			d[k] = v
+		}
+		d["path"] = fbStringsToAny(files)
+		if !Truthy(entry["exclude_path"]) && len(excludeFiles) > 0 {
+			d["exclude_path"] = fbStringsToAny(excludeFiles)
+		}
+		out[i] = d
+	}
+	return out
+}
+
+// IsFileScoped は files を持つ（ファイル種別にスコープされた）ルールか。毎プロンプトの注入からは外れ、対象ファイルに触れたときに注入される。
+func IsFileScoped(rule Rule) bool { return len(rule.Files) > 0 }
+
+// RulesForFile は filePath（絶対 or projectDir 相対）に files がマッチし、exclude_files にマッチしないルールだけを返す（順序は保つ）。
+// worktree 内のファイルは、そのルート相対のパスで判定する（enforce の path と同じ）。files の無いルールは返さない。
+func RulesForFile(io Io, rules []Rule, filePath string, projectDir ...string) []Rule {
+	dir := fbFirstNonEmpty(fbOptDir(projectDir), io.ProjectDir(), io.Cwd())
+	_, rel := SplitRoot(dir, filePath)
+	out := []Rule{}
+	for _, rule := range rules {
+		if len(rule.Files) == 0 {
+			continue
+		}
+		if ok, err := fbAnyGlobMatch(rule.Files, rel); err != nil || !ok {
+			continue
+		}
+		if len(rule.ExcludeFiles) > 0 {
+			if ok, err := fbAnyGlobMatch(rule.ExcludeFiles, rel); err != nil || ok {
+				continue
+			}
+		}
+		out = append(out, rule)
+	}
+	return out
+}
+
+// ---- ファイル種別スコープのルールの注入状態 ----
+
+// InjectStateID は session_id と agent_id から状態ファイルの ID を作る（gate の状態ファイルと同じ `<session>--<agent>`）。使えない文字は落とす。
+func InjectStateID(sessionID, agentID any) string {
+	clean := func(v any) string {
+		if v == nil {
+			return ""
+		}
+		return fbNonSessionCharRe.ReplaceAllString(Str(v), "")
+	}
+	sid, aid := clean(sessionID), clean(agentID)
+	if aid != "" {
+		return sid + "--" + aid
+	}
+	return sid
+}
+
+// InjectStatePath はこのターンに注入済みの files 付きルール名を持つ状態ファイル（~/.claude/feedback/.inject_state/<id>.json）。
+func InjectStatePath(io Io, stateID string) string {
+	return Join(FeedbackDir(io), ".inject_state", stateID+".json")
+}
+
+// LoadInjected は注入済みのルール名の集合。壊れた状態ファイルは空扱い。
+func LoadInjected(io Io, stateID string) map[string]bool {
+	return fbLoadNameSet(io, InjectStatePath(io, stateID), "injected")
+}
+
+// SaveInjected は注入済みのルール名を書く。失敗しても hook を止めない。
+func SaveInjected(io Io, stateID string, injected map[string]bool) {
+	_ = io.WriteFile(InjectStatePath(io, stateID), JSONStringify(OMap{{"injected", fbStringsToAny(fbSortedKeys(injected))}}))
+}
+
+// ClearInjected はセッションの注入状態を消す（UserPromptSubmit ごと、SessionStart の startup / clear / compact）。
+// サブエージェント分（<session>--<agent>.json）も一緒に消す。
+func ClearInjected(io Io, sessionID any) {
+	sid := InjectStateID(sessionID, nil)
+	if sid == "" {
+		return
+	}
+	dir := Join(FeedbackDir(io), ".inject_state")
+	doomed := []string{}
+	for _, e := range io.List(dir) {
+		if e.Name == sid+".json" || (strings.HasPrefix(e.Name, sid+"--") && strings.HasSuffix(e.Name, ".json")) {
+			doomed = append(doomed, Join(dir, e.Name))
+		}
+	}
+	io.RemoveFiles(doomed)
 }
 
 // fbExpandTilde は先頭の ~ を HOME に展開する（HOME が無ければそのまま）。

@@ -169,6 +169,33 @@ describe('PostToolUse', () => {
     }))
 })
 
+describe('PostToolUse: files-scoped rules', () => {
+  test('Read of a matching file answers with additionalContext once per prompt', () =>
+    withEnv(async (env) => {
+      writeRule(env.feedback, 'go_errors', 3, "files: '**/*.go'\n")
+      writeRule(env.feedback, 'everywhere', 3)
+      const file = path.join(env.proj, 'a.go')
+      const read = { tool_name: 'Read', tool_input: { file_path: file }, tool_response: {}, tool_use_id: 't1' }
+      const r = await hook(env, 'PostToolUse', read)
+      expect(r.exitCode).toBe(0)
+      expect(r.json?.hookSpecificOutput.hookEventName).toBe('PostToolUse')
+      const context: string = r.json?.hookSpecificOutput.additionalContext ?? ''
+      expect(context.startsWith('# a.go に適用されるフィードバックルール\n')).toBe(true)
+      expect(context).toContain('■ go_errors (これまで 3 回指摘されています)')
+      expect(context).not.toContain('everywhere')
+      expect(exists(path.join(env.proj, '.claude', '.gate-status'))).toBe(false)
+      // 同じプロンプトの中では出ない
+      const again = await hook(env, 'PostToolUse', read)
+      expect(again.stdout).toBe('')
+      // 毎プロンプトの注入には files 付きは出ず、注入状態はそこで消える
+      const prompt = await hook(env, 'UserPromptSubmit', { prompt: 'hi' })
+      expect(prompt.json?.hookSpecificOutput.additionalContext ?? '').toContain('everywhere')
+      expect(prompt.json?.hookSpecificOutput.additionalContext ?? '').not.toContain('go_errors')
+      const next = await hook(env, 'PostToolUse', { ...read, tool_name: 'Edit', tool_input: { file_path: file, old_string: 'a', new_string: 'b' } })
+      expect(next.json?.hookSpecificOutput.additionalContext ?? '').toContain('今編集したファイル')
+    }))
+})
+
 describe('UserPromptSubmit', () => {
   test('additionalContext carries the bundled rules and the confirmed feedback', () =>
     withEnv(async (env) => {

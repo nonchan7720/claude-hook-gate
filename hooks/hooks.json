@@ -19,7 +19,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|Edit|Write|MultiEdit|Agent|Task",
+        "matcher": "Read|Bash|Edit|Write|MultiEdit|Agent|Task",
         "hooks": [{ "type": "command", "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh\" PostToolUse", "timeout": 600 }]
       }
     ],
