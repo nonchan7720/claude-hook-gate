@@ -38,6 +38,8 @@ const rule = (name: string, count: number, over: Partial<Rule> = {}): Rule => ({
   path: `/fb/${name}.md`,
   projects: [],
   whenExists: [],
+  files: [],
+  excludeFiles: [],
   ...over,
 })
 const withEnforce = { enforce: [{ event: 'pre_bash', when: 'x' }] }

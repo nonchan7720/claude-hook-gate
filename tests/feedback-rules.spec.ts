@@ -26,7 +26,17 @@ import { makeIo, rmTree, tmpDir } from './helpers/node-io.ts'
 const REAL_FEEDBACK_DIR = path.join(os.homedir(), '.claude', 'feedback')
 const hasRealDir = fs.existsSync(REAL_FEEDBACK_DIR)
 
-const rule = (name: string, count: number, ...enforce: Dict[]): Rule => ({ name, count, description: '', enforce, path: '', projects: [], whenExists: [] })
+const rule = (name: string, count: number, ...enforce: Dict[]): Rule => ({
+  name,
+  count,
+  description: '',
+  enforce,
+  path: '',
+  projects: [],
+  whenExists: [],
+  files: [],
+  excludeFiles: [],
+})
 const ioFor = (projectDir: string, feedbackDir = projectDir) => makeIo({ projectDir, env: { CLAUDE_FEEDBACK_DIR: feedbackDir } })
 
 // ~/.claude/feedback/ は利用者ごとの実ファイルなので、CI など存在しない環境ではスキップする。

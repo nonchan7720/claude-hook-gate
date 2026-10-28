@@ -6,7 +6,7 @@
 // セッションの継続なので、無条件に消すと中断前に変更したファイルがゲートの検証対象から丸ごと落ちて
 // しまう。source が startup / clear のときだけ削除し、resume / compact や未知の source
 // （取得できない場合を含む）では安全側に倒して削除しない。
-import { feedbackDir } from './feedback-rules.ts'
+import { clearInjected, feedbackDir } from './feedback-rules.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, jqStr } from './pyutil.ts'
@@ -61,6 +61,10 @@ export async function resetGate(io: Io, payload: Dict): Promise<ScriptResult> {
     }
   }
 
+  // files 付き feedback ルールの「このターンに注入済み」（<feedbackDir>/.inject_state/<session>[--<agent>].json）は、文脈が
+  // 新しくなる startup / clear に加えて compact でも消す（要約の後にまた届くように）。resume は文脈が残っているので消さない。
+  if (source === 'startup' || source === 'clear' || source === 'compact') await clearInjected(io, sessionId)
+
   for (const dir of [stateDir, claudeDir]) {
     const old: string[] = []
     for (const e of await io.list(dir)) {
@@ -82,8 +86,10 @@ export async function resetGate(io: Io, payload: Dict): Promise<ScriptResult> {
   }
   // classic.* が走った印のマーカー（<feedbackDir>/.classic_seen/<session>。src/register.ts が書き、scripts/hook.sh が見る）も、
   // 24h 超は掃除する。classic.Notification のたびに書き直されるので、動いているセッションのものは消えない。
-  const seenDir = join(feedbackDir(io), '.classic_seen')
-  await io.removeFiles((await io.list(seenDir)).filter((e) => e.kind === 'file' && e.mtimeMs < now - DAY_MS).map((e) => join(seenDir, e.name)))
+  // 注入済みの状態（.inject_state）も同じく 24h 超は掃除する。
+  for (const dir of [join(feedbackDir(io), '.classic_seen'), join(feedbackDir(io), '.inject_state')]) {
+    await io.removeFiles((await io.list(dir)).filter((e) => e.kind === 'file' && e.mtimeMs < now - DAY_MS).map((e) => join(dir, e.name)))
+  }
 
   // 旧パスのログ置き場が空になったら片付ける。
   await io.removeDir(join(claudeDir, 'hooks', 'logs'))

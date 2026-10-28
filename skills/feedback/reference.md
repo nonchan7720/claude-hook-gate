@@ -14,6 +14,8 @@ count: 1                      # bare integer; the hooks rewrite only this line
 # expires: 2026-12-31         # optional; inactive after this day (UTC) or ISO 8601 datetime
 # projects: ['~/src/myorg/**']   # optional; globs on the project dir's absolute path
 # when_exists: ['go.mod']     # optional; globs relative to the project root
+# files: ['**/*.go']          # optional; inject when such a file is read / edited, not on every prompt
+# exclude_files: ['**/*_test.go']  # optional; files to leave out of `files`
 # enforce:                    # optional; see below
 #   - event: pre_bash
 #     when: '...'
@@ -34,8 +36,9 @@ count: 1                      # bare integer; the hooks rewrite only this line
   `**How to apply**` marker, and only its first paragraph. Everything after is for you to
   read when you open the file.
 - `count` thresholds: `1-2` provisional (not injected; `warn` when enforced), `3-4`
-  confirmed (injected on every prompt; `ask` on pre_* events, `block` on post_edit /
-  stop_check), `>= 5` `deny` / `block` everywhere. The hooks raise `count` by 1 the
+  confirmed (injected on every prompt, or on touching a matching file for a rule with
+  `files`; `ask` on pre_* events, `block` on post_edit / stop_check), `>= 5` `deny` /
+  `block` everywhere. The hooks raise `count` by 1 the
   first time a rule is violated in a session (up to 5; plugin setting `autoCount`).
   `/correct apply` raises it to 3 or 5 based on the violation log.
 
@@ -49,6 +52,19 @@ count: 1                      # bare integer; the hooks rewrite only this line
 
 These filters apply to the merged global + project view. When a project rule and a
 global rule share a `name` and the project one is inactive, the global one is hidden too.
+
+## Target files (`files`, optional)
+
+| Key | Value | Meaning |
+| --- | --- | --- |
+| `files` | string or list of globs | Relative to the project root (in a worktree under `.claude/worktrees/`, relative to that worktree). A rule with `files` is **not** injected on UserPromptSubmit; it is injected (`count >= 3`) right after a matching file is read (`Read`) or edited (`Edit` / `Write` / `MultiEdit`, or a plain heredoc write in `Bash`), once per rule per turn, under a header that names the file. |
+| `exclude_files` | string or list of globs | Files matched by `files` that the rule does not cover. |
+
+Use it for anything tied to one language or kind of file: the rule then reaches Claude
+when it is about to write that kind of file, and costs nothing on other prompts. It does
+not make a rule active or inactive (the scope keys above still apply). In such a rule a
+`pre_edit` / `post_edit` entry may omit `path` / `exclude_path`; `files` /
+`exclude_files` are used.
 
 ## `enforce` entries
 
@@ -85,8 +101,8 @@ enforce:
     severity: deny               # optional: deny | ask | warn; default from count
 
   - event: pre_edit
-    path: 'glob'                 # required; project-relative file path (string or list)
-    exclude_path: 'glob'         # optional; string or list
+    path: 'glob'                 # required unless the rule has `files`; project-relative file path (string or list)
+    exclude_path: 'glob'         # optional; string or list (defaults to `exclude_files` when path is omitted)
     when: 'regex'                # optional; against the text being written (m flag)
     unless: 'regex'              # optional
     absent_sibling: '{stem}.test.ts'   # optional; violation when no such file sits next to the target
@@ -98,8 +114,8 @@ enforce:
     severity: ask                # optional: deny | ask | warn
 
   - event: post_edit
-    path: 'glob'                 # required
-    exclude_path: 'glob'         # optional
+    path: 'glob'                 # required unless the rule has `files`
+    exclude_path: 'glob'         # optional (defaults to `exclude_files` when path is omitted)
     when: 'regex'                # optional; against the whole file (m flag)
     unless: 'regex'              # optional
     check: 'shell cmd'           # optional; $FILE = absolute path, cwd = that file's root; 15 s limit

@@ -160,7 +160,7 @@ func UserPromptSubmit(io Io, sessionID string, options PluginOptions) HookRun {
 	if text != "" {
 		first.AdditionalContext = []string{text}
 	}
-	return RunSteps(io, sessionID, "UserPromptSubmit", []Step{FeedbackInject}, first)
+	return RunSteps(io, sessionID, "UserPromptSubmit", []Step{func(i Io) ScriptResult { return FeedbackInjectFor(i, sessionID) }}, first)
 }
 
 // GuardsTool は PreToolUse の判定の対象か: Bash / Edit / Write / MultiEdit と、agentLaunchGuard が有効なら Agent / SendMessage。
@@ -193,7 +193,8 @@ func PreToolUse(io Io, sessionID string, options PluginOptions, payload Dict) Ho
 	return RunSteps(io, sessionID, "PreToolUse", steps, Outcome{})
 }
 
-// PostToolUse: 変更ファイルの記録、post_edit の検査、gate の rules フェーズ。Agent / Task はサブエージェントの結果の受け渡し。対象外は何もしない。
+// PostToolUse: 変更ファイルの記録、post_edit の検査、gate の rules フェーズ。Agent / Task はサブエージェントの結果の受け渡し。
+// Read と、Edit / Write / MultiEdit / Bash（heredoc）の書き先では、files 付きの feedback ルールの注入（feedback_file_inject.go）を先に行う。対象外は何もしない。
 func PostToolUse(io Io, sessionID string, payload Dict) HookRun {
 	tool := strOf(payload["tool_name"])
 	run := func(steps []Step) HookRun { return RunSteps(io, sessionID, "PostToolUse", steps, Outcome{}) }
@@ -201,16 +202,22 @@ func PostToolUse(io Io, sessionID string, payload Dict) HookRun {
 	if reTaskTools.MatchString(tool) {
 		return run([]Step{func(i Io) ScriptResult { return SubagentReport(i, payload) }})
 	}
+	inject := func(i Io) ScriptResult { return FeedbackFileInject(i, payload) }
+	// 読んだファイルにスコープされたルールを、編集の前に届ける。
+	if tool == "Read" {
+		return run([]Step{inject})
+	}
 	// Bash が実際に書き換えたファイルを拾い、Edit / Write と同じく feedback の post_edit（と、実行後に判定できる
 	// pre_edit）で検査してから、メモに記録できたときだけ rules フェーズを走らせる。gate.yaml が無くても feedback の検査は動く。
 	if tool == "Bash" {
-		return run(BashChangeSteps(payload))
+		return run(append([]Step{inject}, BashChangeSteps(payload)...))
 	}
 	if !reWriteTools.MatchString(tool) {
 		return HookRun{}
 	}
 	// gate の実行より先に、軽い feedback の post_edit 検査を済ませる。
 	return run([]Step{
+		inject,
 		func(i Io) ScriptResult { return RecordChanges(i, payload) },
 		func(i Io) ScriptResult { return FeedbackPostEdit(i, payload) },
 		func(i Io) ScriptResult { return StopTestGate(i, "rules", payload) },
@@ -248,6 +255,7 @@ func PostToolUseEdits(io Io, sessionID string, payloads []Dict) HookRun {
 	var steps []Step
 	for _, p := range payloads {
 		steps = append(steps,
+			func(i Io) ScriptResult { return FeedbackFileInject(i, p) },
 			func(i Io) ScriptResult { return RecordChanges(i, p) },
 			func(i Io) ScriptResult { return FeedbackPostEdit(i, p) },
 		)
