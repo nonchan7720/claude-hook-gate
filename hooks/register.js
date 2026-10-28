@@ -252,6 +252,8 @@ notify:
 inject:
   header: "# Confirmed feedback rules (count >= 3)\\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\\n\\n"
   ruleTitle: "■ {{name}} (pointed out {{count}} times so far)"
+  fileHeaderRead: "# Feedback rules for {{files}}\\nThese confirmed rules apply to the file you just read. Follow them when you edit it or write files like it. A hook blocks violations.\\n\\n"
+  fileHeaderEdit: "# Feedback rules for {{files}}\\nThese confirmed rules apply to the file you just edited. Check that edit against them and follow them in the edits that follow. A hook blocks violations.\\n\\n"
   brokenRules: "# Unreadable feedback rules\\nThe following rule files could not be read and are disabled (where only an enforce entry is invalid, only that entry is disabled). Their enforcement does not work until they are fixed. Tell the user:"
 
 rules:
@@ -401,6 +403,8 @@ notify:
 inject:
   header: "# 確定フィードバックルール（count >= 3）\\nこれらは繰り返し指摘された確定ルール。違反すると hook がブロックする。\\n\\n"
   ruleTitle: "■ {{name}} (これまで {{count}} 回指摘されています)"
+  fileHeaderRead: "# {{files}} に適用されるフィードバックルール\\n今読んだファイルに適用される確定ルール。このファイルや同種のファイルを書くときに従うこと。違反すると hook がブロックする。\\n\\n"
+  fileHeaderEdit: "# {{files}} に適用されるフィードバックルール\\n今編集したファイルに適用される確定ルール。今回の編集をこれに照らして確かめ、以降の編集でも従うこと。違反すると hook がブロックする。\\n\\n"
   brokenRules: "# 読めない feedback ルール\\n次のルールファイルが読めず無効になっています（enforce の要素だけが不正なものは、その要素だけが無効）。直すまで、その強制は効きません。ユーザーに伝えてください:"
 
 rules:
@@ -888,18 +892,47 @@ async function loadRule(io, path) {
   const data = loadYamlText(m[1] ?? "");
   if (!isDict(data) || !truthy(data.name))
     return null;
+  const files = stringList(data.files);
+  const excludeFiles = stringList(data.exclude_files);
   const { enforce, problems } = normalizeEnforce(io, data.enforce);
   return {
     name: String(data.name),
     description: truthy(data.description) ? String(data.description) : "",
     count: toCount(data.count),
-    enforce,
+    enforce: inheritFiles(enforce, files, excludeFiles),
     ...problems.length > 0 ? { problems } : {},
     path,
     expires: parseExpires(data.expires),
     projects: stringList(data.projects),
-    whenExists: stringList(data.when_exists)
+    whenExists: stringList(data.when_exists),
+    files,
+    excludeFiles
   };
+}
+var PATH_EVENTS = new Set(["pre_edit", "post_edit"]);
+function inheritFiles(enforce, files, excludeFiles) {
+  if (files.length === 0)
+    return enforce;
+  return enforce.map((entry) => {
+    if (typeof entry.event !== "string" || !PATH_EVENTS.has(entry.event) || truthy(entry.path))
+      return entry;
+    const out = { ...entry, path: [...files] };
+    if (!truthy(entry.exclude_path) && excludeFiles.length > 0)
+      out.exclude_path = [...excludeFiles];
+    return out;
+  });
+}
+var isFileScoped = (rule) => rule.files.length > 0;
+function rulesForFile(io, rules, filePath, projectDir) {
+  const dir = projectDir || io.projectDir || io.cwd;
+  const [, rel] = splitRoot(dir, filePath);
+  return rules.filter((rule) => {
+    if (rule.files.length === 0)
+      return false;
+    if (!compileGlobs(rule.files).some((rx) => rx.test(rel)))
+      return false;
+    return !(rule.excludeFiles.length > 0 && compileGlobs(rule.excludeFiles).some((rx) => rx.test(rel)));
+  });
 }
 function expandTilde(io, pattern) {
   const home = io.env.HOME;
@@ -1085,6 +1118,37 @@ async function writeFileAtomic(io, path, text) {
     return;
   });
   await io.writeFile(path, text);
+}
+function injectStateId(sessionId, agentId) {
+  const clean = (v) => String(v ?? "").replace(/[^A-Za-z0-9_-]/g, "");
+  const sid = clean(sessionId);
+  const aid = clean(agentId);
+  return aid !== "" ? `${sid}--${aid}` : sid;
+}
+var injectStatePath = (io, stateId) => join(feedbackDir(io), ".inject_state", `${stateId}.json`);
+async function loadInjected(io, stateId) {
+  try {
+    const text = await io.readFile(injectStatePath(io, stateId));
+    if (text === undefined)
+      return new Set;
+    const data = JSON.parse(text);
+    if (isDict(data) && Array.isArray(data.injected))
+      return new Set(data.injected.map(String));
+  } catch {}
+  return new Set;
+}
+async function saveInjected(io, stateId, injected) {
+  try {
+    await io.writeFile(injectStatePath(io, stateId), JSON.stringify({ injected: [...injected].sort() }));
+  } catch {}
+}
+async function clearInjected(io, sessionId) {
+  const sid = injectStateId(sessionId);
+  if (sid === "")
+    return;
+  const dir = join(feedbackDir(io), ".inject_state");
+  const doomed = (await io.list(dir)).filter((e) => e.name === `${sid}.json` || e.name.startsWith(`${sid}--`) && e.name.endsWith(".json")).map((e) => join(dir, e.name));
+  await io.removeFiles(doomed);
 }
 var countStatePath = (io, sessionId) => join(feedbackDir(io), ".count_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
 async function loadBumpedRules(io, sessionId) {
@@ -4700,13 +4764,16 @@ async function formatFull(io, rule) {
 `);
 }
 var byCountThenName = (a, b) => b.count - a.count || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-async function buildOutput(io, rules) {
+async function formatRules(io, rules) {
   const blocks = [];
   for (const r of [...rules].sort(byCountThenName))
     blocks.push(await formatFull(io, r));
-  return tr(io.lang)("inject.header") + blocks.join(`
+  return blocks.join(`
 
 `);
+}
+async function buildOutput(io, rules) {
+  return tr(io.lang)("inject.header") + await formatRules(io, rules);
 }
 function brokenRulesText(io, broken) {
   if (broken.length === 0)
@@ -4714,12 +4781,14 @@ function brokenRulesText(io, broken) {
   return [tr(io.lang)("inject.brokenRules"), ...broken.map((b) => `- ${b.path}: ${b.reason}`)].join(`
 `);
 }
-async function feedbackInject(io) {
+async function feedbackInject(io, sessionId) {
   try {
+    if (sessionId)
+      await clearInjected(io, sessionId);
     const { rules: all, broken } = await scanRules(io);
     for (const b of broken)
       await logError(io, "rules", b.reason, b.path);
-    const rules = all.filter((r) => r.count >= 3);
+    const rules = all.filter((r) => r.count >= 3 && !isFileScoped(r));
     const parts = [brokenRulesText(io, broken)];
     if (rules.length > 0)
       parts.push(await buildOutput(io, rules));
@@ -4734,8 +4803,69 @@ async function feedbackInject(io) {
   }
 }
 
-// src/feedback-post-edit.ts
+// src/feedback-file-inject.ts
+var fileLabel2 = (projectDir, file) => {
+  const rel = relpath(file, projectDir);
+  return rel.startsWith("../") || rel === ".." ? file : rel;
+};
+function targetFiles(payload, io) {
+  const tool = jqStr(payload.tool_name);
+  const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
+  if (tool === "Read" || tool === "Edit" || tool === "Write" || tool === "MultiEdit") {
+    return truthy(toolInput.file_path) ? [String(toolInput.file_path)] : [];
+  }
+  if (tool === "Bash") {
+    const command = truthy(toolInput.command) ? String(toolInput.command) : "";
+    if (!command)
+      return [];
+    return heredocWrites(command, jqStr(payload.cwd) || io.cwd, io.env.HOME).map((w) => w.file);
+  }
+  return [];
+}
+async function buildFileOutput(io, rules, files, mode, projectDir) {
+  const label = files.map((f) => fileLabel2(projectDir, f)).join(", ");
+  return tr(io.lang)(mode === "read" ? "inject.fileHeaderRead" : "inject.fileHeaderEdit", { files: label }) + await formatRules(io, rules);
+}
 async function main4(io, payload) {
+  const files = targetFiles(payload, io);
+  if (files.length === 0)
+    return ok();
+  const rules = (await listRules(io)).filter((r) => r.count >= 3 && isFileScoped(r));
+  if (rules.length === 0)
+    return ok();
+  const projectDir = io.projectDir || io.cwd;
+  const matched = [];
+  for (const file of files) {
+    for (const r of rulesForFile(io, rules, file, projectDir))
+      if (!matched.includes(r))
+        matched.push(r);
+  }
+  if (matched.length === 0)
+    return ok();
+  const stateId = injectStateId(payload.session_id, payload.agent_id);
+  const injected = stateId !== "" ? await loadInjected(io, stateId) : new Set;
+  const fresh = matched.filter((r) => !injected.has(r.name));
+  if (fresh.length === 0)
+    return ok();
+  if (stateId !== "")
+    await saveInjected(io, stateId, new Set([...injected, ...fresh.map((r) => r.name)]));
+  const mode = jqStr(payload.tool_name) === "Read" ? "read" : "edit";
+  const text = await buildFileOutput(io, fresh, files, mode, projectDir);
+  return ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: text } })}
+`);
+}
+async function feedbackFileInject(io, payload) {
+  try {
+    return await main4(io, payload);
+  } catch (e) {
+    await logError(io, "feedback-file-inject", errorText(e));
+    return ok("", `[feedback-file-inject] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+
+// src/feedback-post-edit.ts
+async function main5(io, payload) {
   const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
   if (toolName !== "Edit" && toolName !== "Write" && toolName !== "MultiEdit")
     return ok();
@@ -4767,7 +4897,7 @@ async function main4(io, payload) {
 }
 async function feedbackPostEdit(io, payload) {
   try {
-    return await main4(io, payload);
+    return await main5(io, payload);
   } catch (e) {
     await logError(io, "feedback-post-edit", errorText(e));
     return ok("", `[feedback-post-edit] internal error (ignored): ${errorText(e)}
@@ -4900,6 +5030,8 @@ async function resetGate(io, payload) {
       }
     }
   }
+  if (source === "startup" || source === "clear" || source === "compact")
+    await clearInjected(io, sessionId);
   for (const dir of [stateDir, claudeDir]) {
     const old = [];
     for (const e of await io.list(dir)) {
@@ -4920,8 +5052,9 @@ async function resetGate(io, payload) {
         await io.removeTree(join(logRoot, e.name));
     }
   }
-  const seenDir = join(feedbackDir(io), ".classic_seen");
-  await io.removeFiles((await io.list(seenDir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS3).map((e) => join(seenDir, e.name)));
+  for (const dir of [join(feedbackDir(io), ".classic_seen"), join(feedbackDir(io), ".inject_state")]) {
+    await io.removeFiles((await io.list(dir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS3).map((e) => join(dir, e.name)));
+  }
   await io.removeDir(join(claudeDir, "hooks", "logs"));
   await io.removeDir(join(claudeDir, "hooks"));
   return ok();
@@ -5058,7 +5191,7 @@ async function runSteps(base, sessionId, event, steps, first = {}) {
 var sessionStart = (io, sessionId, payload) => runSteps(io, sessionId, "SessionStart", [(i) => resetGate(i, payload)]);
 async function userPromptSubmit(io, sessionId, options) {
   const text = await loadRules(io, options.rulesFile);
-  return runSteps(io, sessionId, "UserPromptSubmit", [(i) => feedbackInject(i)], text === "" ? {} : { additionalContext: [text] });
+  return runSteps(io, sessionId, "UserPromptSubmit", [(i) => feedbackInject(i, sessionId)], text === "" ? {} : { additionalContext: [text] });
 }
 var guardsTool = (options, tool) => options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool) || /^(Bash|Edit|Write|MultiEdit)$/.test(tool);
 function preToolUse(io, sessionId, options, payload) {
@@ -5074,11 +5207,14 @@ function postToolUse(io, sessionId, payload) {
   const run = (steps) => runSteps(io, sessionId, "PostToolUse", steps);
   if (/^(Agent|Task)$/.test(tool))
     return run([(i) => subagentReport(i, payload)]);
+  const inject = (i) => feedbackFileInject(i, payload);
+  if (tool === "Read")
+    return run([inject]);
   if (tool === "Bash")
-    return run(bashChangeSteps(payload));
+    return run([inject, ...bashChangeSteps(payload)]);
   if (!/^(Write|Edit|MultiEdit)$/.test(tool))
     return Promise.resolve(none);
-  return run([(i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, "rules", payload)]);
+  return run([inject, (i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, "rules", payload)]);
 }
 var notification2 = (io, sessionId, payload) => runSteps(io, sessionId, "Notification", [(i) => notification(i, "notify", payload)]);
 var stop = (io, sessionId, payload) => runSteps(io, sessionId, "Stop", [(i) => allStop(i, payload)]);
