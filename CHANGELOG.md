@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.14.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.13.0...v0.14.0) (2026-10-29)
+
+
+### Features
+
+* **codex:** install the hooks where Codex does not run plugin hooks, and keep a copy silent beside them ([#68](https://github.com/nonchan7720/claude-hook-gate/issues/68)) ([67947b8](https://github.com/nonchan7720/claude-hook-gate/commit/67947b816a74876158aaa743f8c1bef2a8c0eee6))
+* inject file-scoped feedback rules (`files`) when a matching file is read or edited ([#75](https://github.com/nonchan7720/claude-hook-gate/issues/75)) ([154700d](https://github.com/nonchan7720/claude-hook-gate/commit/154700d6c024389fd45ebbec8769ad2fd21b14bc))
+
+
+### Bug Fixes
+
+* **shared-run:** decide the lock owner with noclobber, not with mkdir's exit status (CI on ubuntu-26.04) ([#77](https://github.com/nonchan7720/claude-hook-gate/issues/77)) ([45d19b5](https://github.com/nonchan7720/claude-hook-gate/commit/45d19b5b8fc1c01f3dcae6d43202b144bca7488d))
+
 ## [0.13.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.12.0...v0.13.0) (2026-10-24)
 
 
