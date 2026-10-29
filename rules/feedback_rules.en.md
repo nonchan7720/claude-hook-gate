@@ -3,6 +3,7 @@
 ## Feedback management rules
 
 - When you receive feedback, a correction, a pointer or a preference from the user, **always save it before replying** as a Markdown file in `~/.claude/feedback/` or `.claude/feedback/`. If you forget to save it, the user has to repeat the same point in the next conversation.
+  The procedure for saving, updating and reviewing rules is in the `feedback` skill (`/feedback-gate:feedback`); follow it when it is available.
 
 ### Before starting work
 
@@ -36,6 +37,7 @@ count: 1
 expires: 2026-12-31          # optional. The rule is inactive after this date
 projects: ['~/src/myorg/**']  # optional. Applies only in matching projects
 when_exists: ['go.mod']      # optional. Applies only in projects where this glob exists
+files: ['**/*.go']           # optional. Injected when a file matching this glob is read / edited, not on every prompt
 ---
 
 (body of the rule)
@@ -51,7 +53,9 @@ when_exists: ['go.mod']      # optional. Applies only in projects where this glo
 - `projects`: a string or an array. Globs matched against the absolute path of the project directory (`**` crosses `/`; a leading `~` expands to HOME). Applies when at least one matches
 - `when_exists`: a string or an array. Globs relative to the project root. Applies when at least one exists
 
-Use these for language-specific or temporary rules. When a global rule and a project rule share a name and the project rule is inactive, the global one is not used either.
+Use these for temporary rules and rules limited to an organization or project. When a global rule and a project rule share a name and the project rule is inactive, the global one is not used either.
+
+A rule with `files` (optional; a string or an array of globs relative to the project root; `exclude_files` leaves files out) is not injected on every prompt. It is injected right after a matching file is read, edited or written (PostToolUse), with the file name, once per rule per turn. Use it for rules about one language or kind of file; the first paragraph of such a rule may spell out the concrete idiom in that language. In a `files` rule, `pre_edit` / `post_edit` entries may omit `path`; `files` is used.
 
 ### File naming
 

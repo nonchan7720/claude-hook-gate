@@ -3,19 +3,21 @@
 // post_edit / pre_edit の検査が抜けるのを塞ぐ。
 //
 // - post_edit: Edit / Write の PostToolUse（feedback-post-edit.ts）と同じく、書き換え後のファイル全体を評価する。
-// - pre_edit: Bash では実行前に書かれる内容が分からないので PreToolUse では評価できない。代わりに実行後、
+// - pre_edit: Bash では（heredoc を除き）実行前に書かれる内容が分からないので PreToolUse では評価できない。代わりに実行後、
 //   ファイルパスの条件（path / exclude_path / absent_sibling / absent_glob）と、このコマンドで書かれた内容
 //   （when / unless）を同じ条件で評価する。書かれた内容は、git が追跡しているファイルなら HEAD との差分の追加行
 //   （同じコマンドでコミット済みなら、開始以降のコミットの追加行）、追跡外のファイル（新規作成など）なら全文
 //   （Write の content と同じ扱い）。既に書かれた後なので止められない: deny / ask は block（書いた内容を直させる）
 //   にし、メッセージに「実行後に検知した」旨を添える。同じセッション・同じファイルで既に ask した（承認済みの）
-//   ルールは、Edit と同じく warn に落とす。
+//   ルールは、Edit と同じく warn に落とす。文面から書き先と本文が分かる heredoc の書き込み（bash-heredoc.ts）は
+//   PreToolUse で feedback-guard.ts が Write と同じく判定済みなので、ここでは pre_edit を掛けない（post_edit は掛ける）。
 //
 // 複数ファイルの結果は 1 つにまとめる（block があれば全件を 1 つの reason に、warn は stderr に）。
 // 違反したルールの count は Edit / Write と同じく autoBumpCounts で上げ、その旨をメッセージに添える。
 // hook 自身のバグで作業を止めないよう、例外は必ず握りつぶして exit 0 にする（stderr に1行だけ出し、~/.claude/feedback/.errors.jsonl に残す）。
 // 壊れたルール（読めないファイル・不正な enforce の要素）は listRules / evalPostEdit / evalPreEdit が飛ばして記録するので、
 // 他のルールの検査は続く。
+import { heredocWrites } from './bash-heredoc.ts'
 import { downgradeRepeatedAsks } from './feedback-guard.ts'
 import {
   autoBumpCounts,
@@ -32,7 +34,7 @@ import {
 import { tr } from './i18n.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
 import { basename, dirname, isAbsolute, join, relpath } from './path.ts'
-import { type Dict, isDict, truthy } from './pyutil.ts'
+import { type Dict, isDict, jqStr, truthy } from './pyutil.ts'
 
 const EVENTS = new Set(['post_edit', 'pre_edit'])
 
@@ -89,11 +91,14 @@ async function main(io: Io, payload: Dict, files: string[], threshold: number): 
   if (!wantsBashEdits(rules)) return ok()
   const projectDir = io.projectDir || io.cwd
   const needContent = hasPreEditContent(rules)
+  const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined)
+  const judged = new Set(heredocWrites(command, jqStr(payload.cwd) || io.cwd, io.env.HOME).map((w) => w.file))
 
   const found: Found[] = []
   for (const file of [...files].sort()) {
     const abs = isAbsolute(file) ? file : join(projectDir, file)
     for (const v of await evalPostEdit(io, rules, abs)) found.push({ file: abs, v })
+    if (judged.has(abs)) continue // heredoc の書き込みは PreToolUse で pre_edit 判定済み
     const content = needContent ? await writtenContent(io, abs, threshold) : ''
     const pre = await evalPreEdit(io, rules, abs, content)
     if (pre.length === 0) continue

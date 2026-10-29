@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { hashKey, runShared, type SharedOutcome, shareId } from '../src/shared-run.ts'
+import { hashKey, runShared, runWithSlot, type SharedOutcome, shareId } from '../src/shared-run.ts'
 import { makeIo, sharedDirOf, waitForSharedLock, withTmp } from './helpers/node-io.ts'
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -143,14 +143,16 @@ describe('runShared with file lists', () => {
       expect(r.waiter.shared).toBe(false)
     }))
 
-  test('runs that cannot be shared do not overlap: the second starts after the first ends', () =>
+  test("runs that cannot be shared do not overlap, and the waiters' file lists are batched into the next run", () =>
     withTmp(async (proj) => {
       let active = 0
       let peak = 0
       let runs = 0
-      const execute = async () => {
+      const ranWith: string[][] = []
+      const execute = async (_pid: string[], files: string[]) => {
         runs++
         peak = Math.max(peak, ++active)
+        ranWith.push(files)
         await sleep(300)
         active--
         return outcome(`run${runs}`)
@@ -162,10 +164,35 @@ describe('runShared with file lists', () => {
             waited.push(files.join(','))
           },
         })
-      await Promise.all([call(['a.py']), call(['b.py']), call(['c.py'])])
-      expect(runs).toBe(3)
+      const first = call(['a.py'])
+      await sleep(100) // a.py が実行側になってから b.py と c.py が来る
+      const [r1] = await Promise.all([first, call(['b.py']), call(['c.py'])])
+      // a.py の実行中に来た b.py と c.py は受け取れないので待ち、終わったあと 1 回にまとめて走る（一方が実行側、他方が受け取る）。
+      expect(runs).toBe(2)
       expect(peak).toBe(1)
-      expect(waited).toHaveLength(2)
+      expect(waited.sort()).toEqual(['b.py', 'c.py'])
+      expect(ranWith).toEqual([['a.py'], ['b.py', 'c.py']])
+      expect(r1.shared).toBe(false)
+      // 置かれた一覧は消えている
+      const shared = await sharedDirOf(proj)
+      const queues = fs.readdirSync(shared).filter((f) => f.endsWith('.queue'))
+      expect(queues.flatMap((q) => fs.readdirSync(path.join(shared, q)))).toEqual([])
+    }))
+
+  test('a stale request left by a dead waiter is dropped, not batched', () =>
+    withTmp(async (proj) => {
+      const queue = path.join(await sharedDirOf(proj), `${hashKey('k')}.queue`)
+      fs.mkdirSync(queue, { recursive: true })
+      fs.writeFileSync(path.join(queue, 'old.json'), JSON.stringify({ started: 1000, key: 'k', files: ['z.py'] }))
+      fs.writeFileSync(path.join(queue, 'other.json'), JSON.stringify({ started: Date.now(), key: 'other', files: ['o.py'] }))
+      let ranWith: string[] = []
+      await runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async (_pid, files) => {
+        ranWith = files
+        return outcome('x')
+      })
+      expect(ranWith).toEqual(['a.py'])
+      expect(fs.existsSync(path.join(queue, 'old.json'))).toBe(false)
+      expect(fs.existsSync(path.join(queue, 'other.json'))).toBe(true) // 別のキーの分は、そのキーの実行側に残す
     }))
 
   test('different keys with the same serial do not overlap', () =>
@@ -346,5 +373,63 @@ describe('runShared with file lists', () => {
       const r = await runShared(makeIo({ projectDir: proj }), 'k', ['a.py'], 10_000, async () => outcome('mine'))
       expect(r.outcome.out).toBe('mine')
       expect(r.shared).toBe(false)
+    }))
+})
+
+describe('maxParallel', () => {
+  // 同時に走っている数のピークを数える execute。
+  const counter = (ms: number) => {
+    const state = { active: 0, peak: 0, runs: 0 }
+    const execute = async () => {
+      state.runs++
+      state.peak = Math.max(state.peak, ++state.active)
+      await sleep(ms)
+      state.active--
+      return outcome('x')
+    }
+    return { state, execute }
+  }
+
+  test('different commands run at most maxParallel at a time, and all of them run', () =>
+    withTmp(async (proj) => {
+      const { state, execute } = counter(250)
+      await Promise.all(['k1', 'k2', 'k3', 'k4'].map((k) => runShared(makeIo({ projectDir: proj }), k, [], 10_000, execute, { maxParallel: 2 })))
+      expect(state.runs).toBe(4)
+      expect(state.peak).toBe(2)
+      const shared = await sharedDirOf(proj)
+      expect(fs.readdirSync(shared).filter((f) => fs.statSync(path.join(shared, f)).isDirectory())).toEqual([]) // 枠もロックも外れている
+    }))
+
+  test('maxParallel 0 means no limit', () =>
+    withTmp(async (proj) => {
+      const { state, execute } = counter(250)
+      await Promise.all(['k1', 'k2', 'k3'].map((k) => runShared(makeIo({ projectDir: proj }), k, [], 10_000, execute, { maxParallel: 0 })))
+      expect(state.peak).toBe(3)
+    }))
+
+  test('a slot left by a dead process is taken over', () =>
+    withTmp(async (proj) => {
+      const slot = path.join(await sharedDirOf(proj), 'slot.0')
+      fs.mkdirSync(slot, { recursive: true })
+      fs.writeFileSync(path.join(slot, 'info.json'), JSON.stringify({ started: 1000, timeoutMs: 1000 }))
+      const r = await runShared(makeIo({ projectDir: proj }), 'k', [], 10_000, async () => outcome('mine'), { maxParallel: 1 })
+      expect(r.outcome.out).toBe('mine')
+      expect(fs.existsSync(slot)).toBe(false)
+    }))
+
+  test("runWithSlot (share: false) takes a slot too and writes the command's pid into it", () =>
+    withTmp(async (proj) => {
+      const { state, execute } = counter(250)
+      let pidFiles: string[] = []
+      const call = () =>
+        runWithSlot(makeIo({ projectDir: proj }), 1, 10_000, async (p) => {
+          pidFiles = p
+          return execute()
+        })
+      await Promise.all([call(), call()])
+      expect(state.peak).toBe(1)
+      const shared = await sharedDirOf(proj)
+      expect(pidFiles).toEqual([path.join(shared, 'slot.0', 'pid')])
+      expect(fs.existsSync(path.join(shared, 'slot.0'))).toBe(false)
     }))
 })

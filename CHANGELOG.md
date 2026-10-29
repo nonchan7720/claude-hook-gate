@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.13.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.12.0...v0.13.0) (2026-10-24)
+
+
+### Features
+
+* cap concurrent gate commands with max_parallel and batch waiting agents' files into one run ([#72](https://github.com/nonchan7720/claude-hook-gate/issues/72)) ([99b06ca](https://github.com/nonchan7720/claude-hook-gate/commit/99b06ca87389a177fe5b38a7eb553e382069feff))
+
+## [0.12.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.11.0...v0.12.0) (2026-10-23)
+
+
+### Features
+
+* check heredoc writes in Bash with pre_edit before the command runs ([#70](https://github.com/nonchan7720/claude-hook-gate/issues/70)) ([de9e1c0](https://github.com/nonchan7720/claude-hook-gate/commit/de9e1c085a602a77d6e974c56f78a98ee5446a7f))
+
+## [0.11.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.10.1...v0.11.0) (2026-10-23)
+
+
+### Features
+
+* bundle feedback and gate skills ([#56](https://github.com/nonchan7720/claude-hook-gate/issues/56)) ([bd4f698](https://github.com/nonchan7720/claude-hook-gate/commit/bd4f69882d672f51036cda3708c8899c046e9b09))
+
+## [0.10.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.10.0...v0.10.1) (2026-10-21)
+
+
+### Bug Fixes
+
+* keep another session's edits in the same working tree out of this session's Bash changes ([#66](https://github.com/nonchan7720/claude-hook-gate/issues/66)) ([b150d98](https://github.com/nonchan7720/claude-hook-gate/commit/b150d98c5a2b0cdeb59c419fb9ff6bc462aea5c1))
+
 ## [0.10.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.9.1...v0.10.0) (2026-10-21)
 
 

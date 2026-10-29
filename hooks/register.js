@@ -252,6 +252,8 @@ notify:
 inject:
   header: "# Confirmed feedback rules (count >= 3)\\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\\n\\n"
   ruleTitle: "■ {{name}} (pointed out {{count}} times so far)"
+  fileHeaderRead: "# Feedback rules for {{files}}\\nThese confirmed rules apply to the file you just read. Follow them when you edit it or write files like it. A hook blocks violations.\\n\\n"
+  fileHeaderEdit: "# Feedback rules for {{files}}\\nThese confirmed rules apply to the file you just edited. Check that edit against them and follow them in the edits that follow. A hook blocks violations.\\n\\n"
   brokenRules: "# Unreadable feedback rules\\nThe following rule files could not be read and are disabled (where only an enforce entry is invalid, only that entry is disabled). Their enforcement does not work until they are fixed. Tell the user:"
 
 rules:
@@ -401,6 +403,8 @@ notify:
 inject:
   header: "# 確定フィードバックルール（count >= 3）\\nこれらは繰り返し指摘された確定ルール。違反すると hook がブロックする。\\n\\n"
   ruleTitle: "■ {{name}} (これまで {{count}} 回指摘されています)"
+  fileHeaderRead: "# {{files}} に適用されるフィードバックルール\\n今読んだファイルに適用される確定ルール。このファイルや同種のファイルを書くときに従うこと。違反すると hook がブロックする。\\n\\n"
+  fileHeaderEdit: "# {{files}} に適用されるフィードバックルール\\n今編集したファイルに適用される確定ルール。今回の編集をこれに照らして確かめ、以降の編集でも従うこと。違反すると hook がブロックする。\\n\\n"
   brokenRules: "# 読めない feedback ルール\\n次のルールファイルが読めず無効になっています（enforce の要素だけが不正なものは、その要素だけが無効）。直すまで、その強制は効きません。ユーザーに伝えてください:"
 
 rules:
@@ -888,18 +892,47 @@ async function loadRule(io, path) {
   const data = loadYamlText(m[1] ?? "");
   if (!isDict(data) || !truthy(data.name))
     return null;
+  const files = stringList(data.files);
+  const excludeFiles = stringList(data.exclude_files);
   const { enforce, problems } = normalizeEnforce(io, data.enforce);
   return {
     name: String(data.name),
     description: truthy(data.description) ? String(data.description) : "",
     count: toCount(data.count),
-    enforce,
+    enforce: inheritFiles(enforce, files, excludeFiles),
     ...problems.length > 0 ? { problems } : {},
     path,
     expires: parseExpires(data.expires),
     projects: stringList(data.projects),
-    whenExists: stringList(data.when_exists)
+    whenExists: stringList(data.when_exists),
+    files,
+    excludeFiles
   };
+}
+var PATH_EVENTS = new Set(["pre_edit", "post_edit"]);
+function inheritFiles(enforce, files, excludeFiles) {
+  if (files.length === 0)
+    return enforce;
+  return enforce.map((entry) => {
+    if (typeof entry.event !== "string" || !PATH_EVENTS.has(entry.event) || truthy(entry.path))
+      return entry;
+    const out = { ...entry, path: [...files] };
+    if (!truthy(entry.exclude_path) && excludeFiles.length > 0)
+      out.exclude_path = [...excludeFiles];
+    return out;
+  });
+}
+var isFileScoped = (rule) => rule.files.length > 0;
+function rulesForFile(io, rules, filePath, projectDir) {
+  const dir = projectDir || io.projectDir || io.cwd;
+  const [, rel] = splitRoot(dir, filePath);
+  return rules.filter((rule) => {
+    if (rule.files.length === 0)
+      return false;
+    if (!compileGlobs(rule.files).some((rx) => rx.test(rel)))
+      return false;
+    return !(rule.excludeFiles.length > 0 && compileGlobs(rule.excludeFiles).some((rx) => rx.test(rel)));
+  });
 }
 function expandTilde(io, pattern) {
   const home = io.env.HOME;
@@ -1085,6 +1118,37 @@ async function writeFileAtomic(io, path, text) {
     return;
   });
   await io.writeFile(path, text);
+}
+function injectStateId(sessionId, agentId) {
+  const clean = (v) => String(v ?? "").replace(/[^A-Za-z0-9_-]/g, "");
+  const sid = clean(sessionId);
+  const aid = clean(agentId);
+  return aid !== "" ? `${sid}--${aid}` : sid;
+}
+var injectStatePath = (io, stateId) => join(feedbackDir(io), ".inject_state", `${stateId}.json`);
+async function loadInjected(io, stateId) {
+  try {
+    const text = await io.readFile(injectStatePath(io, stateId));
+    if (text === undefined)
+      return new Set;
+    const data = JSON.parse(text);
+    if (isDict(data) && Array.isArray(data.injected))
+      return new Set(data.injected.map(String));
+  } catch {}
+  return new Set;
+}
+async function saveInjected(io, stateId, injected) {
+  try {
+    await io.writeFile(injectStatePath(io, stateId), JSON.stringify({ injected: [...injected].sort() }));
+  } catch {}
+}
+async function clearInjected(io, sessionId) {
+  const sid = injectStateId(sessionId);
+  if (sid === "")
+    return;
+  const dir = join(feedbackDir(io), ".inject_state");
+  const doomed = (await io.list(dir)).filter((e) => e.name === `${sid}.json` || e.name.startsWith(`${sid}--`) && e.name.endsWith(".json")).map((e) => join(dir, e.name));
+  await io.removeFiles(doomed);
 }
 var countStatePath = (io, sessionId) => join(feedbackDir(io), ".count_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
 async function loadBumpedRules(io, sessionId) {
@@ -2211,18 +2275,104 @@ function sharedDir(io) {
   }
   return cached;
 }
+var REQUEST_STALE_MS = MAX_WAIT_MS + GRACE_MS;
+var SLOT_WAIT_MS = 5000;
+var mkdirAtomicIn = async (io, dir, path) => (await io.run(["sh", "-c", 'mkdir -p "$1" && mkdir "$2"', "sh", dir, path])).exitCode === 0;
+var readInfoOf = async (io, lock) => {
+  const text = await io.readFile(join(lock, "info.json"));
+  try {
+    const info = text === undefined ? undefined : JSON.parse(text);
+    if (!isDict(info))
+      return;
+    return {
+      started: Number.isFinite(Number(info.started)) ? Number(info.started) : undefined,
+      limit: Number(info.timeoutMs) || 0,
+      key: typeof info.key === "string" ? info.key : undefined,
+      files: Array.isArray(info.files) ? info.files.map(String) : undefined
+    };
+  } catch {
+    return;
+  }
+};
+var remainingMsOf = async (io, lock, info) => {
+  const now = await io.now();
+  const started = info?.started ?? (await io.stat(lock))?.mtimeMs ?? now;
+  const left = started + (info?.limit ?? 0) + GRACE_MS - now;
+  if (left <= 0)
+    return left;
+  const pid = (await io.readFile(join(lock, "pid")))?.trim();
+  if (pid) {
+    if (/^\d+$/.test(pid) && (await io.run(["sh", "-c", 'kill -0 "$1" 2>/dev/null', "sh", pid])).exitCode === 0)
+      return left;
+    const polls = Math.ceil(DEAD_GRACE_MS / (Number(POLL_SECONDS) * 1000));
+    const script = `i=0; while [ -d "$1" ] && [ "$i" -lt ${polls} ]; do sleep ${POLL_SECONDS}; i=$((i+1)); done; [ ! -d "$1" ]`;
+    return (await io.run(["sh", "-c", script, "sh", lock])).exitCode === 0 ? GRACE_MS : 0;
+  }
+  return info && now - started > GRACE_MS ? 0 : left;
+};
+var slotPath = (dir, i) => join(dir, `slot.${i}`);
+async function takeSlot(io, dir, maxParallel, timeoutMs) {
+  if (maxParallel <= 0)
+    return { ok: true };
+  const claimSlot = async (slot) => {
+    if (!await mkdirAtomicIn(io, dir, slot))
+      return false;
+    await io.writeFile(join(slot, "info.json"), JSON.stringify({ started: await io.now(), timeoutMs }));
+    return true;
+  };
+  for (let i = 0;i < maxParallel; i++) {
+    const slot = slotPath(dir, i);
+    if (await claimSlot(slot))
+      return { slot, ok: true };
+    if (!await io.exists(slot))
+      return { ok: true };
+    if (await remainingMsOf(io, slot, await readInfoOf(io, slot)) <= 0) {
+      await io.removeTree(slot);
+      if (await claimSlot(slot))
+        return { slot, ok: true };
+    }
+  }
+  return { ok: false };
+}
+var releaseSlot = async (io, slot) => {
+  if (slot)
+    await io.removeTree(slot);
+};
+async function waitSlot(io, dir, maxParallel) {
+  const checks = Array.from({ length: maxParallel }, (_, i) => `[ -d "$1/slot.${i}" ]`);
+  await io.run(["sh", "-c", `while ${checks.join(" && ")}; do sleep ${POLL_SECONDS}; done`, "sh", dir], { timeoutMs: SLOT_WAIT_MS });
+}
+async function runWithSlot(io, maxParallel, timeoutMs, execute) {
+  if (maxParallel <= 0)
+    return execute([]);
+  const dir = await sharedDir(io);
+  for (;; ) {
+    const { slot, ok } = await takeSlot(io, dir, maxParallel, timeoutMs);
+    if (ok) {
+      try {
+        return await execute(slot ? [join(slot, "pid")] : []);
+      } finally {
+        await releaseSlot(io, slot);
+      }
+    }
+    await waitSlot(io, dir, maxParallel);
+  }
+}
 var normalizeFiles = (files) => [...new Set(files)].sort();
 var shareId = (key, files) => `${hashKey(key)}.${hashKey(JSON.stringify(normalizeFiles(files)))}`;
 async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
-  const mine = normalizeFiles(files);
+  let mine = normalizeFiles(files);
   const dir = await sharedDir(io);
   const keyPrefix = `${hashKey(key)}.`;
-  const ownLock = join(dir, `${shareId(key, mine)}.run`);
+  let ownLock = join(dir, `${shareId(key, mine)}.run`);
   const resultOf = (lock) => `${lock.slice(0, -".run".length)}.result.json`;
+  const maxParallel = hooks.maxParallel ?? 0;
   const serialLock = join(dir, `${hashKey(hooks.serial ?? key)}.serial`);
-  const mkdirAtomic = async (path) => (await io.run(["sh", "-c", 'mkdir -p "$1" && mkdir "$2"', "sh", dir, path])).exitCode === 0;
+  const queueDir = join(dir, `${hashKey(hooks.serial ?? key)}.queue`);
+  let request;
+  const mkdirAtomic = (path) => mkdirAtomicIn(io, dir, path);
   const claim = () => mkdirAtomic(ownLock);
-  const lead = async () => {
+  const lead = async (slot) => {
     const resultFile = resultOf(ownLock);
     try {
       const started = await io.now();
@@ -2230,7 +2380,8 @@ async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
       await io.writeFile(join(serialLock, "info.json"), JSON.stringify({ started, timeoutMs }));
       await io.removeFiles([resultFile]);
       try {
-        const outcome = await execute([join(serialLock, "pid"), join(ownLock, "pid")]);
+        const pidFiles = [join(serialLock, "pid"), join(ownLock, "pid"), ...slot ? [join(slot, "pid")] : []];
+        const outcome = await execute(pidFiles, mine);
         await io.writeFile(resultFile, JSON.stringify({ key, files: mine, ...outcome }));
         return outcome;
       } finally {
@@ -2238,39 +2389,58 @@ async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
       }
     } finally {
       await io.removeTree(serialLock);
+      await releaseSlot(io, slot);
     }
   };
-  const readInfo = async (lock) => {
-    const text = await io.readFile(join(lock, "info.json"));
-    try {
-      const info = text === undefined ? undefined : JSON.parse(text);
-      if (!isDict(info))
-        return;
-      return {
-        started: Number.isFinite(Number(info.started)) ? Number(info.started) : undefined,
-        limit: Number(info.timeoutMs) || 0,
-        key: typeof info.key === "string" ? info.key : undefined,
-        files: Array.isArray(info.files) ? info.files.map(String) : undefined
-      };
-    } catch {
+  const readInfo = (lock) => readInfoOf(io, lock);
+  const remainingMs = (lock, info) => remainingMsOf(io, lock, info);
+  const postRequest = async () => {
+    if (request !== undefined || mine.length === 0)
       return;
-    }
+    request = join(queueDir, `${shareId(key, mine)}.json`);
+    await io.writeFile(request, JSON.stringify({ started: await io.now(), key, files: mine }));
   };
-  const remainingMs = async (lock, info) => {
+  const withdrawRequest = async () => {
+    if (request === undefined)
+      return;
+    await io.removeFiles([request]);
+    request = undefined;
+  };
+  const absorbRequests = async () => {
+    if (mine.length === 0)
+      return;
     const now = await io.now();
-    const started = info?.started ?? (await io.stat(lock))?.mtimeMs ?? now;
-    const left = started + (info?.limit ?? 0) + GRACE_MS - now;
-    if (left <= 0)
-      return left;
-    const pid = (await io.readFile(join(lock, "pid")))?.trim();
-    if (pid) {
-      if (/^\d+$/.test(pid) && (await io.run(["sh", "-c", 'kill -0 "$1" 2>/dev/null', "sh", pid])).exitCode === 0)
-        return left;
-      const polls = Math.ceil(DEAD_GRACE_MS / (Number(POLL_SECONDS) * 1000));
-      const script = `i=0; while [ -d "$1" ] && [ "$i" -lt ${polls} ]; do sleep ${POLL_SECONDS}; i=$((i+1)); done; [ ! -d "$1" ]`;
-      return (await io.run(["sh", "-c", script, "sh", lock])).exitCode === 0 ? GRACE_MS : 0;
+    const union = [...mine];
+    const consumed = [];
+    for (const e of await io.list(queueDir)) {
+      if (e.kind !== "file" || !e.name.endsWith(".json"))
+        continue;
+      const path = join(queueDir, e.name);
+      const text = await io.readFile(path);
+      if (text === undefined)
+        continue;
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        continue;
+      }
+      if (!isDict(parsed))
+        continue;
+      const started = Number(parsed.started);
+      if (Number.isFinite(started) && started < now - REQUEST_STALE_MS) {
+        consumed.push(path);
+        continue;
+      }
+      if (parsed.key !== key || !Array.isArray(parsed.files))
+        continue;
+      union.push(...parsed.files.map(String));
+      consumed.push(path);
     }
-    return info && now - started > GRACE_MS ? 0 : left;
+    if (consumed.length > 0)
+      await io.removeFiles(consumed);
+    mine = normalizeFiles(union);
+    ownLock = join(dir, `${shareId(key, mine)}.run`);
   };
   const covers = (theirs) => theirs !== undefined && mine.every((f) => theirs.includes(f));
   const findRunning = async () => {
@@ -2317,60 +2487,78 @@ async function runShared(io, key, files, timeoutMs, execute, hooks = {}) {
     await hooks.onWait?.();
   };
   const waitGone = async (path, left) => {
-    const script = `while [ -d "$1" ]; do if [ -s "$1/pid" ] && ! kill -0 "$(cat "$1/pid")" 2>/dev/null; then exit 3; fi; sleep ${POLL_SECONDS}; done`;
-    await io.run(["sh", "-c", script, "sh", path], { timeoutMs: Math.min(Math.max(left, 1), MAX_WAIT_MS) });
+    const info = await io.readFile(join(path, "info.json")) ?? "";
+    const script = 'while [ -d "$1" ]; do ' + 'if [ -n "$2" ] && [ "$(cat "$1/info.json" 2>/dev/null)" != "$2" ]; then exit 4; fi; ' + `if [ -s "$1/pid" ] && ! kill -0 "$(cat "$1/pid")" 2>/dev/null; then exit 3; fi; sleep ${POLL_SECONDS}; done`;
+    await io.run(["sh", "-c", script, "sh", path, info], { timeoutMs: Math.min(Math.max(left, 1), MAX_WAIT_MS) });
   };
-  for (let round = 0;round < MAX_ROUNDS; round++) {
-    const found = await findRunning();
-    if (!found.lock && found.pending) {
-      await io.run(["sleep", POLL_SECONDS]);
-      round--;
-      continue;
-    }
-    let target = found.lock;
-    if (!target) {
-      if (!await mkdirAtomic(serialLock)) {
-        const info = await readInfo(serialLock);
-        const left = await remainingMs(serialLock, info);
-        if (left <= 0) {
-          await io.removeTree(serialLock);
-          continue;
-        }
-        if (!info) {
-          if (!await io.exists(serialLock))
-            continue;
-          await io.run(["sleep", POLL_SECONDS]);
+  try {
+    return await rounds();
+  } finally {
+    await withdrawRequest();
+  }
+  async function rounds() {
+    for (let round = 0;round < MAX_ROUNDS; round++) {
+      const found = await findRunning();
+      if (!found.lock && found.pending) {
+        await io.run(["sleep", POLL_SECONDS]);
+        round--;
+        continue;
+      }
+      let target = found.lock;
+      if (!target) {
+        const { slot, ok } = await takeSlot(io, dir, maxParallel, timeoutMs);
+        if (!ok) {
+          await waitSlot(io, dir, maxParallel);
           round--;
           continue;
         }
-        const again = await findRunning();
-        if (!again.lock) {
-          await announce();
-          await waitGone(serialLock, left);
-          continue;
+        if (!await mkdirAtomic(serialLock)) {
+          await releaseSlot(io, slot);
+          const info = await readInfo(serialLock);
+          const left = await remainingMs(serialLock, info);
+          if (left <= 0) {
+            await io.removeTree(serialLock);
+            continue;
+          }
+          if (!info) {
+            if (!await io.exists(serialLock))
+              continue;
+            await io.run(["sleep", POLL_SECONDS]);
+            round--;
+            continue;
+          }
+          const again = await findRunning();
+          if (!again.lock) {
+            await postRequest();
+            await announce();
+            await waitGone(serialLock, left);
+            continue;
+          }
+          target = again.lock;
+        } else {
+          await absorbRequests();
+          if (await claim())
+            return { outcome: await lead(slot), shared: false };
+          await releaseSlot(io, slot);
+          await io.removeTree(serialLock);
+          target = ownLock;
         }
-        target = again.lock;
-      } else if (await claim()) {
-        return { outcome: await lead(), shared: false };
-      } else {
-        await io.removeTree(serialLock);
-        target = ownLock;
       }
+      const left = await remainingMs(target, await readInfo(target));
+      if (left <= 0) {
+        await io.removeTree(target);
+        continue;
+      }
+      await announce();
+      await waitGone(target, left);
+      if (await io.exists(target))
+        continue;
+      const outcome = await readOutcome(resultOf(target));
+      if (outcome)
+        return { outcome, shared: true };
     }
-    const left = await remainingMs(target, await readInfo(target));
-    if (left <= 0) {
-      await io.removeTree(target);
-      continue;
-    }
-    await announce();
-    await waitGone(target, left);
-    if (await io.exists(target))
-      continue;
-    const outcome = await readOutcome(resultOf(target));
-    if (outcome)
-      return { outcome, shared: true };
+    return { outcome: await runWithSlot(io, maxParallel, timeoutMs, (pidFiles) => execute(pidFiles, mine)), shared: false };
   }
-  return { outcome: await execute([]), shared: false };
 }
 
 // src/gate.ts
@@ -2388,6 +2576,17 @@ var FAIL_TAIL_LINES = 60;
 var FAIL_DETAIL_MAX = 12000;
 var UNMATCHED_SHOWN = 5;
 var MAX_TIMEOUT_MS = 600000;
+var DEFAULT_MAX_PARALLEL = 2;
+function maxParallelOf(cfg) {
+  const v = cfg?.max_parallel;
+  if (v === undefined || v === null)
+    return DEFAULT_MAX_PARALLEL;
+  if (v === false)
+    return 0;
+  if (typeof v !== "number" || !Number.isFinite(v))
+    return DEFAULT_MAX_PARALLEL;
+  return Math.max(0, Math.trunc(v));
+}
 var mk = (root, rel) => `${root}\x00${rel}`;
 var unmk = (k) => {
   const i = k.indexOf("\x00");
@@ -2578,6 +2777,7 @@ class Gate {
   running = [];
   stopTicking;
   runningOwner;
+  maxParallel = DEFAULT_MAX_PARALLEL;
   ranThisRun = new Set;
   executedLabels = [];
   constructor(io, opts = {}) {
@@ -2892,13 +3092,18 @@ class Gate {
     return { out, ok: r.exitCode === 0 && !timedOut && r.error === undefined, timedOut, logpath };
   }
   async runCmdShared(cmd, cwd, timeout, name, extraEnv, scope, onWait) {
+    const timeoutMs = Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS);
     if (scope.share === false)
-      return this.runCmd(cmd, cwd, timeout, name, extraEnv);
+      return runWithSlot(this.io, this.maxParallel, timeoutMs, (pidFiles) => this.runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles));
     const env = { ...this.baseEnv, ...extraEnv };
     const key = shareKey(scope.root, cwd, cmd, env);
-    const r = await runShared(this.io, key, shareFiles(env, scope.files !== false), Math.min(Math.round(timeout * 1000), MAX_TIMEOUT_MS), (pidFiles) => this.runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles), {
+    const r = await runShared(this.io, key, shareFiles(env, scope.files !== false), timeoutMs, (pidFiles, files) => {
+      const runEnv = scope.files !== false && files.length > 0 ? mergeFilesEnv(extraEnv ?? {}, filesEnv(files)) : extraEnv;
+      return this.runCmd(cmd, cwd, timeout, name, runEnv, pidFiles);
+    }, {
       onWait,
-      serial: serialKey(name, cmd)
+      serial: serialKey(name, cmd),
+      maxParallel: this.maxParallel
     });
     if (!r.shared)
       return r.outcome;
@@ -3135,7 +3340,10 @@ ${details}` : "");
     const text = await this.io.readFile(path);
     if (text === undefined)
       throw new Error(this.t("gate.cannotReadYaml", { path }));
-    return parseYaml(text);
+    const cfg = parseYaml(text);
+    if (path === this.action)
+      this.maxParallel = maxParallelOf(cfg);
+    return cfg;
   }
   noteUnmatchedFiles(rels, triggered) {
     const covered = new Set;
@@ -3697,11 +3905,293 @@ async function allStop(io, payload) {
   return { exitCode: 0, stdout, stderr };
 }
 
+// src/bash-heredoc.ts
+var SPLIT_OPS = new Set(["|", "||", "&&", ";", "&", "(", ")"]);
+function tokenizeLine(line) {
+  const toks = [];
+  let word = "";
+  let dynamic = false;
+  let quoted = false;
+  let has = false;
+  const flush = () => {
+    if (has)
+      toks.push({ kind: "word", text: word, dynamic, quoted });
+    word = "";
+    dynamic = false;
+    quoted = false;
+    has = false;
+  };
+  const op = (text) => toks.push({ kind: "op", text, dynamic: false, quoted: false });
+  let i = 0;
+  while (i < line.length) {
+    const c = line[i] ?? "";
+    if (c === " " || c === "\t") {
+      flush();
+      i++;
+      continue;
+    }
+    if (c === "#" && !has)
+      break;
+    if (c === "'") {
+      const end = line.indexOf("'", i + 1);
+      const body = end === -1 ? line.slice(i + 1) : line.slice(i + 1, end);
+      word += body;
+      has = true;
+      quoted = true;
+      i = end === -1 ? line.length : end + 1;
+      continue;
+    }
+    if (c === '"') {
+      i++;
+      while (i < line.length && line[i] !== '"') {
+        if (line[i] === "\\" && i + 1 < line.length) {
+          i++;
+        } else if (line[i] === "$" || line[i] === "`")
+          dynamic = true;
+        word += line[i];
+        i++;
+      }
+      i++;
+      has = true;
+      quoted = true;
+      continue;
+    }
+    if (c === "\\") {
+      if (i + 1 < line.length)
+        word += line[i + 1];
+      has = true;
+      quoted = true;
+      i += 2;
+      continue;
+    }
+    if (c === "<" || c === ">") {
+      const fd = has && /^\d+$/.test(word);
+      if (fd) {
+        word = "";
+        has = false;
+      } else
+        flush();
+      if (c === "<" && line[i + 1] === "<" && line[i + 2] === "<") {
+        op("<<<");
+        i += 3;
+        continue;
+      }
+      if (c === "<" && line[i + 1] === "<") {
+        i += 2;
+        if (line[i] === "-") {
+          op("<<-");
+          i++;
+        } else
+          op("<<");
+        continue;
+      }
+      let text = c;
+      i++;
+      if (c === ">" && line[i] === ">") {
+        text = ">>";
+        i++;
+      }
+      if (line[i] === "&") {
+        text = "fd";
+        i++;
+      } else if (fd)
+        text = "fd";
+      op(text);
+      continue;
+    }
+    if (c === "&" && line[i + 1] === ">") {
+      flush();
+      i += 2;
+      if (line[i] === ">") {
+        op(">>");
+        i++;
+      } else
+        op(">");
+      continue;
+    }
+    if (c === "|" || c === "&" || c === ";" || c === "(" || c === ")") {
+      flush();
+      if ((c === "|" || c === "&") && line[i + 1] === c) {
+        op(c + c);
+        i += 2;
+      } else {
+        op(c);
+        i++;
+      }
+      continue;
+    }
+    if (c === "$" || c === "`")
+      dynamic = true;
+    word += c;
+    has = true;
+    i++;
+  }
+  flush();
+  return toks;
+}
+function segmentsOf(toks) {
+  const segs = [];
+  let cur = { sep: "", words: [], redirects: [], heredocs: [] };
+  for (let i = 0;i < toks.length; i++) {
+    const t = toks[i];
+    if (t.kind === "word") {
+      cur.words.push(t);
+      continue;
+    }
+    if (SPLIT_OPS.has(t.text)) {
+      segs.push(cur);
+      cur = { sep: t.text, words: [], redirects: [], heredocs: [] };
+      continue;
+    }
+    const next = toks[i + 1];
+    const arg = next?.kind === "word" ? next : undefined;
+    if (arg)
+      i++;
+    if (t.text === "<<" || t.text === "<<-") {
+      if (arg)
+        cur.heredocs.push({ delim: arg.text, stripTabs: t.text === "<<-", content: "", terminated: false });
+    } else if (t.text === ">" || t.text === ">>") {
+      if (arg)
+        cur.redirects.push({ append: t.text === ">>", target: arg });
+    }
+  }
+  segs.push(cur);
+  return segs;
+}
+var nameOf = (t) => (t?.text ?? "").replace(/^.*\//, "");
+var isPlainCat = (words) => nameOf(words[0]) === "cat" && words.slice(1).every((w) => w.text === "-" || w.text === "--");
+var TEE_FLAGS = new Set(["-i", "--ignore-interrupts", "-p", "--output-error"]);
+function teeTargets(words) {
+  if (nameOf(words[0]) !== "tee")
+    return;
+  const targets = [];
+  let append = false;
+  for (const w of words.slice(1)) {
+    if (w.text === "-a" || w.text === "--append")
+      append = true;
+    else if (TEE_FLAGS.has(w.text) || w.text.startsWith("--output-error="))
+      continue;
+    else if (w.text.startsWith("-") && !w.quoted && w.text !== "-")
+      return;
+    else
+      targets.push(w);
+  }
+  return { targets, append };
+}
+function resolveTarget(t, cwd, home) {
+  if (t.dynamic || t.text === "" || t.text === "/dev/null" || t.text === "-")
+    return;
+  let p = t.text;
+  if (p.startsWith("~")) {
+    if (!home)
+      return;
+    p = expandUser(p, home);
+  }
+  return isAbsolute(p) ? p : join(cwd, p);
+}
+function heredocWrites(command, cwd, home) {
+  const lines = command.split(`
+`);
+  const out = [];
+  const add = (file, content, append) => {
+    const prev = out.find((w) => w.file === file);
+    if (prev)
+      prev.content += content;
+    else
+      out.push({ file, content, append });
+  };
+  let i = 0;
+  while (i < lines.length) {
+    const segs = segmentsOf(tokenizeLine(lines[i] ?? ""));
+    const heredocs = segs.flatMap((s) => s.heredocs);
+    let next = i + 1;
+    for (const h of heredocs) {
+      const body = [];
+      while (next < lines.length) {
+        const raw = lines[next] ?? "";
+        const l = h.stripTabs ? raw.replace(/^\t+/, "") : raw;
+        next++;
+        if (l === h.delim) {
+          h.terminated = true;
+          break;
+        }
+        body.push(l);
+      }
+      h.content = body.map((l) => `${l}
+`).join("");
+      if (!h.terminated)
+        break;
+    }
+    i = next;
+    for (let s = 0;s < segs.length; s++) {
+      const seg = segs[s];
+      if (seg.heredocs.length === 0)
+        continue;
+      const h = seg.heredocs[seg.heredocs.length - 1];
+      if (!h.terminated)
+        continue;
+      const targets = [];
+      const push = (t, append) => {
+        const file = resolveTarget(t, cwd, home);
+        if (file !== undefined)
+          targets.push({ file, append });
+      };
+      const tee = teeTargets(seg.words);
+      if (tee)
+        for (const t of tee.targets)
+          push(t, tee.append);
+      else if (!isPlainCat(seg.words))
+        continue;
+      const last = seg.redirects[seg.redirects.length - 1];
+      if (last)
+        push(last.target, last.append);
+      for (let p = s + 1;p < segs.length && segs[p].sep === "|"; p++) {
+        const ps = segs[p];
+        const pt = teeTargets(ps.words);
+        if (!pt)
+          break;
+        for (const t of pt.targets)
+          push(t, pt.append);
+        const pr = ps.redirects[ps.redirects.length - 1];
+        if (pr)
+          push(pr.target, pr.append);
+      }
+      for (const t of targets)
+        add(t.file, h.content, t.append);
+    }
+  }
+  return out;
+}
+
 // src/feedback-guard.ts
 var SEVERITY_ORDER = { warn: 0, ask: 1, block: 2, deny: 3 };
 var decisionFor = (severity) => severity === "deny" || severity === "block" ? "deny" : "ask";
-var buildReason = (violations) => violations.map((v) => `${v.rule} (count: ${v.count}): ${v.message}`).join(`
+var fileLabel = (projectDir, file) => {
+  const rel = relpath(file, projectDir);
+  return rel.startsWith("../") || rel === ".." ? file : rel;
+};
+var reasonLine = (v, projectDir) => `${v.rule} (count: ${v.count}): ${v.message}${v.file !== undefined && projectDir !== undefined ? ` (${fileLabel(projectDir, v.file)})` : ""}`;
+var buildReason = (violations, projectDir) => violations.map((v) => reasonLine(v, projectDir)).join(`
 `);
+var MISSING_TEST = "missing test file: ";
+function coveredBySameCommand(v, file, others, projectDir) {
+  if (!v.detail.startsWith(MISSING_TEST))
+    return false;
+  const [root] = splitRoot(projectDir, file);
+  const candidates = v.detail.slice(MISSING_TEST.length).split(", ");
+  const siblings = new Set(candidates.filter((c) => !c.includes("/")));
+  const globs = compileGlobs(candidates);
+  for (const other of others) {
+    if (other === file)
+      continue;
+    if (dirname(other) === dirname(file) && siblings.has(basename(other)))
+      return true;
+    const [otherRoot, rel] = splitRoot(projectDir, other);
+    if (otherRoot === root && globs.some((rx) => rx.test(rel)))
+      return true;
+  }
+  return false;
+}
 var askStatePath = (io, sessionId) => join(feedbackDir(io), ".ask_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
 async function loadAskedKeys(io, sessionId) {
   try {
@@ -3745,20 +4235,32 @@ async function main2(io, payload) {
   const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
   const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
   const rules = await listRules(io);
+  const projectDir = io.projectDir || io.cwd;
   let violations;
   if (toolName === "Bash") {
-    violations = await evalPreBash(io, rules, truthy(toolInput.command) ? String(toolInput.command) : "");
+    const command = truthy(toolInput.command) ? String(toolInput.command) : "";
+    violations = await evalPreBash(io, rules, command);
+    await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
+    const writes = heredocWrites(command, jqStr(payload.cwd) || io.cwd, io.env.HOME);
+    const files = writes.map((w) => w.file);
+    for (const w of writes) {
+      const pre = (await evalPreEdit(io, rules, w.file, w.content)).filter((v) => !coveredBySameCommand(v, w.file, files, projectDir));
+      for (const v of pre)
+        v.file = w.file;
+      await downgradeRepeatedAsks(io, pre, payload.session_id, { file_path: w.file });
+      violations.push(...pre);
+    }
   } else if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit") {
     const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : "";
     if (!filePath)
       return ok();
     violations = await evalPreEdit(io, rules, filePath, extractPreEditContent(toolName, toolInput));
+    await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
   } else {
     return ok();
   }
   if (violations.length === 0)
     return ok();
-  await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
   for (const v of violations)
     await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
   const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
@@ -3771,13 +4273,13 @@ async function main2(io, payload) {
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
         permissionDecision: decisionFor(top.severity),
-        permissionDecisionReason: [buildReason(blocking), ...notes].join(`
+        permissionDecisionReason: [buildReason(blocking, projectDir), ...notes].join(`
 `)
       }
     })}
 `;
   }
-  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}`), ...notes].map((l) => `${l}
+  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${reasonLine(v, projectDir)}`), ...notes].map((l) => `${l}
 `).join("");
   return ok(stdout, stderr);
 }
@@ -3842,11 +4344,15 @@ async function main3(io, payload, files, threshold) {
     return ok();
   const projectDir = io.projectDir || io.cwd;
   const needContent = hasPreEditContent(rules);
+  const command = jqStr(isDict(payload.tool_input) ? payload.tool_input.command : undefined);
+  const judged = new Set(heredocWrites(command, jqStr(payload.cwd) || io.cwd, io.env.HOME).map((w) => w.file));
   const found = [];
   for (const file of [...files].sort()) {
     const abs = isAbsolute(file) ? file : join(projectDir, file);
     for (const v of await evalPostEdit(io, rules, abs))
       found.push({ file: abs, v });
+    if (judged.has(abs))
+      continue;
     const content = needContent ? await writtenContent(io, abs, threshold) : "";
     const pre = await evalPreEdit(io, rules, abs, content);
     if (pre.length === 0)
@@ -4258,13 +4764,16 @@ async function formatFull(io, rule) {
 `);
 }
 var byCountThenName = (a, b) => b.count - a.count || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
-async function buildOutput(io, rules) {
+async function formatRules(io, rules) {
   const blocks = [];
   for (const r of [...rules].sort(byCountThenName))
     blocks.push(await formatFull(io, r));
-  return tr(io.lang)("inject.header") + blocks.join(`
+  return blocks.join(`
 
 `);
+}
+async function buildOutput(io, rules) {
+  return tr(io.lang)("inject.header") + await formatRules(io, rules);
 }
 function brokenRulesText(io, broken) {
   if (broken.length === 0)
@@ -4272,12 +4781,14 @@ function brokenRulesText(io, broken) {
   return [tr(io.lang)("inject.brokenRules"), ...broken.map((b) => `- ${b.path}: ${b.reason}`)].join(`
 `);
 }
-async function feedbackInject(io) {
+async function feedbackInject(io, sessionId) {
   try {
+    if (sessionId)
+      await clearInjected(io, sessionId);
     const { rules: all, broken } = await scanRules(io);
     for (const b of broken)
       await logError(io, "rules", b.reason, b.path);
-    const rules = all.filter((r) => r.count >= 3);
+    const rules = all.filter((r) => r.count >= 3 && !isFileScoped(r));
     const parts = [brokenRulesText(io, broken)];
     if (rules.length > 0)
       parts.push(await buildOutput(io, rules));
@@ -4292,8 +4803,69 @@ async function feedbackInject(io) {
   }
 }
 
-// src/feedback-post-edit.ts
+// src/feedback-file-inject.ts
+var fileLabel2 = (projectDir, file) => {
+  const rel = relpath(file, projectDir);
+  return rel.startsWith("../") || rel === ".." ? file : rel;
+};
+function targetFiles(payload, io) {
+  const tool = jqStr(payload.tool_name);
+  const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
+  if (tool === "Read" || tool === "Edit" || tool === "Write" || tool === "MultiEdit") {
+    return truthy(toolInput.file_path) ? [String(toolInput.file_path)] : [];
+  }
+  if (tool === "Bash") {
+    const command = truthy(toolInput.command) ? String(toolInput.command) : "";
+    if (!command)
+      return [];
+    return heredocWrites(command, jqStr(payload.cwd) || io.cwd, io.env.HOME).map((w) => w.file);
+  }
+  return [];
+}
+async function buildFileOutput(io, rules, files, mode, projectDir) {
+  const label = files.map((f) => fileLabel2(projectDir, f)).join(", ");
+  return tr(io.lang)(mode === "read" ? "inject.fileHeaderRead" : "inject.fileHeaderEdit", { files: label }) + await formatRules(io, rules);
+}
 async function main4(io, payload) {
+  const files = targetFiles(payload, io);
+  if (files.length === 0)
+    return ok();
+  const rules = (await listRules(io)).filter((r) => r.count >= 3 && isFileScoped(r));
+  if (rules.length === 0)
+    return ok();
+  const projectDir = io.projectDir || io.cwd;
+  const matched = [];
+  for (const file of files) {
+    for (const r of rulesForFile(io, rules, file, projectDir))
+      if (!matched.includes(r))
+        matched.push(r);
+  }
+  if (matched.length === 0)
+    return ok();
+  const stateId = injectStateId(payload.session_id, payload.agent_id);
+  const injected = stateId !== "" ? await loadInjected(io, stateId) : new Set;
+  const fresh = matched.filter((r) => !injected.has(r.name));
+  if (fresh.length === 0)
+    return ok();
+  if (stateId !== "")
+    await saveInjected(io, stateId, new Set([...injected, ...fresh.map((r) => r.name)]));
+  const mode = jqStr(payload.tool_name) === "Read" ? "read" : "edit";
+  const text = await buildFileOutput(io, fresh, files, mode, projectDir);
+  return ok(`${JSON.stringify({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: text } })}
+`);
+}
+async function feedbackFileInject(io, payload) {
+  try {
+    return await main4(io, payload);
+  } catch (e) {
+    await logError(io, "feedback-file-inject", errorText(e));
+    return ok("", `[feedback-file-inject] internal error (ignored): ${errorText(e)}
+`);
+  }
+}
+
+// src/feedback-post-edit.ts
+async function main5(io, payload) {
   const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
   if (toolName !== "Edit" && toolName !== "Write" && toolName !== "MultiEdit")
     return ok();
@@ -4325,7 +4897,7 @@ async function main4(io, payload) {
 }
 async function feedbackPostEdit(io, payload) {
   try {
-    return await main4(io, payload);
+    return await main5(io, payload);
   } catch (e) {
     await logError(io, "feedback-post-edit", errorText(e));
     return ok("", `[feedback-post-edit] internal error (ignored): ${errorText(e)}
@@ -4458,6 +5030,8 @@ async function resetGate(io, payload) {
       }
     }
   }
+  if (source === "startup" || source === "clear" || source === "compact")
+    await clearInjected(io, sessionId);
   for (const dir of [stateDir, claudeDir]) {
     const old = [];
     for (const e of await io.list(dir)) {
@@ -4478,8 +5052,9 @@ async function resetGate(io, payload) {
         await io.removeTree(join(logRoot, e.name));
     }
   }
-  const seenDir = join(feedbackDir(io), ".classic_seen");
-  await io.removeFiles((await io.list(seenDir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS3).map((e) => join(seenDir, e.name)));
+  for (const dir of [join(feedbackDir(io), ".classic_seen"), join(feedbackDir(io), ".inject_state")]) {
+    await io.removeFiles((await io.list(dir)).filter((e) => e.kind === "file" && e.mtimeMs < now - DAY_MS3).map((e) => join(dir, e.name)));
+  }
   await io.removeDir(join(claudeDir, "hooks", "logs"));
   await io.removeDir(join(claudeDir, "hooks"));
   return ok();
@@ -4616,7 +5191,7 @@ async function runSteps(base, sessionId, event, steps, first = {}) {
 var sessionStart = (io, sessionId, payload) => runSteps(io, sessionId, "SessionStart", [(i) => resetGate(i, payload)]);
 async function userPromptSubmit(io, sessionId, options) {
   const text = await loadRules(io, options.rulesFile);
-  return runSteps(io, sessionId, "UserPromptSubmit", [(i) => feedbackInject(i)], text === "" ? {} : { additionalContext: [text] });
+  return runSteps(io, sessionId, "UserPromptSubmit", [(i) => feedbackInject(i, sessionId)], text === "" ? {} : { additionalContext: [text] });
 }
 var guardsTool = (options, tool) => options.agentLaunchGuard === true && /^(Agent|SendMessage)$/.test(tool) || /^(Bash|Edit|Write|MultiEdit)$/.test(tool);
 function preToolUse(io, sessionId, options, payload) {
@@ -4632,11 +5207,14 @@ function postToolUse(io, sessionId, payload) {
   const run = (steps) => runSteps(io, sessionId, "PostToolUse", steps);
   if (/^(Agent|Task)$/.test(tool))
     return run([(i) => subagentReport(i, payload)]);
+  const inject = (i) => feedbackFileInject(i, payload);
+  if (tool === "Read")
+    return run([inject]);
   if (tool === "Bash")
-    return run(bashChangeSteps(payload));
+    return run([inject, ...bashChangeSteps(payload)]);
   if (!/^(Write|Edit|MultiEdit)$/.test(tool))
     return Promise.resolve(none);
-  return run([(i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, "rules", payload)]);
+  return run([inject, (i) => recordChanges(i, payload), (i) => feedbackPostEdit(i, payload), (i) => stopTestGate(i, "rules", payload)]);
 }
 var notification2 = (io, sessionId, payload) => runSteps(io, sessionId, "Notification", [(i) => notification(i, "notify", payload)]);
 var stop = (io, sessionId, payload) => runSteps(io, sessionId, "Stop", [(i) => allStop(i, payload)]);

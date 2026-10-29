@@ -96,7 +96,7 @@ Codex は一致したフックを全ファイル分すべて走らせるので�
 | PreToolUse（`apply_patch`） | ファイルごとの `feedback-guard`（`pre_edit`） | Codex はファイル編集を 1 つのパッチ（`tool_input.command`、`*** Begin Patch` 形式）で行います。パッチをファイルごとに分け（`internal/hookgate/apply_patch.go`）、`*** Add File` は `Write`（全文）、`*** Update File` は `Edit`（追加行）として検査します。`*** Move to` は移動先のパスで検査し、`*** Delete File` は検査しません。deny が 1 つでもあれば deny、無ければ ask です。 |
 | PreToolUse（`spawn_agent` / `send_input`）、任意 | `agent-launch-guard` | `FEEDBACK_GATE_AGENT_LAUNCH_GUARD=true` のときだけ。`spawn_agent` は `Agent`（`agent_type` → `subagent_type`、`message` → `prompt`）、`send_input` は `SendMessage`（`agent_id` → `to`）として扱います。 |
 | PostToolUse（`Bash`） | `bash-changes`、`feedback-bash-edit`、gate の `rules` | なし。 |
-| PostToolUse（`apply_patch`） | ファイルごとの `record-changes` + `feedback-post-edit`、その後 gate の `rules` を 1 回 | 上と同じ分け方。gate はパッチ全体で 1 回だけ走ります。 |
+| PostToolUse（`apply_patch`） | ファイルごとの `feedback-file-inject` + `record-changes` + `feedback-post-edit`、その後 gate の `rules` を 1 回 | 上と同じ分け方。gate はパッチ全体で 1 回だけ走ります。Codex には `Read` ツールが無いので、`files` 付きのフィードバックルールはここ（と `Bash` の heredoc の書き先）で届き、最初の編集より前には届きません。 |
 | PostToolUse（`spawn_agent`） | `subagent-report` | エージェント ID は `tool_response.agentId` か `agent_id` から読みます（JSON 文字列でも可）。 |
 | PermissionRequest | `notification`（`notify`） | Codex には `Notification` イベントが無いので、ツール呼び出しが承認待ちになったときに「確認待ち」の通知を出します。フックは何も返さないので、承認の判断は通常のダイアログに残ります。 |
 | Stop | `all-stop`（gate の `checks`、`stop_check`、`stop` 通知） | なし。 |

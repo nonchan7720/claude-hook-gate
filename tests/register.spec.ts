@@ -379,6 +379,48 @@ describe('PostToolUse', () => {
       expect(reached).toBe(true)
       expect(exists(path.join(proj, '.claude', '.gate-status'))).toBe(false)
     }))
+
+  test('Read of a file matching a files-scoped rule adds the rule to the context once per prompt', () =>
+    withMod(async (m, proj, feedback) => {
+      writeRule(feedback, 'go_errors', 3, "files: '**/*.go'\n")
+      writeRule(feedback, 'everywhere', 3)
+      const file = path.join(proj, 'a.go')
+      // 毎プロンプトの注入には files 付きのルールは出ない
+      const prompt = (await m.call('classic.UserPromptSubmit', { prompt: 'hi', session_id: 'sess-1' })) as { additionalContext: string[] }
+      expect(prompt.additionalContext.join('\n')).toContain('everywhere')
+      expect(prompt.additionalContext.join('\n')).not.toContain('go_errors')
+      // Read で届く（次の hook にも渡る）
+      let reached = false
+      const r = (await m.call(
+        'classic.PostToolUse',
+        { session_id: 'sess-1', tool_name: 'Read', tool_input: { file_path: file }, tool_response: {} },
+        async () => {
+          reached = true
+          return {}
+        },
+      )) as Out
+      expect(reached).toBe(true)
+      expect(String((r.additionalContext as string[])[0])).toContain('# a.go に適用されるフィードバックルール')
+      expect(String((r.additionalContext as string[])[0])).toContain('■ go_errors (これまで 3 回指摘されています)')
+      expect(exists(path.join(proj, '.claude', '.gate-status'))).toBe(false)
+      // 同じプロンプトの中では 2 回目は出ない
+      const again = (await m.call('classic.PostToolUse', {
+        session_id: 'sess-1',
+        tool_name: 'Edit',
+        tool_input: { file_path: file },
+        tool_response: {},
+      })) as Out
+      expect(again.additionalContext).toBeUndefined()
+      // 次のプロンプトの後はまた出る
+      await m.call('classic.UserPromptSubmit', { prompt: 'again', session_id: 'sess-1' })
+      const next = (await m.call('classic.PostToolUse', {
+        session_id: 'sess-1',
+        tool_name: 'Write',
+        tool_input: { file_path: file, content: '' },
+        tool_response: {},
+      })) as Out
+      expect(String((next.additionalContext as string[])[0])).toContain('今編集したファイル')
+    }))
 })
 
 describe('Stop / SubagentStop / Notification', () => {

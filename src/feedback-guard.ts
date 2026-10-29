@@ -1,7 +1,11 @@
 // PreToolUse hook: feedback ルールの enforce (pre_bash / pre_edit) を評価し、
 // count に応じた強制力（deny / ask / warn）を適用する。
 //
-// - Bash: command を pre_bash の enforce と照合する
+// - Bash: command を pre_bash の enforce と照合する。さらに、コマンドの文面から書き先と内容が分かる heredoc の書き込み
+//   （`cat > path <<'EOF' ... EOF` など。bash-heredoc.ts）は、Write と同じく書き先と本文を pre_edit の enforce と照合する
+//   （python / sed -i などの書き込みは実行前には分からないので、実行後に feedback-bash-edit.ts が検査する）。
+//   同じコマンドで書く別のファイルが absent_sibling / absent_glob の候補なら（テストと実装を 1 つのコマンドで書く）、
+//   実行後の検査と同じく違反にしない。
 // - Edit / Write / MultiEdit: file_path と変更後の内容を pre_edit の enforce と照合する
 //
 // severity が deny/ask（block は防御的に deny 扱い）の違反があれば stdout に hookSpecificOutput を出して
@@ -9,6 +13,7 @@
 // 何も出さず exit 0。
 //
 // hook 自身のバグで作業を止めないよう、例外は必ず握りつぶして exit 0 にする（stderr に1行だけ出し、~/.claude/feedback/.errors.jsonl に残す）。
+import { heredocWrites } from './bash-heredoc.ts'
 import {
   autoBumpCounts,
   countBumpNotes,
@@ -22,16 +27,49 @@ import {
   logViolation,
   type Violation,
 } from './feedback-rules.ts'
+import { compileGlobs } from './glob.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
-import { join } from './path.ts'
-import { type Dict, isDict, truthy } from './pyutil.ts'
+import { basename, dirname, join, relpath } from './path.ts'
+import { type Dict, isDict, jqStr, truthy } from './pyutil.ts'
+import { splitRoot } from './roots.ts'
 
 const SEVERITY_ORDER: Record<string, number> = { warn: 0, ask: 1, block: 2, deny: 3 }
 
 /** PreToolUse の permissionDecision は allow/deny/ask のみ。block は防御的に deny 扱い。 */
 export const decisionFor = (severity: string): 'deny' | 'ask' => (severity === 'deny' || severity === 'block' ? 'deny' : 'ask')
 
-export const buildReason = (violations: Violation[]): string => violations.map((v) => `${v.rule} (count: ${v.count}): ${v.message}`).join('\n')
+/** 表示用のパス: projectDir 配下ならその相対パス。 */
+const fileLabel = (projectDir: string, file: string): string => {
+  const rel = relpath(file, projectDir)
+  return rel.startsWith('../') || rel === '..' ? file : rel
+}
+
+/** 違反の 1 行。Bash の heredoc で複数ファイルを見るときは、どのファイルかが分かるようパスを添える。 */
+export const reasonLine = (v: Violation, projectDir?: string): string =>
+  `${v.rule} (count: ${v.count}): ${v.message}${v.file !== undefined && projectDir !== undefined ? ` (${fileLabel(projectDir, v.file)})` : ''}`
+
+export const buildReason = (violations: Violation[], projectDir?: string): string => violations.map((v) => reasonLine(v, projectDir)).join('\n')
+
+const MISSING_TEST = 'missing test file: '
+
+/**
+ * absent_sibling / absent_glob の違反のうち、同じコマンドで書く別のファイル（others）が候補に当たるものか。
+ * 実行後の検査（feedback-bash-edit.ts）では「コマンドが終わった時点でテストがあればよい」ので、実行前の検査も同じ結果にする。
+ */
+export function coveredBySameCommand(v: Violation, file: string, others: string[], projectDir: string): boolean {
+  if (!v.detail.startsWith(MISSING_TEST)) return false
+  const [root] = splitRoot(projectDir, file)
+  const candidates = v.detail.slice(MISSING_TEST.length).split(', ')
+  const siblings = new Set(candidates.filter((c) => !c.includes('/')))
+  const globs = compileGlobs(candidates)
+  for (const other of others) {
+    if (other === file) continue
+    if (dirname(other) === dirname(file) && siblings.has(basename(other))) return true
+    const [otherRoot, rel] = splitRoot(projectDir, other)
+    if (otherRoot === root && globs.some((rx) => rx.test(rel))) return true
+  }
+  return false
+}
 
 export const askStatePath = (io: Io, sessionId: string): string => join(feedbackDir(io), '.ask_state', `${sessionId.replace(/[^A-Za-z0-9_-]/g, '')}.json`)
 
@@ -80,20 +118,31 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
   const toolInput = isDict(payload.tool_input) ? payload.tool_input : {}
 
   const rules = await listRules(io)
+  const projectDir = io.projectDir || io.cwd
   let violations: Violation[]
   if (toolName === 'Bash') {
-    violations = await evalPreBash(io, rules, truthy(toolInput.command) ? String(toolInput.command) : '')
+    const command = truthy(toolInput.command) ? String(toolInput.command) : ''
+    violations = await evalPreBash(io, rules, command)
+    await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput)
+    // heredoc の書き込みは Write と同じ pre_edit の検査を実行前に掛ける（ask の重複判定は Edit / Write と同じくファイルごと）
+    const writes = heredocWrites(command, jqStr(payload.cwd) || io.cwd, io.env.HOME)
+    const files = writes.map((w) => w.file)
+    for (const w of writes) {
+      const pre = (await evalPreEdit(io, rules, w.file, w.content)).filter((v) => !coveredBySameCommand(v, w.file, files, projectDir))
+      for (const v of pre) v.file = w.file
+      await downgradeRepeatedAsks(io, pre, payload.session_id, { file_path: w.file })
+      violations.push(...pre)
+    }
   } else if (toolName === 'Edit' || toolName === 'Write' || toolName === 'MultiEdit') {
     const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : ''
     if (!filePath) return ok()
     violations = await evalPreEdit(io, rules, filePath, extractPreEditContent(toolName, toolInput))
+    await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput)
   } else {
     return ok()
   }
 
   if (violations.length === 0) return ok()
-
-  await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput)
 
   for (const v of violations) await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail)
   // 今回の判定は上げる前の count で行い、次回以降の強制力を上げる。
@@ -109,11 +158,11 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
         permissionDecision: decisionFor(top.severity),
-        permissionDecisionReason: [buildReason(blocking), ...notes].join('\n'),
+        permissionDecisionReason: [buildReason(blocking, projectDir), ...notes].join('\n'),
       },
     })}\n`
   }
-  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${v.rule} (count: ${v.count}): ${v.message}`), ...notes].map((l) => `${l}\n`).join('')
+  const stderr = [...warnings.map((v) => `[feedback-guard] warn: ${reasonLine(v, projectDir)}`), ...notes].map((l) => `${l}\n`).join('')
   return ok(stdout, stderr)
 }
 

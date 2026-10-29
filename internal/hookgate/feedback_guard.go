@@ -3,7 +3,11 @@ package hookgate
 // PreToolUse hook: feedback ルールの enforce (pre_bash / pre_edit) を評価し、
 // count に応じた強制力（deny / ask / warn）を適用する。
 //
-// - Bash: command を pre_bash の enforce と照合する
+// - Bash: command を pre_bash の enforce と照合する。さらに、コマンドの文面から書き先と内容が分かる heredoc の書き込み
+//   （`cat > path <<'EOF' ... EOF` など。bash_heredoc.go）は、Write と同じく書き先と本文を pre_edit の enforce と照合する
+//   （python / sed -i などの書き込みは実行前には分からないので、実行後に feedback_bash_edit.go が検査する）。
+//   同じコマンドで書く別のファイルが absent_sibling / absent_glob の候補なら（テストと実装を 1 つのコマンドで書く）、
+//   実行後の検査と同じく違反にしない。
 // - Edit / Write / MultiEdit: file_path と変更後の内容を pre_edit の enforce と照合する
 //
 // severity が deny/ask（block は防御的に deny 扱い）の違反があれば stdout に hookSpecificOutput を出して
@@ -27,13 +31,71 @@ func DecisionFor(severity string) string {
 	return "ask"
 }
 
+// fbFileLabel は表示用のパス: projectDir 配下ならその相対パス。
+func fbFileLabel(projectDir, file string) string {
+	rel := Relpath(file, projectDir)
+	if strings.HasPrefix(rel, "../") || rel == ".." {
+		return file
+	}
+	return rel
+}
+
+// ReasonLine は違反の 1 行。Bash の heredoc で複数ファイルを見るときは、どのファイルかが分かるようパスを添える。
+func ReasonLine(v Violation, projectDir string) string {
+	line := v.Rule + " (count: " + strconv.Itoa(v.Count) + "): " + v.Message
+	if v.File != "" && projectDir != "" {
+		line += " (" + fbFileLabel(projectDir, v.File) + ")"
+	}
+	return line
+}
+
 // BuildReason は違反の一覧を permissionDecisionReason の本文にする。
-func BuildReason(violations []Violation) string {
+func BuildReason(violations []Violation, projectDir string) string {
 	lines := make([]string, len(violations))
 	for i, v := range violations {
-		lines[i] = v.Rule + " (count: " + strconv.Itoa(v.Count) + "): " + v.Message
+		lines[i] = ReasonLine(v, projectDir)
 	}
 	return strings.Join(lines, "\n")
+}
+
+const fbMissingTest = "missing test file: "
+
+// CoveredBySameCommand は absent_sibling / absent_glob の違反のうち、同じコマンドで書く別のファイル（others）が候補に当たるものか。
+// 実行後の検査（feedback_bash_edit.go）では「コマンドが終わった時点でテストがあればよい」ので、実行前の検査も同じ結果にする。
+func CoveredBySameCommand(v Violation, file string, others []string, projectDir string) bool {
+	if !strings.HasPrefix(v.Detail, fbMissingTest) {
+		return false
+	}
+	root, _ := SplitRoot(projectDir, file)
+	candidates := strings.Split(strings.TrimPrefix(v.Detail, fbMissingTest), ", ")
+	siblings := map[string]bool{}
+	for _, c := range candidates {
+		if !strings.Contains(c, "/") {
+			siblings[c] = true
+		}
+	}
+	globs, err := CompileGlobs(candidates)
+	if err != nil {
+		globs = nil
+	}
+	for _, other := range others {
+		if other == file {
+			continue
+		}
+		if Dirname(other) == Dirname(file) && siblings[Basename(other)] {
+			return true
+		}
+		otherRoot, rel := SplitRoot(projectDir, other)
+		if otherRoot != root {
+			continue
+		}
+		for _, rx := range globs {
+			if rx.MatchString(rel) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // AskStatePath は同一セッションで ask 済みの対象を持つ状態ファイル。
@@ -102,6 +164,7 @@ func feedbackGuardMain(io Io, payload Dict) (ScriptResult, error) {
 	if err != nil {
 		return ScriptResult{}, err
 	}
+	projectDir := fbFirstNonEmpty(io.ProjectDir(), io.Cwd())
 	var violations []Violation
 	switch toolName {
 	case "Bash":
@@ -110,6 +173,24 @@ func feedbackGuardMain(io Io, payload Dict) (ScriptResult, error) {
 			command = Str(toolInput["command"])
 		}
 		violations = EvalPreBash(io, rules, command)
+		DowngradeRepeatedAsks(io, violations, payload["session_id"], toolInput)
+		// heredoc の書き込みは Write と同じ pre_edit の検査を実行前に掛ける（ask の重複判定は Edit / Write と同じくファイルごと）
+		writes := HeredocWrites(command, fbFirstNonEmpty(JqStr(payload["cwd"]), io.Cwd()), io.Env().Home)
+		files := make([]string, len(writes))
+		for i, w := range writes {
+			files[i] = w.File
+		}
+		for _, w := range writes {
+			pre := []Violation{}
+			for _, v := range EvalPreEdit(io, rules, w.File, w.Content) {
+				if !CoveredBySameCommand(v, w.File, files, projectDir) {
+					v.File = w.File
+					pre = append(pre, v)
+				}
+			}
+			DowngradeRepeatedAsks(io, pre, payload["session_id"], Dict{"file_path": w.File})
+			violations = append(violations, pre...)
+		}
 	case "Edit", "Write", "MultiEdit":
 		filePath := ""
 		if Truthy(toolInput["file_path"]) {
@@ -119,6 +200,7 @@ func feedbackGuardMain(io Io, payload Dict) (ScriptResult, error) {
 			return Ok("", ""), nil
 		}
 		violations = EvalPreEdit(io, rules, filePath, ExtractPreEditContent(toolName, toolInput))
+		DowngradeRepeatedAsks(io, violations, payload["session_id"], toolInput)
 	default:
 		return Ok("", ""), nil
 	}
@@ -126,8 +208,6 @@ func feedbackGuardMain(io Io, payload Dict) (ScriptResult, error) {
 	if len(violations) == 0 {
 		return Ok("", ""), nil
 	}
-
-	DowngradeRepeatedAsks(io, violations, payload["session_id"], toolInput)
 
 	for _, v := range violations {
 		LogViolation(io, v.Rule, v.Count, v.Severity, v.Event, v.Detail)
@@ -152,7 +232,7 @@ func feedbackGuardMain(io Io, payload Dict) (ScriptResult, error) {
 				top = b
 			}
 		}
-		reason := strings.Join(append([]string{BuildReason(blocking)}, notes...), "\n")
+		reason := strings.Join(append([]string{BuildReason(blocking, projectDir)}, notes...), "\n")
 		stdout = JSONStringify(OMap{{"hookSpecificOutput", OMap{
 			{"hookEventName", "PreToolUse"},
 			{"permissionDecision", DecisionFor(top.Severity)},
@@ -161,7 +241,7 @@ func feedbackGuardMain(io Io, payload Dict) (ScriptResult, error) {
 	}
 	lines := make([]string, 0, len(warnings)+len(notes))
 	for _, v := range warnings {
-		lines = append(lines, "[feedback-guard] warn: "+v.Rule+" (count: "+strconv.Itoa(v.Count)+"): "+v.Message)
+		lines = append(lines, "[feedback-guard] warn: "+ReasonLine(v, projectDir))
 	}
 	lines = append(lines, notes...)
 	return Ok(stdout, fbJoinLines(lines)), nil

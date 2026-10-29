@@ -15,6 +15,11 @@
       "$ref": "#/definitions/policyPath",
       "description": "policy の検証に使う Cedar スキーマ（.cedarschema）のパス。省略時は scripts/dogwood/gate.cedarschema（同梱の既定スキーマ）が使われる。root_dir からの相対パス。絶対パスと ~ 展開も可。"
     },
+    "max_parallel": {
+      "oneOf": [{ "type": "integer", "minimum": 1 }, { "const": false }],
+      "default": 2,
+      "description": "プロジェクト全体（全エージェント・全 worktree）で同時に走らせる gate コマンドの数の上限。実行側になるエージェントは先に枠（~/.claude/.gate-status/shared/<project_id>/slot.<i>/）を 1 つ取り、空いていなければ空くのを待つ。共有の結果を受け取るだけなら枠は要らない。parallel の中のコマンドや share: false のコマンドにも効く。false で無制限。省略時は 2。重いコマンドをエージェントの数だけ同時に走らせて CPU を取り合い、全員が何倍も遅くなるのを防ぐ。"
+    },
     "report_success": {
       "type": "boolean",
       "default": true,

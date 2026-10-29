@@ -61,11 +61,18 @@ package hookgate
 //              実行中でも待たずに自分で実行する（既定は共有: 進行中の実行があれば起動せず完了を待って同じ結果を
 //              受け取る。ただし進行中の実行の対象ファイルが自分の対象ファイルをすべて含むときだけ。含まないときや
 //              環境変数・root・cwd が違うときも、name（無ければ cmd）が同じ実行が走っている間は起動せず、終わるのを待って
-//              から実行する＝同じコマンドは直列。同じリポジトリの別の git worktree で動くエージェントの間でも直列になる
+//              から実行する＝同じコマンドは直列。待っている間に自分の対象ファイル一覧を置いておき、次に実行側になった
+//              エージェントが待っている分をまとめて（対象ファイルの和集合で）1 回走らせるので、待っていた側はその結果を
+//              受け取る（エージェントの数だけ順に走らせない）。同じリポジトリの別の git worktree で動くエージェントの間でも直列になる
 //              （ロックは ~/.claude/.gate-status/shared/<project_id>/ に置く）。shared_run.go）。
 //              files: false を書くと、そのコマンドは対象ファイルを使わないものとして、共有の判定上の対象ファイルを
 //              空として扱う（対象ファイルが違っても共有される）。CLAUDE_GATE_FILES 自体は従来どおり渡る。
 //              share: false と併記した場合は share: false が優先される。
+// max_parallel: トップレベル。プロジェクト全体（全エージェント・全 worktree）で同時に走らせる gate コマンドの数の上限
+//              （既定 2。false で無制限）。実行側になるエージェントは先に枠（~/.claude/.gate-status/shared/<project_id>/slot.<i>/）
+//              を 1 つ取り、空いていなければ空くのを待つ。共有の結果を受け取るだけなら枠は要らない。parallel の中の
+//              コマンドや share: false のコマンドにも効く。重いコマンドをエージェントの数だけ同時に走らせて CPU を取り合い、
+//              全員が何倍も遅くなる（タイムアウトする）のを防ぐため。
 // CLAUDE_GATE_FILES:
 //              run / consistency_checks の各コマンドには、そのとき対象になっているファイルのルート相対
 //              パスが環境変数 CLAUDE_GATE_FILES で渡る。値は shlex 引用済み・重複排除・昇順で、空白区切りの
@@ -129,11 +136,14 @@ import (
 // gate の定数（TS の export const と同じ名前）。
 const (
 	MAX_ATTEMPTS    = 5
-	DEFAULT_TIMEOUT = 300   // 秒。rule / consistency_check の timeout: で上書き可
-	LOG_MAX_AGE     = 3600  // 秒。現セッションのログでもこれより古ければ削除
-	LOG_STALE_GRACE = 300   // 秒。他セッションのログは最終書き込みからこれだけ経てば削除
-	TRACE_WINDOW    = 86400 // 秒。dogwood の時間窓の上限（既定 24h）を超えた履歴は判定に使えない
-	POLICY_TIMEOUT  = 30    // 秒。dogwood replay 自体のタイムアウト
+	DEFAULT_TIMEOUT = 300 // 秒。rule / consistency_check の timeout: で上書き可
+	// DEFAULT_MAX_PARALLEL はプロジェクト全体（全エージェント・全 worktree）で同時に走らせる gate コマンドの数の既定値。
+	// gate.yaml の max_parallel で上書き可（false で無制限）。
+	DEFAULT_MAX_PARALLEL = 2
+	LOG_MAX_AGE          = 3600  // 秒。現セッションのログでもこれより古ければ削除
+	LOG_STALE_GRACE      = 300   // 秒。他セッションのログは最終書き込みからこれだけ経てば削除
+	TRACE_WINDOW         = 86400 // 秒。dogwood の時間窓の上限（既定 24h）を超えた履歴は判定に使えない
+	POLICY_TIMEOUT       = 30    // 秒。dogwood replay 自体のタイムアウト
 	// FILES_ENV_KEY は run のコマンドへ「今回 match した対象ファイル」を渡す環境変数名。
 	FILES_ENV_KEY = "CLAUDE_GATE_FILES"
 
@@ -755,6 +765,8 @@ type Gate struct {
 	stopTicking func()
 	// runningOwner は全エージェントの実行中一覧（running_registry）の中での、この Gate の持ち分の名前。
 	runningOwner string
+	// maxParallel は同時実行枠の数（gate.yaml の max_parallel。LoadAction が設定する。0 は無制限）。
+	maxParallel int
 	// ranThisRun はこの Gate が実行した（または共有で結果を受け取った）コマンドの (root, cwd, cmd) キー。同じ回で控えを二重に走らせないために使う。
 	ranThisRun map[string]bool
 	// executedLabels はこの Gate が実際に実行した（または共有で結果を受け取った）コマンドの表示名。成功報告に使う。
@@ -816,6 +828,7 @@ func NewGate(io Io, opts GateOptions) *Gate {
 		Action:              Join(io.ProjectConfigDir(), "gate.yaml"),
 		StateDir:            stateDir,
 		runningOwner:        stateID + "." + randomOwnerSuffix(),
+		maxParallel:         DEFAULT_MAX_PARALLEL,
 		Changed:             Join(stateDir, "changed_files."+stateID+".txt"),
 		Count:               Join(stateDir, "gate_attempts."+stateID+".txt"),
 		Sidecar:             Join(stateDir, "gate_passed."+stateID+".txt"),          // rule通過・checks確認待ち
@@ -1284,7 +1297,27 @@ func (g *Gate) LoadAction(path string) Dict {
 		panic(fmt.Errorf("YAMLParseError: %w", err))
 	}
 	d, _ := AsDict(v)
+	if path == g.Action {
+		g.maxParallel = MaxParallelOf(d)
+	}
 	return d
+}
+
+// MaxParallelOf は gate.yaml の max_parallel（同時実行枠の数）。省略時は DEFAULT_MAX_PARALLEL、false か 0 以下は無制限（0）。
+// 数値でない値は既定値として扱う。
+func MaxParallelOf(cfg Dict) int {
+	v, has := cfg["max_parallel"]
+	if !has || v == nil {
+		return DEFAULT_MAX_PARALLEL
+	}
+	if v == false {
+		return 0
+	}
+	f, ok := numberOf(v)
+	if !ok {
+		return DEFAULT_MAX_PARALLEL
+	}
+	return max(0, int(f))
 }
 
 func gateIsDir(io Io, path string) bool {

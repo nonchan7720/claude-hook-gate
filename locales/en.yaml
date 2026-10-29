@@ -9,6 +9,8 @@ notify:
 inject:
   header: "# Confirmed feedback rules (count >= 3)\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\n\n"
   ruleTitle: "■ {{name}} (pointed out {{count}} times so far)"
+  fileHeaderRead: "# Feedback rules for {{files}}\nThese confirmed rules apply to the file you just read. Follow them when you edit it or write files like it. A hook blocks violations.\n\n"
+  fileHeaderEdit: "# Feedback rules for {{files}}\nThese confirmed rules apply to the file you just edited. Check that edit against them and follow them in the edits that follow. A hook blocks violations.\n\n"
   brokenRules: "# Unreadable feedback rules\nThe following rule files could not be read and are disabled (where only an enforce entry is invalid, only that entry is disabled). Their enforcement does not work until they are fixed. Tell the user:"
 
 rules:

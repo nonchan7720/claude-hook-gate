@@ -7,6 +7,7 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 - フィードバックルール（`~/{.claude,.agents}/feedback/*.md`）を各プロンプトに注入し、ツール呼び出し時と停止時に強制する。
 - プロジェクトごとの品質ゲート（lint・テストなど、`{.claude,.agents}/gate.yaml` で定義）を、ファイル編集後と停止時に実行する。
 - 確認待ちのときと停止時にデスクトップ通知を出す（macOS）。
+- この 2 種類のファイルを書くためのスキル `/feedback-gate:feedback`（フィードバックルールの作成・更新・定期的な棚卸し）と `/feedback-gate:gate`（プロジェクトの言語・タスクランナー・CI に沿った `.claude/gate.yaml` の作成）を同梱する。
 
 ## フック
 
@@ -15,11 +16,12 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 | イベント | モジュール | 役割 | settings hook |
 | --- | --- | --- | --- |
 | SessionStart | `src/reset-gate.ts` | `startup` / `clear` のときだけ自セッションのゲート状態を消す。resume / compact では消さない。 | 同じ（下記） |
-| UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | ルールファイル（`rulesFile` のファイルがあればそれ、無ければ同梱の `rules/feedback_rules.md`。言語が英語なら `rules/feedback_rules.en.md`）と確定済みフィードバックルール（`count >= 3`）をコンテキストに追加する。 | 同じ（下記） |
-| PreToolUse（Bash / Edit / Write / MultiEdit） | `src/feedback-guard.ts` | `pre_bash` / `pre_edit` の enforce を評価し、`count` に応じて deny / ask / warn する。 | 同じ（下記） |
-| PostToolUse（Write / Edit / MultiEdit） | `src/record-changes.ts` → `src/feedback-post-edit.ts` → `src/stop-test-gate.ts`（`rules`） | 変更ファイルを記録し、`post_edit` の enforce を編集後のファイル全体に対して評価（`count` に応じて block / warn）したあと、`{.claude,.agents}/gate.yaml` の該当ルールを実行する（`src/gate.ts` 経由）。 | 同じ（下記） |
+| UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | ルールファイル（`rulesFile` のファイルがあればそれ、無ければ同梱の `rules/feedback_rules.md`。言語が英語なら `rules/feedback_rules.en.md`）と確定済みフィードバックルール（`count >= 3`）をコンテキストに追加する。`files` キーを持つルールはここでは出さず、代わりに `feedback-file-inject` が注入する（[ファイル種別スコープのルール](#file-scoped-rules)）。前のターンにそこで注入した記録もここで忘れる。 | 同じ（下記） |
+| PostToolUse（Read） | `src/feedback-file-inject.ts` | 今読んだファイルに `files` の glob がマッチする確定フィードバックルールを、ターンごと・ルールごとに 1 回だけコンテキストに追加する。 | 同じ（下記） |
+| PreToolUse（Bash / Edit / Write / MultiEdit） | `src/feedback-guard.ts` | `pre_bash` / `pre_edit` の enforce を評価し、`count` に応じて deny / ask / warn する。Bash では、書き先と本文がコマンドの文面に書かれている heredoc（`cat > path <<'EOF' ... EOF`、`tee path <<EOF`。[Bash で書いたファイル](#bash-で書いたファイル)）を Write と同じく実行前に `pre_edit` で検査する。 | 同じ（下記） |
+| PostToolUse（Write / Edit / MultiEdit） | `src/feedback-file-inject.ts` → `src/record-changes.ts` → `src/feedback-post-edit.ts` → `src/stop-test-gate.ts`（`rules`） | 編集したファイルにマッチする `files` 付きルールを（このターンにまだ出していなければ）追加し、変更ファイルを記録し、`post_edit` の enforce を編集後のファイル全体に対して評価（`count` に応じて block / warn）したあと、`{.claude,.agents}/gate.yaml` の該当ルールを実行する（`src/gate.ts` 経由）。 | 同じ（下記） |
 | PreToolUse（Bash） | `src/bash-changes.ts`（`bashStarted`）。`feedback-guard` の前 | コマンドの開始時刻を控える（`bash_started.<session>--<tool_use_id>.json`）。`{.claude,.agents}/gate.yaml` があるプロジェクトでは `.claude/.gate-status/` に、無いプロジェクトでは `~/.claude/feedback/.bash_started/`（`.ask_state` と同じ feedback 側の状態置き場）に置く。後者は `post_edit` / `pre_edit` の enforce を持つ有効な feedback ルールがあるときだけで、`gate.yaml` の無いプロジェクトの作業ツリーには状態ファイルを作らない。 | 同じ（下記） |
-| PostToolUse（Bash） | `src/bash-changes.ts` → `src/feedback-bash-edit.ts` → `src/stop-test-gate.ts`（`rules`） | コマンドが実際に書き換えたファイル（cwd の作業ツリーと、`.claude/worktrees/` 配下の worktree のうちコマンドにパス（`worktrees/<name>`）が出てくるものについて。それ以外の worktree は見ないので、別の Claude Code セッションがそこで編集中のファイルをこのコマンドの変更と取り違えない。git の変更・未追跡ファイルと、コマンド中に作られたコミットが触ったファイルのうち、mtime がコマンド開始以降のもの）を拾う。heredoc・`python`・`sed -i` などで書いても、Edit / Write に掛かる検査が抜けないようにするため。*同じ*作業ツリーで動く別セッションとは 2 つの仕組みで分ける（[同じ作業ツリーの複数セッション](#同じ作業ツリーの複数セッション)）: 読むだけのコマンド（`ls`・`cat`・`grep`・`rg`・`find`・`git log` / `git diff` / `git status` など。ファイルへのリダイレクト無し）は最初から見ず、別セッションが gate の状態（別セッションの `changed_files` / `gate_passed` / `gate_failed`）に既に持っているファイルはそのセッションに任せる。各ファイルを、Edit / Write の後と同じく `post_edit` の enforce でファイル全体に対して評価し、実行後に判定できる `pre_edit` の enforce（下記）も評価して、全ファイルの結果を 1 つの block / warn にまとめる。そのあと `{.claude,.agents}/gate.yaml` があるときだけ変更ファイルとして記録し、記録があれば該当ルールを実行する。feedback の検査は `gate.yaml` が無くても動く。git の履歴・作業ツリー操作（rebase / checkout / merge など）は検査も記録もしない。 | 同じ（下記） |
+| PostToolUse（Bash） | `src/feedback-file-inject.ts`（heredoc の書き先）→ `src/bash-changes.ts` → `src/feedback-bash-edit.ts` → `src/stop-test-gate.ts`（`rules`） | 文面から分かる heredoc の書き先（[Bash で書いたファイル](#bash-で書いたファイル)）にマッチする `files` 付きルールを追加してから、コマンドが実際に書き換えたファイル（cwd の作業ツリーと、`.claude/worktrees/` 配下の worktree のうちコマンドにパス（`worktrees/<name>`）が出てくるものについて。それ以外の worktree は見ないので、別の Claude Code セッションがそこで編集中のファイルをこのコマンドの変更と取り違えない。git の変更・未追跡ファイルと、コマンド中に作られたコミットが触ったファイルのうち、mtime がコマンド開始以降のもの）を拾う。heredoc・`python`・`sed -i` などで書いても、Edit / Write に掛かる検査が抜けないようにするため。*同じ*作業ツリーで動く別セッションとは 2 つの仕組みで分ける（[同じ作業ツリーの複数セッション](#同じ作業ツリーの複数セッション)）: 読むだけのコマンド（`ls`・`cat`・`grep`・`rg`・`find`・`git log` / `git diff` / `git status` など。ファイルへのリダイレクト無し）は最初から見ず、別セッションが gate の状態（別セッションの `changed_files` / `gate_passed` / `gate_failed`）に既に持っているファイルはそのセッションに任せる。各ファイルを、Edit / Write の後と同じく `post_edit` の enforce でファイル全体に対して評価し、実行後に判定できる `pre_edit` の enforce（下記）も評価して、全ファイルの結果を 1 つの block / warn にまとめる。そのあと `{.claude,.agents}/gate.yaml` があるときだけ変更ファイルとして記録し、記録があれば該当ルールを実行する。feedback の検査は `gate.yaml` が無くても動く。git の履歴・作業ツリー操作（rebase / checkout / merge など）は検査も記録もしない。 | 同じ（下記） |
 | PreToolUse（Agent / SendMessage）、任意 | `src/agent-launch-guard.ts` | `agentLaunchGuard` が `true` のときだけ有効。サブエージェントへ指示を送る前に、送信本文を見せて確認する。 | 同じ（下記） |
 | Notification | `src/notification.ts`（`notify`） | 確認待ちのときにデスクトップ通知（`terminal-notifier` が必要、macOS）。 | 同じ（下記） |
 | Stop | `src/all-stop.ts` | ゲートの `checks` フェーズ（直っていない rules の失敗を再実行し、予約された consistency checks を実行）、`src/feedback-stop-check.ts`、`stop` 通知を順に実行する。 | 同じ（下記） |
@@ -28,7 +30,7 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 
 ### 組織管理の環境向けの settings hook
 
-Claude Code を組織が管理している環境（Team / Enterprise ログイン、または managed settings）では、組み込みのガード `cc-plugin-sec-default` が最初に走り、`classic.*` イベントをインストールしたプラグインすべてに対して飛ばします（`/plugin` に「Its hooks on classic.SessionStart, ... do not run here」と出ます）。そこでは上の mod のフックが一つも走りません。`hooks/hooks.json` の `command` hook（settings hook）はガードに飛ばされず、同じ classic イベントを、同じ stdin の JSON と同じ戻り値の規約（exit 2 で block、`permissionDecision`、`decision: block`、`additionalContext`）で受け取ります。そこで `hooks/hooks.json` に、SessionStart・UserPromptSubmit・PreToolUse（`Bash|Edit|Write|MultiEdit|Agent|SendMessage`）・PostToolUse（`Bash|Edit|Write|MultiEdit|Agent|Task`）・Notification・Stop・SubagentStop の command hook を登録しています。上の表の各行は、command hook 経由でも同じ挙動です。
+Claude Code を組織が管理している環境（Team / Enterprise ログイン、または managed settings）では、組み込みのガード `cc-plugin-sec-default` が最初に走り、`classic.*` イベントをインストールしたプラグインすべてに対して飛ばします（`/plugin` に「Its hooks on classic.SessionStart, ... do not run here」と出ます）。そこでは上の mod のフックが一つも走りません。`hooks/hooks.json` の `command` hook（settings hook）はガードに飛ばされず、同じ classic イベントを、同じ stdin の JSON と同じ戻り値の規約（exit 2 で block、`permissionDecision`、`decision: block`、`additionalContext`）で受け取ります。そこで `hooks/hooks.json` に、SessionStart・UserPromptSubmit・PreToolUse（`Bash|Edit|Write|MultiEdit|Agent|SendMessage`）・PostToolUse（`Read|Bash|Edit|Write|MultiEdit|Agent|Task`）・Notification・Stop・SubagentStop の command hook を登録しています。上の表の各行は、command hook 経由でも同じ挙動です。
 
 - **動き方。** 各 hook は `bash "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh" <Event>` で、`scripts/hook.sh` が `feedback-gate claude <Event>` を実行します。これは、このリポジトリの GitHub Releases で配布している Go 製の単一バイナリ（`cmd/feedback-gate`。検査は `internal/hookgate`）です。stdin の classic の JSON を読み、mod のフックと同じ検査を行い、classic の command hook と同じ形で結果を出力します。PostToolUse・Stop・SubagentStop は gate のコマンドが長くなりうるので `timeout` を 600 秒にしています。
 - **バイナリの入手先。** `scripts/hook.sh` は次の順に探します。まず `FEEDBACK_GATE_BIN`（実行できるファイルのパス。開発とテスト用で、ダウンロードを避ける手段でもあります）、次に `${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate` です。`<version>` は `.claude-plugin/plugin.json` の `version` です。どちらにも無ければ、`https://github.com/nonchan7720/claude-hook-gate/releases/download/v<version>/feedback-gate_<os>_<arch>.tar.gz`（`os` は `linux` / `darwin`、`arch` は `amd64` / `arm64`）を `checksums.txt` と一緒にダウンロードし、SHA-256（`sha256sum` か `shasum`。どちらも無ければ検証できないので何も入れません）を照合し、展開して、バイナリをキャッシュへ原子的に移します。`FEEDBACK_GATE_RELEASE_BASE_URL` で `https://github.com/nonchan7720/claude-hook-gate/releases/download` の部分を差し替えられます（`file://` のディレクトリも使え、テストはこれを使います。`wget` は `file://` を読めないので `curl` が必要です）。バイナリは常にインストール済みのプラグインのバージョンと一致します。複数のバージョンが同じキャッシュを共有できます（たとえば Claude Code のプラグインと Codex のプラグインが別のバージョンのとき）。バージョンのディレクトリはそのバイナリを使うたびに touch し、新しくインストールしたあとは、30 日より長く使われていない別バージョンのディレクトリだけを削除します（フックが強制終了されて残った、60 分より古いダウンロード用の作業ディレクトリも片付けます）。
@@ -40,7 +42,19 @@ Claude Code を組織が管理している環境（Team / Enterprise ログイ�
 
 ### Bash で書いたファイル
 
-Bash コマンドは、実行前には何が書かれるか分からないので、`pre_edit` を PreToolUse で評価できません。代わりにコマンドの実行後、`src/feedback-bash-edit.ts` が書き換えられた各ファイルに `pre_edit` を同じ条件で評価します: `path` / `exclude_path`、`absent_sibling` / `absent_glob`（コマンド終了時点でテストファイルがあればよいので、同じコマンドでテストも書けば通る）、そして `when` / `unless` はそのコマンドが書いた内容に対して（git が追跡しているファイルなら `HEAD` との差分の追加行。同じコマンドでコミット済みなら、開始以降のコミットの追加行。追跡外のファイル（新規作成や git の外）なら Write の `content` と同じく全文）。書き込みは済んでいるので、`deny` / `ask` は PostToolUse の `block`（ファイルを直させる）になり、メッセージに「実行後に検知した」旨が付きます。同じセッション・同じルール・同じファイルで既に `ask` したものは、Edit と同じく `warn` に落とします。警告・block にはファイルのパスが付きます。検査の対象は git が列挙できるファイル（追跡中か、未追跡で ignore されていないもの）だけで、git の作業ツリーの外や `.gitignore` されたファイルへの書き込みは検査されません。
+Bash コマンドは、一般には実行前に何が書かれるか分からないので、`pre_edit` を PreToolUse で評価できません。例外は、書き先と本文がコマンドの文面に書かれている heredoc です。`src/bash-heredoc.ts` が PreToolUse でそれらを取り出し、`src/feedback-guard.ts` が各書き先に本文を内容として `pre_edit` の enforce を Write とまったく同じに評価します（`deny` / `ask` はコマンドを止める。同じセッション・同じルール・同じファイルで既に `ask` したものは Edit と同じく `warn` に落とす。理由にはファイルのパスが付く。同じコマンドの別の heredoc で書くテストファイルは `absent_sibling` / `absent_glob` を満たす）。読み取る形は `cat > path <<'EOF' ... EOF`、`cat <<EOF >> path`（`<<-` や、区切り語の引用・`\` エスケープはどれでも可）、`tee [-a] path <<EOF`、`cat <<EOF | tee [-a] path` です。本文は書かれたとおりに扱い（区切り語を引用しない heredoc では bash が `$VAR` を展開するが、検査では展開しない）、相対パスはコマンドの cwd 起点に解決します（先頭の `cd dir &&` は追いません）。実行時にしか分からない書き先（`$OUT`、`$(mktemp)`、`HOME` の無い `~`）、本文を加工するコマンド（`sed ... <<EOF > out`、`cat <<EOF | sort > out`、`python - <<EOF`）、区切り行の無い heredoc はここでは検査しません。コマンドの実行後、この方法で検査した書き先には `pre_edit` を再び掛けず（`post_edit` は掛けます）、それ以外にコマンドが書き換えた各ファイルには `src/feedback-bash-edit.ts` が `pre_edit` を同じ条件で評価します: `path` / `exclude_path`、`absent_sibling` / `absent_glob`（コマンド終了時点でテストファイルがあればよいので、同じコマンドでテストも書けば通る）、そして `when` / `unless` はそのコマンドが書いた内容に対して（git が追跡しているファイルなら `HEAD` との差分の追加行。同じコマンドでコミット済みなら、開始以降のコミットの追加行。追跡外のファイル（新規作成や git の外）なら Write の `content` と同じく全文）。書き込みは済んでいるので、`deny` / `ask` は PostToolUse の `block`（ファイルを直させる）になり、メッセージに「実行後に検知した」旨が付きます。同じセッション・同じルール・同じファイルで既に `ask` したものは、Edit と同じく `warn` に落とします。警告・block にはファイルのパスが付きます。検査の対象は git が列挙できるファイル（追跡中か、未追跡で ignore されていないもの）だけで、git の作業ツリーの外や `.gitignore` されたファイルへの書き込みは検査されません。
+
+### ファイル種別スコープのルール
+
+<a id="file-scoped-rules"></a>特定の言語やファイル種別についてのフィードバックルール（Go でのエラーの包み方、SQL マイグレーションに必ず要るもの、など）は、その種類のファイルを書いている間だけ役に立ち、それ以外のプロンプトではコンテキストを消費するだけです。そういうルールには frontmatter に `files` キー（プロジェクトルート相対の glob の文字列または配列。`files: ['**/*.go']`。任意で `exclude_files`、例 `['**/*_test.go']`。glob の意味は `when_exists` や `enforce` の `path` と同じで、`.claude/worktrees/` 配下の worktree ではその worktree 相対で判定）を書きます。すると:
+
+- **UserPromptSubmit では注入されません。** `count` に関わらず `src/feedback-inject.ts` が飛ばします。
+- **ファイルに触れた直後に注入されます。** `src/feedback-file-inject.ts` が `Read`・`Edit`・`Write`・`MultiEdit` の PostToolUse と、`Bash` では後述の素の heredoc の書き先に対して走ります。ファイルのプロジェクト相対パスが `files` にマッチし（`exclude_files` にはマッチせず）、ルールの `count >= 3` なら、そのルール（タイトル・`description`・本文の第 1 段落。UserPromptSubmit と同じ形）を、ファイル名を含むヘッダ（`# internal/server/handler.go に適用されるフィードバックルール`）付きの `additionalContext` として返します。本命は `Read` です。Claude はほぼ必ず編集の前にファイルを読むので、編集内容を考える前にルールがコンテキストにあります。`Edit` / `Write` は Read を挟まずに書いたときの保険で、次の編集から効きます（違反する最初の書き込み自体は `pre_edit` の enforce が止めます）。
+- **ターンごと・ルールごとに 1 回。** 出したルール名は `~/.claude/feedback/.inject_state/<session>[--<agent>].json`（feedback の状態置き場。プロジェクトのツリーには何も置かない）に控えます。UserPromptSubmit がそのファイル（とそのセッションのサブエージェント分）を消し、SessionStart は `startup` / `clear` / `compact` で消します（`resume` では消さない）。そのため、そういうファイルに触れたターンごとに 1 回、compaction の後にもまた届きます。サブエージェントは hook の payload に `agent_id` があれば自分の状態を持ちます。mod hook は `agent_id` 無しで動くことがあり、その場合そのターンは親の状態を共有します。
+- **`enforce` に引き継がれます。** そのルールの `pre_edit` / `post_edit` の要素は `path` / `exclude_path` を省略でき、`files` / `exclude_files` が使われます（自分で `path` を書いた要素はそのまま）。
+- `files` は注入先を決めるだけで、有効/無効のフィルタ（`expires` / `projects` / `when_exists`）ではありません。それらは `files` 付きのルールにも同じくかかります。
+
+Codex には `Read` ツールが無いので、そこでは `apply_patch` と heredoc の書き先でだけ届きます。
 
 ### 同じ作業ツリーの複数セッション
 
@@ -140,6 +154,34 @@ flowchart LR
 
 自動引き上げ（`autoCount`）が有効なら、違反したセッションごとに `count` が 1 ずつ上がります。`bump` 提案は窓内の違反回数を根拠に 3 や 5 へ一気に引き上げるもので、`apply` は提案時の `count` がファイルと一致するときだけ書き換えるため、自動引き上げと二重に上がることはありません（提案は常に現在の `count` から出ます）。
 
+## スキル
+
+`skills/` に 2 つのスキルを同梱しています。プラグインと一緒に Claude Code が読み込み、`/feedback-gate:<name>` で呼び出せます（説明文から Claude が自分で使うこともあります）。それぞれ手順を書いた `SKILL.md` と、必要なときに読む参照ファイルからなり、フックの動作はスキルに依存しません。
+
+### `/feedback-gate:feedback`
+
+フィードバックルールのファイル（`~/.claude/feedback/*.md`、`<project>/.claude/feedback/*.md`）を作成・更新・棚卸しします。
+
+```
+/feedback-gate:feedback [create|update|review] [トピックまたはルール名]
+```
+
+- `create`: フィードバック・指摘・好みを受けたとき。保存してよいか確認し、グローバルかプロジェクトか（または `projects` / `when_exists` / `expires` で絞ったグローバルルールか）を選び、具体的な指摘を抽象的なルールに変換して本文の第 1 段落（フックが注入する部分）に書き、ファイル名を snake_case で付け、`count` を決め（1 は暫定、3 は確定）、フックが検知できるものにだけ `enforce` を付け（イベントの選択、正規表現の検証）、書いたファイルを読み戻して frontmatter を確認します。
+- `update`: 同じ指摘の再発（そのセッションでフックが上げていなければ `count` を 1 上げる）、誤検知したルール（削除せず `unless` / `exclude_path` で絞る）、`enforce` の無い確定ルール、文言の修正、適用範囲の変更。
+- `review`: 定期的な棚卸し（`skills/feedback/review.md`）。`/correct` を実行し、`.violations.jsonl` からルールごとの違反回数を集計し、全ルールを 1 つの表にして「維持・昇格・修正・絞り込み・統合・範囲変更・廃止（期限切れ、不要になった、`gate.yaml` や linter で代替された）」の提案を付けます。削除と統合は確認してからにします。
+
+書式のリファレンス（`skills/feedback/reference.md`）と、4 つの `enforce` イベントそれぞれの完成例（`skills/feedback/examples.md`）をスキルに同梱しています。スキルが編集するのはルールファイルだけで、フックの状態ファイルには触れません。
+
+### `/feedback-gate:gate`
+
+プロジェクトの `.claude/gate.yaml` を作成・更新します。
+
+```
+/feedback-gate:gate [init|update|review]
+```
+
+コマンドを推測せず、まずプロジェクトが実際に動かしているものを読みます。マニフェスト（言語とパッケージマネージャ）、タスクランナー（`Makefile`、`justfile`、`Taskfile.yml`、`mise` のタスク、`package.json` の scripts）、CI 設定（GitHub Actions、GitLab CI、CircleCI など）や pre-commit 系のフック、リポジトリの構成（単一パッケージ、ワークスペース、1 ディレクトリ 1 パッケージ）です。それをゲートに写します。ファイル単位の lint・フォーマット検査・型検査とパッケージのテストは `rules` に（ツールがファイルを受け取れるなら `$CLAUDE_GATE_FILES` を渡す）、プロジェクト全体のテストやビルドは `consistency_checks` に置いて `run_checks` から参照し、モノレポには `per_file_dir`、各コマンドに `name`、独立したものは `parallel`、計測した所要時間から `timeout`、全体を見るコマンドには `files: false` を付けます。CI だけで必要なもの（カバレッジのアップロード、デプロイ、サービスやシークレットが要るステップ）は外して報告に列挙します。引き渡す前に、各コマンドを現在のツリーで 1 回ずつ実行し（通常の権限確認を通ります）、スキーマのキー一覧と照合し、`.gitignore` に `.claude/.gate-status/` があることを確かめます。`review` は現在のファイルと CI のずれを編集せずに報告します。フィールドのリファレンス、調査のチェックリスト、ツールチェーン別のレシピ（TypeScript、ワークスペース、Python、Go、Rust、Ruby、JVM、Terraform、シェル、Makefile 駆動）は `skills/gate/` にあります。
+
 ## インストール
 
 ```
@@ -171,8 +213,9 @@ mod のフックにはインストールするものはありません。フッ�
 ## 読み込むもの
 
 - プロジェクトの `{.claude,.agents}/gate.yaml`（オプトイン。無ければゲートは何もしません）。書式は `scripts/gate.schema.json`、既定ポリシーは `scripts/dogwood/` にあります。
-- `~/{.claude,.agents}/feedback/*.md`: frontmatter（`name`、`description`、`type`、`count`、任意で `enforce`、`expires`、`projects`、`when_exists`）付きのフィードバックルール。`count >= 3` のルールが注入・強制されます。`expires`（`YYYY-MM-DD` ならその日の終わり（UTC）まで有効、または ISO 8601 日時）を過ぎたルールは無効になり、`projects`（プロジェクトディレクトリの絶対パスにマッチする glob の文字列または配列。先頭の `~` は `HOME` に展開）はマッチするプロジェクトに、`when_exists`（プロジェクトルート相対の glob の文字列または配列）は1つでも存在するプロジェクトに適用を絞ります。指定したキーすべてを満たしたときだけ有効で、解釈できない `expires` は無視されます。これらの絞り込みはグローバルとプロジェクトをマージして読む経路にだけかかり、プロジェクト側の同名ルールが無効ならグローバル側も使われません。ディレクトリは `CLAUDE_FEEDBACK_DIR` で変更できます。プロジェクトの `.claude/feedback/*.md` も読み込まれ、グローバルと同じ `name` のルールがあればプロジェクト側が優先されます。
+- `~/{.claude,.agents}/feedback/*.md`: frontmatter（`name`、`description`、`type`、`count`、任意で `enforce`、`expires`、`projects`、`when_exists`、`files`、`exclude_files`）付きのフィードバックルール。`count >= 3` のルールが注入・強制されます。`files`（プロジェクトルート相対の glob）を持つルールは、毎プロンプトではなく、マッチするファイルを読んだ・編集したときに注入されます（[ファイル種別スコープのルール](#file-scoped-rules)）。`expires`（`YYYY-MM-DD` ならその日の終わり（UTC）まで有効、または ISO 8601 日時）を過ぎたルールは無効になり、`projects`（プロジェクトディレクトリの絶対パスにマッチする glob の文字列または配列。先頭の `~` は `HOME` に展開）はマッチするプロジェクトに、`when_exists`（プロジェクトルート相対の glob の文字列または配列）は1つでも存在するプロジェクトに適用を絞ります。指定したキーすべてを満たしたときだけ有効で、解釈できない `expires` は無視されます。これらの絞り込みはグローバルとプロジェクトをマージして読む経路にだけかかり、プロジェクト側の同名ルールが無効ならグローバル側も使われません。ディレクトリは `CLAUDE_FEEDBACK_DIR` で変更できます。プロジェクトの `.claude/feedback/*.md` も読み込まれ、グローバルと同じ `name` のルールがあればプロジェクト側が優先されます。
 - <a id="broken-rules"></a>壊れたルール: 1つのルールファイルの不備で、他のルールまで無効になることはありません。frontmatter が YAML として読めないファイルは、そのファイルだけを飛ばします。`enforce` がリストでない（`- ` の書き忘れなど）ルールは `enforce` を空として扱い、`enforce` の要素のうち辞書でないもの（`- ` の後が空など）や、`when` / `unless` が使えない正規表現のものは、その要素だけを捨てます（ルールの他の部分は効きます）。評価中に例外になった要素も、その要素だけを飛ばします。正規表現は Python の `re` の書き方で書き、JavaScript で実行します。先頭の `(?i)` / `(?s)` / `(?m)`、`(?P<name>...)`、`(?P=name)`、`\A` / `\Z` / `\z`（テキスト全体の先頭・末尾。`pre_edit` / `post_edit` の複数行モードでも同じ意味）は読み替えます。先頭の `(?x)` と、JavaScript が受け付けない書き方（途中の `x(?i)y` のようなインラインフラグ、`a*+`、`(?#...)`、`(?P>name)` など）は、その要素を不正として扱います。壊れたファイル・要素は、ファイルと理由を `~/.claude/feedback/.errors.jsonl`（`.violations.jsonl` と同じ場所）に 1 回だけ記録し、直すまで毎回のプロンプトで注入するコンテキストの先頭に一覧を出します（「次のルールファイルが読めず無効になっています: ...」）。`/correct` でも `broken` の提案として報告します。feedback の hook が作業を止めないために握りつぶす内部エラーも、同じファイルに記録します。
+- `~/.claude/feedback/.inject_state/<session>[--<agent>].json`: このターンに注入済みの `files` 付きルール（[ファイル種別スコープのルール](#file-scoped-rules)）。プロンプトごととセッション開始時に消え、24 時間より古いものは掃除されます。
 - ルールファイル: プロンプトごとにコンテキストへ追加されます。既定では同梱の `rules/feedback_rules.md`（日本語）か `rules/feedback_rules.en.md`（英語）を、上記の言語に応じて使います。丸ごと差し替えるには、`rulesFile` のパス（既定は `~/.claude/feedback-gate/feedback_rules.md`。プラグイン設定で変更可、先頭の `~` は展開されます）に自分のファイルを置いてください。そのファイルがあれば言語によらず同梱版の代わりに使われます（両方は入りません）。置き場所に `~/.claude/rules/` は避けてください。Claude Code 自身がこのディレクトリを読み込むため、二重に入ってしまいます。
 
 設定ディレクトリは `.claude` か `.agents` です。上の各ファイルは両方から探し、Claude Code では `.claude` を、Codex では `.agents` を先に見ます。状態ファイル（変更ファイル、試行回数、コマンドのログ）は、両者のうち先に存在する方（どちらも無ければ `.claude/`）の `.gate-status/` 配下に書かれます（`gate.yaml` はその直下のまま）。一方を他方へのシンボリックリンクにしても構いません。両方の経路で見つかるルールは 1 回だけ読み、状態の置き場所も 1 つになります。プロジェクトの `.gitignore` に `.gate-status/` を足してください。旧版が `.claude/` 直下（および `.claude/hooks/logs/`）に残した状態ファイルは、セッション開始時に自動で削除されます。`bash_started.*.json`（`gate.yaml` の無いプロジェクトでは `~/.claude/feedback/.bash_started/` 配下）は実行中の Bash コマンドの開始時刻で、そのコマンドが書き換えたファイルを見分けるために使います。鍵はセッション / エージェント ID ではなく、PreToolUse と PostToolUse の両方に入る呼び出しの `tool_use_id` です（エンジンは `classic.PreToolUse` にエージェント ID を渡さず、`classic.PostToolUse` には `agent_id` が入るので、それらを鍵にするとサブエージェントの中で一致しません）。失敗したコマンド（PostToolUse が来ない）の残骸は、2 時間より古くなれば次の Bash の開始時に消されます。
@@ -197,6 +240,14 @@ gate のコマンドが走っている間、プロンプトの上の帯に実行
 複数のエージェント（メインとサブエージェント）が同時に同じコマンドを実行しようとしたとき、gate は実体を 1 回だけ起動します。「同じ」とは、root・cwd・`cmd`・コマンドに渡す環境変数がすべて一致することで、エージェント識別用の変数（`CLAUDE_AGENT_ID`）と対象ファイル一覧（`CLAUDE_GATE_FILES`）は比較から除きます。対象ファイル一覧はエージェントごとに違いうるので、別に扱います。後から来たエージェントは、同じ条件で進行中の実行のうち、その対象ファイルが自分の対象ファイルをすべて含むもの（自分の一覧が空ならどれでも）があれば、起動し直さず、その完了を待って同じ結果（終了コード・出力・タイムアウト）を受け取ります。受け取った側も自分で実行した場合と同じに扱います（自分の trace とログディレクトリに記録し、同じキーの控えを消化し、フェーズの成否に反映します）。完了済みの結果は再利用せず、重なった実行だけをまとめます。エージェントごとの hook が同じプロセスで動く保証はないため、調停は `.claude/.gate-status/shared/` 配下のファイル（コマンドと対象ファイル一覧の組ごとのロックディレクトリ）で行います。
 
 受け取れる実行が無い場合（対象ファイルが含まれない、環境変数・root・cwd が違うなど）でも、同じコマンドは同時に 1 本しか走らせません。単位は `name`（無ければ `cmd`）で、同じものが別のエージェントで走っている間は起動せず、それが終わるのを待ってから、改めて受け取れる実行を探すか自分で実行します（待っている間は帯に `待機中` と出ます）。`go test ./...` のような重いコマンドをエージェントの数だけ同時に走らせると、CPU の取り合いで全員が何倍も遅くなるためです。異なるコマンドに同じ `name` を付けると、それらも 1 本ずつ走ります。同じリポジトリの別の git worktree で動くエージェントの間でも直列になります（ロックはリポジトリ（共通の git ディレクトリ）ごとの `~/.claude/.gate-status/shared/<project_id>/` に置きます。root・cwd が違うので、結果の受け取りは同じ worktree の中だけです）。ロックの生死はコマンドのプロセスで判定します。ESC などで hook が止められてロックが残っても、コマンドが終わっていれば次のエージェントがすぐに奪い直し、コマンドがまだ走っていればその終了を待ちます。コマンドの `timeout` を過ぎたロックも落ちたものとみなします。`share: false` のコマンドは共有も直列化もせず、常にすぐ自分で実行します。
+
+多くのエージェントがほぼ同時に止まったときの待ちを短くする仕組みが 2 つあります。1 つ目は、同じ `name` の実行を待っているエージェントの対象ファイル一覧をまとめることです。待っている間、各エージェントは自分のキーと対象ファイル一覧を `<serial>.queue/` に置き、次にそのコマンドを起動するエージェントは、自分の対象ファイルと置かれた分の和集合で 1 回だけ走らせます（`CLAUDE_GATE_FILES` に和集合が渡ります）。待っていた側はその 1 回の結果を受け取るので、エージェントの数だけ順に走ることがなくなります。この実行は他のエージェントのファイルも対象に含むので、そのファイルでの失敗は受け取った全員の失敗になります（含む実行を受け取る場合と同じ扱いです）。2 つ目は `gate.yaml` のトップレベルの `max_parallel` で、プロジェクトの全エージェント・全 worktree で同時に走らせる gate コマンドの数の上限です（既定 `2`。`false` で無制限）。コマンドを起動するエージェントは先に共有ディレクトリ配下の `slot.<i>/` を 1 つ取り、空いていなければ空くのを待ちます（共有の結果を受け取るだけなら枠は要りません）。`parallel` ブロックの中や `share: false` のコマンドにも効きます。サブエージェント 10 体がプロジェクト全体のテストを走らせるような場面で、全員が CPU を取り合って何倍も遅くなり（タイムアウトし）続けるのを防ぎ、1 本ずつは単独で走らせたときに近い時間で終わるようにします:
+
+```yaml
+max_parallel: 2   # 既定。false で無制限
+rules:
+  - ...
+```
 
 共有（と直列化）したくないコマンドは、`run` 要素に `share: false` を書きます（`{cmd, name, timeout, share, files}`）。
 
