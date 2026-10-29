@@ -2,7 +2,7 @@
 //
 // メインとサブエージェントの hook が同じプロセスで動く保証はないので、プロセス内の状態には頼らず、
 // 共有ディレクトリ（下記 sharedDir）配下のファイルで調停する:
-//   - <キーのハッシュ>.<ファイル一覧のハッシュ>.run/   ロックディレクトリ。`mkdir` は原子的なので、作れた側が
+//   - <キーのハッシュ>.<ファイル一覧のハッシュ>.run/   ロックディレクトリ。`mkdir` して中に .owner を作れた側（mkdirAtomicIn）が
 //                   実行側（先着 1 名）になる。中の info.json にキー・ファイル一覧・開始時刻・タイムアウトを書く。
 //   - <同じ名前>.result.json  実行側が完了時、ロックを外す前に書く結果（キーとファイル一覧付き）。
 // 共有の単位はキー（root・cwd・cmd など）で、各実行は対象ファイル一覧を別に持つ。同じキーのロックが複数並び得る。
@@ -113,8 +113,16 @@ export type SharedExecute = (pidFiles: string[], files: string[]) => Promise<Sha
 const REQUEST_STALE_MS = MAX_WAIT_MS + GRACE_MS // これより古い置き分は、落ちた待ち側の残骸とみなす
 const SLOT_WAIT_MS = 5000 // 枠が空くのを 1 回に待つ長さ。超えたら死んだ枠を片付けてから待ち直す
 
+/**
+ * path を作れた側（ロックの持ち主）にだけ true。
+ *
+ * mkdir(1) が原子的でない実装（Ubuntu 26.04 の coreutils は uutils で、存在を確かめてから作るので、同時に呼ぶと複数が
+ * 0 で終わる。uutils/coreutils#13970）でも持ち主が 1 人に決まるよう、作った直後に noclobber（set -C。O_EXCL）で
+ * .owner を作れた側だけを持ち主とする。シェルの組み込みなので coreutils に依らない。負けた側は mkdir が「成功」して
+ * いてもディレクトリは持ち主のものなので、普通に「既にある」のと同じ扱い（false）になる。
+ */
 const mkdirAtomicIn = async (io: Io, dir: string, path: string): Promise<boolean> =>
-  (await io.run(['sh', '-c', 'mkdir -p "$1" && mkdir "$2"', 'sh', dir, path])).exitCode === 0
+  (await io.run(['sh', '-c', 'mkdir -p "$1" && mkdir "$2" && (set -C && : > "$2/.owner") 2>/dev/null', 'sh', dir, path])).exitCode === 0
 
 type Info = { started?: number; limit: number; key?: string; files?: string[] }
 

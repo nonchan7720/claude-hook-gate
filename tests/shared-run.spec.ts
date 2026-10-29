@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
 import * as fs from 'node:fs'
+import * as os from 'node:os'
 import * as path from 'node:path'
 import { hashKey, runShared, runWithSlot, type SharedOutcome, shareId } from '../src/shared-run.ts'
 import { makeIo, sharedDirOf, waitForSharedLock, withTmp } from './helpers/node-io.ts'
@@ -432,4 +433,79 @@ describe('maxParallel', () => {
       expect(pidFiles).toEqual([path.join(shared, 'slot.0', 'pid')])
       expect(fs.existsSync(path.join(shared, 'slot.0'))).toBe(false)
     }))
+})
+
+// Ubuntu 26.04 の coreutils（uutils）の mkdir は、存在を確かめてから作るので、同時に呼ばれると複数が 0 で終わる
+// （uutils/coreutils#13970）。その mkdir を PATH の先頭に置いて模倣し、ロックの持ち主が 1 人に決まることを確かめる。
+describe('with a non-atomic mkdir on PATH', () => {
+  // 共有ディレクトリに残っているロック・枠（結果ファイルは残ってよい）。
+  const leftovers = async (proj: string): Promise<string[]> => {
+    const dir = await sharedDirOf(proj)
+    return fs.existsSync(dir) ? fs.readdirSync(dir).filter((n) => !n.endsWith('.result.json')) : []
+  }
+  const withFakeMkdir = async (body: () => Promise<void>): Promise<void> => {
+    const real = spawnSync('sh', ['-c', 'command -v mkdir']).stdout.toString().trim()
+    const bin = fs.mkdtempSync(path.join(os.tmpdir(), 'fake-mkdir-'))
+    const script = [
+      '#!/bin/sh',
+      '# non-atomic mkdir: check first, then create (with -p, so a concurrent creator also exits 0)',
+      `case " $* " in *" -p "*) exec "${real}" "$@";; esac`,
+      'for d in "$@"; do if [ -e "$d" ]; then echo "mkdir: cannot create directory \'$d\': File exists" >&2; exit 1; fi; done',
+      'sleep 0.05',
+      `exec "${real}" -p "$@"`,
+      '',
+    ].join('\n')
+    fs.writeFileSync(path.join(bin, 'mkdir'), script, { mode: 0o755 })
+    const saved = process.env.PATH
+    process.env.PATH = `${bin}${path.delimiter}${saved ?? ''}`
+    try {
+      await body()
+    } finally {
+      process.env.PATH = saved
+      fs.rmSync(bin, { recursive: true, force: true })
+    }
+  }
+
+  test('the fake mkdir lets two concurrent callers both succeed', () =>
+    withFakeMkdir(() =>
+      withTmp(async (dir) => {
+        const io = makeIo({ projectDir: dir })
+        const target = path.join(dir, 'x')
+        const rs = await Promise.all([1, 2].map(() => io.run(['sh', '-c', 'mkdir "$1"', 'sh', target])))
+        expect(rs.map((r) => r.exitCode)).toEqual([0, 0])
+      }),
+    ))
+
+  test('concurrent callers with the same key still execute once', () =>
+    withFakeMkdir(() =>
+      withTmp(async (proj) => {
+        let runs = 0
+        const execute = async () => {
+          runs++
+          await sleep(300)
+          return outcome('x')
+        }
+        await Promise.all([1, 2, 3].map(() => runShared(makeIo({ projectDir: proj }), 'k', [], 10_000, execute)))
+        expect(runs).toBe(1)
+        expect(await leftovers(proj)).toEqual([])
+      }),
+    ))
+
+  test('max_parallel still caps the commands running at once', () =>
+    withFakeMkdir(() =>
+      withTmp(async (proj) => {
+        let active = 0
+        let peak = 0
+        const execute = async () => {
+          active++
+          peak = Math.max(peak, active)
+          await sleep(250)
+          active--
+          return outcome('x')
+        }
+        await Promise.all(['k1', 'k2', 'k3'].map((k) => runShared(makeIo({ projectDir: proj }), k, [], 10_000, execute, { maxParallel: 1 })))
+        expect(peak).toBe(1)
+        expect(await leftovers(proj)).toEqual([])
+      }),
+    ))
 })
