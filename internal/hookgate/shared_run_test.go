@@ -612,3 +612,77 @@ func TestMaxParallel(t *testing.T) {
 		})
 	})
 }
+
+// Ubuntu 26.04 の coreutils（uutils）の mkdir は、存在を確かめてから作るので、同時に呼ばれると複数が 0 で終わる
+// （uutils/coreutils#13970）。その mkdir を PATH の先頭に置いて模倣し、ロックの持ち主が 1 人に決まることを確かめる。
+func TestRunSharedWithNonAtomicMkdir(t *testing.T) {
+	realMkdir, err := exec.LookPath("mkdir")
+	require.NoError(t, err)
+	bin := TmpDir()
+	defer RmTree(bin)
+	script := "#!/bin/sh\n" +
+		"# non-atomic mkdir: check first, then create (with -p, so a concurrent creator also exits 0)\n" +
+		"case \" $* \" in *\" -p \"*) exec \"" + realMkdir + "\" \"$@\";; esac\n" +
+		"for d in \"$@\"; do if [ -e \"$d\" ]; then echo \"mkdir: cannot create directory '$d': File exists\" >&2; exit 1; fi; done\n" +
+		"sleep 0.05\n" +
+		"exec \"" + realMkdir + "\" -p \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "mkdir"), []byte(script), 0o755))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	t.Run("the fake mkdir lets two concurrent callers both succeed", func(t *testing.T) {
+		WithTmp(func(dir string) {
+			target := filepath.Join(dir, "x")
+			rs := parallel(
+				func() int { return runProcess([]string{"sh", "-c", `mkdir "$1"`, "sh", target}, RunOptions{}).ExitCode },
+				func() int { return runProcess([]string{"sh", "-c", `mkdir "$1"`, "sh", target}, RunOptions{}).ExitCode },
+			)
+			assert.Equal(t, []int{0, 0}, rs)
+		})
+	})
+
+	t.Run("concurrent callers with the same key still execute once", func(t *testing.T) {
+		WithTmp(func(proj string) {
+			var runs atomic.Int32
+			execute := func([]string, []string) SharedOutcome {
+				runs.Add(1)
+				sleepMs(300)
+				return outcomeOf("x")
+			}
+			call := func() SharedResult { return RunShared(newIo(proj), "k", nil, 10_000, execute, SharedHooks{}) }
+			parallel(call, call, call)
+			assert.EqualValues(t, 1, runs.Load())
+			assert.Empty(t, listNames(SharedDirOf(proj), ""), "locks are released")
+		})
+	})
+
+	t.Run("max_parallel still caps the commands running at once", func(t *testing.T) {
+		WithTmp(func(proj string) {
+			var active, peak atomic.Int32
+			execute := counterExecute(&active, &peak, 250)
+			call := func(k string) func() SharedResult {
+				return func() SharedResult {
+					return RunShared(newIo(proj), k, nil, 10_000, execute, SharedHooks{MaxParallel: 1})
+				}
+			}
+			parallel(call("k1"), call("k2"), call("k3"))
+			assert.EqualValues(t, 1, peak.Load())
+			assert.Empty(t, listNames(SharedDirOf(proj), ""), "slots and locks are released")
+		})
+	})
+}
+
+// counterExecute は同時に走っている数のピークを数える execute（TestMaxParallel の counter と同じ）。
+func counterExecute(active, peak *atomic.Int32, ms int) SharedExecute {
+	return func([]string, []string) SharedOutcome {
+		cur := active.Add(1)
+		for {
+			p := peak.Load()
+			if cur <= p || peak.CompareAndSwap(p, cur) {
+				break
+			}
+		}
+		sleepMs(ms)
+		active.Add(-1)
+		return outcomeOf("x")
+	}
+}

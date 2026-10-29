@@ -43,6 +43,7 @@ func PickEnv(environ map[string]string) EnvVars {
 
 		FeedbackGateAskAgentTypes:   environ["FEEDBACK_GATE_ASK_AGENT_TYPES"],
 		FeedbackGateAllowRecipients: environ["FEEDBACK_GATE_ALLOW_RECIPIENTS"],
+		FeedbackGateHookSource:      environ["FEEDBACK_GATE_HOOK_SOURCE"],
 	}
 }
 

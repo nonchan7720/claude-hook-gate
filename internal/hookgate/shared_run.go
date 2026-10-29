@@ -4,7 +4,7 @@ package hookgate
 //
 // メインとサブエージェントの hook が同じプロセスで動く保証はないので、プロセス内の状態には頼らず、
 // 共有ディレクトリ（下記 SharedDir）配下のファイルで調停する:
-//   - <キーのハッシュ>.<ファイル一覧のハッシュ>.run/   ロックディレクトリ。`mkdir` は原子的なので、作れた側が
+//   - <キーのハッシュ>.<ファイル一覧のハッシュ>.run/   ロックディレクトリ。`mkdir` して中に .owner を作れた側（mkdirAtomic）が
 //     実行側（先着 1 名）になる。中の info.json にキー・ファイル一覧・開始時刻・タイムアウトを書く。
 //   - <同じ名前>.result.json  実行側が完了時、ロックを外す前に書く結果（キーとファイル一覧付き）。
 //
@@ -242,8 +242,15 @@ type sharedRun struct {
 
 func resultOf(lock string) string { return strings.TrimSuffix(lock, ".run") + ".result.json" }
 
+// mkdirAtomic は path を作れた側（ロックの持ち主）にだけ true。
+//
+// mkdir(1) が原子的でない実装（Ubuntu 26.04 の coreutils は uutils で、存在を確かめてから作るので、同時に呼ぶと複数が
+// 0 で終わる。uutils/coreutils#13970）でも持ち主が 1 人に決まるよう、作った直後に noclobber（set -C。O_EXCL）で
+// .owner を作れた側だけを持ち主とする。シェルの組み込みなので coreutils に依らない。負けた側は mkdir が「成功」して
+// いてもディレクトリは持ち主のものなので、普通に「既にある」のと同じ扱い（false）になる。
 func mkdirAtomic(io Io, dir, path string) bool {
-	return io.Run([]string{"sh", "-c", `mkdir -p "$1" && mkdir "$2"`, "sh", dir, path}, RunOptions{}).ExitCode == 0
+	script := `mkdir -p "$1" && mkdir "$2" && (set -C && : > "$2/.owner") 2>/dev/null`
+	return io.Run([]string{"sh", "-c", script, "sh", dir, path}, RunOptions{}).ExitCode == 0
 }
 
 func (r *sharedRun) mkdirAtomic(path string) bool { return mkdirAtomic(r.io, r.dir, path) }

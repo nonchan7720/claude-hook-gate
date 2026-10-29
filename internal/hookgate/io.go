@@ -22,6 +22,9 @@ type EnvVars struct {
 	// FeedbackGateAllowRecipients は FEEDBACK_GATE_ALLOW_RECIPIENTS: agentLaunchGuard が確認なしで送ってよい宛先の一覧（同上）。
 	// 未設定なら AllowRecipients の既定。
 	FeedbackGateAllowRecipients string
+	// FeedbackGateHookSource は FEEDBACK_GATE_HOOK_SOURCE: Codex の hook がどの層から呼ばれたか（plugins/codex/scripts/hook.sh が
+	// 設定する）。"plugin" はプラグイン同梱の hooks.json（Codex が PLUGIN_ROOT を渡す）、それ以外は ~/.codex/hooks.json などへの写し。
+	FeedbackGateHookSource string
 }
 
 // Kind はファイルの種類。

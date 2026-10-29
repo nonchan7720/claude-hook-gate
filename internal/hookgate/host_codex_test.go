@@ -346,3 +346,51 @@ func TestOutcomeToCodex(t *testing.T) {
 			outcomeToCodex(io, "PreToolUse", Outcome{Deny: StrPtr("d")}).Stdout)
 	})
 }
+
+// CodexHookSourceAllows（host_codex.go）: プラグイン層（FEEDBACK_GATE_HOOK_SOURCE=plugin）の呼び出しがセッションのマーカーを書き、
+// 設定層への写し（それ以外）の呼び出しはマーカーがあれば黙る。Claude Code の .classic_seen と同じ仕組み。
+func TestCodexHookSource(t *testing.T) {
+	withCodexEnv(t, func(env codexEnv) {
+		marker := filepath.Join(env.feedback, CodexPluginSeenDir, "sess-1")
+		copyIo := MakeIo(IoOpts{ProjectDir: env.proj, Env: EnvVars{ClaudeFeedbackDir: env.feedback, Path: "/nonexistent", FeedbackGateHookSource: "config"}})
+		bareIo := env.io
+		pluginIo := MakeIo(IoOpts{ProjectDir: env.proj, Env: EnvVars{ClaudeFeedbackDir: env.feedback, Path: "/nonexistent", FeedbackGateHookSource: CodexHookSourcePlugin}})
+		payload := Dict{"session_id": "sess-1", "cwd": env.proj, "hook_event_name": "Stop"}
+
+		t.Run("without a marker every source runs, and a config-layer call writes none", func(t *testing.T) {
+			assert.True(t, CodexHookSourceAllows(copyIo, payload))
+			assert.True(t, CodexHookSourceAllows(bareIo, payload))
+			_, ok := CodexNormalize("Stop", payload, copyIo)
+			assert.True(t, ok)
+			assert.False(t, Exists(marker))
+		})
+
+		t.Run("a plugin-layer call writes the marker of its session; from then on the copies of that session are silent", func(t *testing.T) {
+			call, ok := CodexNormalize("Stop", payload, pluginIo)
+			assert.True(t, ok)
+			assert.Equal(t, "Stop", call.Event)
+			assert.True(t, Exists(marker))
+			assert.False(t, CodexHookSourceAllows(copyIo, payload))
+			assert.False(t, CodexHookSourceAllows(bareIo, payload))
+			_, ok = CodexNormalize("Stop", payload, copyIo)
+			assert.False(t, ok)
+			_, ok = CodexNormalize("PreToolUse", Dict{"session_id": "sess-1", "cwd": env.proj, "tool_name": "Bash", "tool_input": Dict{"command": "rm -rf /"}}, copyIo)
+			assert.False(t, ok)
+			// プラグイン層は引き続き走る（マーカーを書き直す）。
+			assert.True(t, CodexHookSourceAllows(pluginIo, payload))
+			// 別のセッションの写しは影響を受けない。
+			assert.True(t, CodexHookSourceAllows(copyIo, Dict{"session_id": "sess-2"}))
+			// 出力は空（CodexRender はゼロ値の Outcome で何も出さない）。
+			r := CodexRender("Stop", Outcome{}, "", copyIo)
+			assert.Equal(t, ScriptResult{ExitCode: 0, Stdout: "", Stderr: ""}, r)
+		})
+
+		t.Run("no session_id: nothing is written and nothing is skipped; unsafe characters are dropped from the file name", func(t *testing.T) {
+			assert.True(t, CodexHookSourceAllows(pluginIo, Dict{}))
+			assert.True(t, CodexHookSourceAllows(copyIo, Dict{}))
+			assert.True(t, CodexHookSourceAllows(pluginIo, Dict{"session_id": "../x/y"}))
+			assert.True(t, Exists(filepath.Join(env.feedback, CodexPluginSeenDir, "xy")))
+			assert.False(t, CodexHookSourceAllows(copyIo, Dict{"session_id": "../x/y"}))
+		})
+	})
+}

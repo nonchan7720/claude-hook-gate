@@ -101,7 +101,10 @@ func ResetGate(io Io, payload Dict) ScriptResult {
 	}
 	// classic.* が走った印のマーカー（<feedbackDir>/.classic_seen/<session>。register.ts が書き、scripts/hook.sh が見る）も、
 	// 24h 超は掃除する。classic.Notification のたびに書き直されるので、動いているセッションのものは消えない。
+	// Codex のプラグイン層の hook が走った印（<feedbackDir>/.codex_plugin_seen/<session>。host_codex.go が書き、
+	// ~/.codex/hooks.json などへの写しが見る）も同じ。
 	fbSweepStaleFiles(io, Join(FeedbackDir(io), ".classic_seen"), now)
+	fbSweepStaleFiles(io, Join(FeedbackDir(io), CodexPluginSeenDir), now)
 	fbResetInjectState(io, sessionID, source, now)
 
 	// 旧パスのログ置き場が空になったら片付ける。

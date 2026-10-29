@@ -106,8 +106,47 @@ func agentResponse(payload Dict) Dict {
 	return out
 }
 
+// CodexPluginSeenDir はプラグイン層の hook が走った印のマーカーの置き場（<feedbackDir>/.codex_plugin_seen/<session_id>）。
+const CodexPluginSeenDir = ".codex_plugin_seen"
+
+// CodexHookSourcePlugin は FEEDBACK_GATE_HOOK_SOURCE の、プラグイン同梱の hooks.json から呼ばれたことを表す値。
+const CodexHookSourcePlugin = "plugin"
+
+// codexPluginSeenMarker はセッションのマーカーのパス。session_id が空（か安全な文字を含まない）なら ""。
+func codexPluginSeenMarker(io Io, payload Dict) string {
+	sessionID := fbNonSessionCharRe.ReplaceAllString(strOf(payload["session_id"]), "")
+	if sessionID == "" {
+		return ""
+	}
+	return Join(FeedbackDir(io), CodexPluginSeenDir, sessionID)
+}
+
+// CodexHookSourceAllows は、同じ hook がプラグイン層（plugins/codex/hooks/hooks.json）と設定層（~/.codex/hooks.json や
+// プロジェクトの .codex/hooks.json、管理者の hooks への写し。install-hooks が書く）の両方に登録されていても二重に走らせないための判定。
+// Codex は一致した hook を全部走らせるので、プラグイン同梱の hook が動く環境（plugin_hooks が有効）で写しも残っていると、
+// 各イベントが 2 回ずつ走ってしまう。Claude Code の .classic_seen と同じく、プラグイン層の呼び出し（hook.sh が Codex の PLUGIN_ROOT を
+// 見て FEEDBACK_GATE_HOOK_SOURCE=plugin にする）が <feedbackDir>/.codex_plugin_seen/<session_id> を毎回書き、それ以外の呼び出しは
+// マーカーがあれば何もしない（false）。プラグイン層が走らない環境（plugin_hooks が無効、allow_managed_hooks_only、未信頼）では
+// マーカーが無いので写しが働く。初回の SessionStart は両方が同時に走りうるが、reset は冪等。
+func CodexHookSourceAllows(io Io, payload Dict) bool {
+	marker := codexPluginSeenMarker(io, payload)
+	if marker == "" {
+		return true
+	}
+	if io.Env().FeedbackGateHookSource == CodexHookSourcePlugin {
+		// マーカーを書けなくても作業は止めない（写しが二重に動きうるだけ）。
+		_ = io.WriteFile(marker, "1\n")
+		return true
+	}
+	return !io.Exists(marker)
+}
+
 // CodexNormalize は Codex のイベントと stdin の JSON を中核の呼び出しに直す。未知のイベントは ok=false。
+// 設定層への写しからの呼び出しで、プラグイン層の hook が同じセッションで走っているときも ok=false（何も出さない）。
 func CodexNormalize(event string, payload Dict, io Io) (CoreCall, bool) {
+	if !CodexHookSourceAllows(io, payload) {
+		return CoreCall{}, false
+	}
 	base := strOf(payload["cwd"])
 	if base == "" {
 		base = io.Cwd()
