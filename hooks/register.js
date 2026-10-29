@@ -2277,7 +2277,7 @@ function sharedDir(io) {
 }
 var REQUEST_STALE_MS = MAX_WAIT_MS + GRACE_MS;
 var SLOT_WAIT_MS = 5000;
-var mkdirAtomicIn = async (io, dir, path) => (await io.run(["sh", "-c", 'mkdir -p "$1" && mkdir "$2"', "sh", dir, path])).exitCode === 0;
+var mkdirAtomicIn = async (io, dir, path) => (await io.run(["sh", "-c", 'mkdir -p "$1" && mkdir "$2" && (set -C && : > "$2/.owner") 2>/dev/null', "sh", dir, path])).exitCode === 0;
 var readInfoOf = async (io, lock) => {
   const text = await io.readFile(join(lock, "info.json"));
   try {
