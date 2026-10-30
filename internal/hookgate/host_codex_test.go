@@ -394,31 +394,3 @@ func TestCodexHookSource(t *testing.T) {
 		})
 	})
 }
-
-func TestCodexRenderUsesSummarizedReason(t *testing.T) {
-	io := MakeIo(IoOpts{ProjectDir: "/proj"})
-	full := "=== [gate] log ===\n" + strings.Repeat("line\n", 500)
-	t.Run("Stop / PostToolUse の block は要約版の reason を使い、無ければ stderr 全体", func(t *testing.T) {
-		for _, event := range []string{"Stop", "SubagentStop", "PostToolUse"} {
-			r := parseHookJSON(t, outcomeToCodex(io, event, Outcome{Block: StrPtr(full), BlockReason: StrPtr("summary")}).Stdout)
-			assert.Equal(t, "summary", r["reason"], event)
-			r = parseHookJSON(t, outcomeToCodex(io, event, Outcome{Block: StrPtr(full)}).Stdout)
-			assert.Equal(t, full, r["reason"], event)
-		}
-	})
-	t.Run("PreToolUse の deny も要約版を使う", func(t *testing.T) {
-		r := parseHookJSON(t, outcomeToCodex(io, "PreToolUse", Outcome{Deny: StrPtr(full), BlockReason: StrPtr("summary")}).Stdout)
-		assert.Equal(t, "summary", r["hookSpecificOutput"].(Dict)["permissionDecisionReason"])
-	})
-	t.Run("ToOutcome は exit 2 の stdout の JSON から要約版を取り、Merge は先に出た step のものを残す", func(t *testing.T) {
-		stdout := JSONStringify(Dict{"decision": "block", "reason": "summary"}) + "\n"
-		o := ToOutcome("Stop", ScriptResult{ExitCode: 2, Stdout: stdout, Stderr: full})
-		require.NotNil(t, o.BlockReason)
-		assert.Equal(t, "summary", *o.BlockReason)
-		assert.Equal(t, strings.TrimSpace(full), *o.Block)
-		assert.Nil(t, ToOutcome("Stop", ScriptResult{ExitCode: 2, Stdout: "not json", Stderr: full}).BlockReason)
-		merged := Merge(ToOutcome("Stop", ScriptResult{ExitCode: 2, Stderr: "plain"}), o)
-		assert.Equal(t, "plain", *merged.Block)
-		assert.Nil(t, merged.BlockReason)
-	})
-}

@@ -9,10 +9,7 @@ import (
 
 // Outcome は hook の判定。TS の undefined と ” を区別するため、文字列は *string（nil が undefined）。
 type Outcome struct {
-	Block *string
-	// BlockReason は exit 2 の step が stdout に出した JSON の reason（Block = stderr 全体 の要約版）。Codex は reason が
-	// 会話に載るので、全出力の stderr ではなくこちらを使う。無ければ nil。
-	BlockReason         *string
+	Block               *string
 	Deny                *string
 	Ask                 *string
 	Allow               bool
@@ -75,27 +72,6 @@ func outcomeFromJSON(event string, j Dict) Outcome {
 	return out
 }
 
-// exit2Summary は exit 2 の step が stdout に出した JSON の要約済みの reason（PreToolUse は permissionDecisionReason）。
-// JSON でない、または reason が空なら nil。
-func exit2Summary(event, stdout string) *string {
-	j, ok := parseJSONDict(stdout)
-	if !ok {
-		return nil
-	}
-	reason := ""
-	if event == "PreToolUse" {
-		if specific, ok := AsDict(j["hookSpecificOutput"]); ok {
-			reason = strOrEmpty(specific["permissionDecisionReason"])
-		}
-	} else if j["decision"] == "block" {
-		reason = strOrEmpty(j["reason"])
-	}
-	if strings.TrimSpace(reason) == "" {
-		return nil
-	}
-	return StrPtr(reason)
-}
-
 // ToOutcome は classic コマンド hook の規約: exit 0 は stdout を解釈、exit 2 はブロック、他の非 0 は無視。
 func ToOutcome(event string, ran ScriptResult) Outcome {
 	if ran.ExitCode == 2 {
@@ -103,11 +79,10 @@ func ToOutcome(event string, ran ScriptResult) Outcome {
 		if reason == "" {
 			reason = "hook exited with code 2"
 		}
-		summary := exit2Summary(event, ran.Stdout)
 		if event == "PreToolUse" {
-			return Outcome{Deny: StrPtr(reason), BlockReason: summary}
+			return Outcome{Deny: StrPtr(reason)}
 		}
-		return Outcome{Block: StrPtr(reason), BlockReason: summary}
+		return Outcome{Block: StrPtr(reason)}
 	}
 	if ran.ExitCode != 0 {
 		return Outcome{}
@@ -127,10 +102,6 @@ func Merge(first, second Outcome) Outcome {
 	out := second
 	if first.Block != nil {
 		out.Block = first.Block
-	}
-	if first.Block != nil || first.Deny != nil {
-		// 要約版は Block / Deny と同じ step のものを使う（先の step が要約を持たないのに、後の step の要約が混ざらないように）。
-		out.BlockReason = first.BlockReason
 	}
 	if first.Deny != nil {
 		out.Deny = first.Deny

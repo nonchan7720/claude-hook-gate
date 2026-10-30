@@ -191,15 +191,6 @@ func CodexNormalize(event string, payload Dict, io Io) (CoreCall, bool) {
 	return CoreCall{}, false
 }
 
-// codexReason は Codex の会話に載る reason。exit 2 の step が stdout に出した要約済みの reason があればそれを使う
-// （stderr 全体は全コマンドの全出力で、継続プロンプトとして毎回会話に表示され、モデルの context も圧迫する）。
-func codexReason(full string, summary *string) string {
-	if summary != nil {
-		return *summary
-	}
-	return full
-}
-
 // CodexRender は中核の結果（Outcome と warn の stderr）を Codex の出力にする。
 func CodexRender(event string, outcome Outcome, stderr string, io Io) ScriptResult {
 	var j, specific OMap
@@ -215,7 +206,7 @@ func CodexRender(event string, outcome Outcome, stderr string, io Io) ScriptResu
 	case "PreToolUse":
 		switch {
 		case outcome.Deny != nil:
-			specific = append(specific, KV{"permissionDecision", "deny"}, KV{"permissionDecisionReason", codexReason(*outcome.Deny, outcome.BlockReason)})
+			specific = append(specific, KV{"permissionDecision", "deny"}, KV{"permissionDecisionReason", *outcome.Deny})
 		case outcome.Ask != nil:
 			// Codex の PreToolUse に ask は無い（返すと hook が失敗扱いになりツールが動く）。同じ対象の 2 回目は中核が warn に落とす。
 			specific = append(specific, KV{"permissionDecision", "deny"}, KV{"permissionDecisionReason", *outcome.Ask + "\n" + Tr(io.Lang())("codex.askAsDeny")})
@@ -225,7 +216,7 @@ func CodexRender(event string, outcome Outcome, stderr string, io Io) ScriptResu
 		}
 	case "PostToolUse":
 		if outcome.Block != nil {
-			j = append(j, KV{"decision", "block"}, KV{"reason", codexReason(*outcome.Block, outcome.BlockReason)})
+			j = append(j, KV{"decision", "block"}, KV{"reason", *outcome.Block})
 		}
 		var ctxParts []string
 		if context != "" {
@@ -239,7 +230,7 @@ func CodexRender(event string, outcome Outcome, stderr string, io Io) ScriptResu
 		}
 	case "Stop", "SubagentStop":
 		if outcome.Block != nil {
-			j = append(j, KV{"decision", "block"}, KV{"reason", codexReason(*outcome.Block, outcome.BlockReason)})
+			j = append(j, KV{"decision", "block"}, KV{"reason", *outcome.Block})
 		} else if warnings != "" {
 			j = append(j, KV{"systemMessage", warnings})
 		}
@@ -251,7 +242,7 @@ func CodexRender(event string, outcome Outcome, stderr string, io Io) ScriptResu
 		}
 	case "UserPromptSubmit", "SessionStart":
 		if outcome.Block != nil {
-			j = append(j, KV{"decision", "block"}, KV{"reason", codexReason(*outcome.Block, outcome.BlockReason)})
+			j = append(j, KV{"decision", "block"}, KV{"reason", *outcome.Block})
 		}
 		if context != "" {
 			specific = append(specific, KV{"additionalContext", context})
