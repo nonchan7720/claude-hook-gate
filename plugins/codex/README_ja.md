@@ -99,8 +99,8 @@ Codex は一致したフックを全ファイル分すべて走らせるので�
 | PostToolUse（`apply_patch`） | ファイルごとの `feedback-file-inject` + `record-changes` + `feedback-post-edit`、その後 gate の `rules` を 1 回 | 上と同じ分け方。gate はパッチ全体で 1 回だけ走ります。Codex には `Read` ツールが無いので、`files` 付きのフィードバックルールはここ（と `Bash` の heredoc の書き先）で届き、最初の編集より前には届きません。 |
 | PostToolUse（`spawn_agent`） | `subagent-report` | エージェント ID は `tool_response.agentId` か `agent_id` から読みます（JSON 文字列でも可）。 |
 | PermissionRequest | `notification`（`notify`） | Codex には `Notification` イベントが無いので、ツール呼び出しが承認待ちになったときに「確認待ち」の通知を出します。フックは何も返さないので、承認の判断は通常のダイアログに残ります。 |
-| Stop | `all-stop`（gate の `checks`、`stop_check`、`stop` 通知） | なし。 |
-| SubagentStop | gate の `checks`、`stop_check`、`saveSubagentReport` | なし。 |
+| Stop | `all-stop`（gate の `checks`、`stop_check`、`stop` 通知） | block の `reason` は Codex の会話に継続プロンプトとして表示されるので、失敗したコマンドの出力は末尾 60 行とログのパスだけにします。全出力はログファイルにあります。 |
+| SubagentStop | gate の `checks`、`stop_check`、`saveSubagentReport` | Stop と同じく `reason` は要約です。 |
 
 出力の違いは 2 つです。
 

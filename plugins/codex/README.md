@@ -99,8 +99,8 @@ Every event is a command hook `bash "${PLUGIN_ROOT}/plugins/codex/scripts/hook.s
 | PostToolUse (`apply_patch`) | `feedback-file-inject` + `record-changes` + `feedback-post-edit` per file, then gate `rules` once | Same split; the gate runs once for the whole patch. Codex has no `Read` tool, so `files`-scoped feedback rules arrive here (and on heredoc targets of `Bash`), not before the first edit. |
 | PostToolUse (`spawn_agent`) | `subagent-report` | The agent id is read from `tool_response.agentId` or `agent_id` (also from a JSON string). |
 | PermissionRequest | `notification` (`notify`) | Codex has no `Notification` event; the "waiting for you" notification is sent when a tool call waits for your approval. The hook returns nothing, so the approval stays with the normal dialog. |
-| Stop | `all-stop` (gate `checks`, `stop_check`, `stop` notification) | None. |
-| SubagentStop | gate `checks`, `stop_check`, `saveSubagentReport` | None. |
+| Stop | `all-stop` (gate `checks`, `stop_check`, `stop` notification) | The `reason` of a block is a continuation prompt shown in the Codex conversation, so it carries only the tail (last 60 lines) of the failed commands and the log path; the full output is in the log file. |
+| SubagentStop | gate `checks`, `stop_check`, `saveSubagentReport` | Same summarized `reason` as Stop. |
 
 Two differences in the output:
 
