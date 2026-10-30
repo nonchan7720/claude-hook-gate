@@ -47,7 +47,7 @@ func (g *Gate) RunCmd(cmd, cwd string, timeout float64, name string, extraEnv Ga
 		env[k] = v
 	}
 	timeoutMs := max(gateTimeoutMs(timeout), 1)
-	r := g.Io.Run([]string{"sh", "-c", writePid.String() + "exec 2>&1; " + cmd}, RunOptions{Cwd: cwd, Env: env, TimeoutMs: timeoutMs})
+	r := g.Io.Run([]string{"sh", "-c", deathWatch() + writePid.String() + "exec 2>&1; " + cmd}, RunOptions{Cwd: cwd, Env: env, TimeoutMs: timeoutMs, DieWithParent: true})
 	// エンジンの process.run はタイムアウトを「起動できなかった」と同じ拒否で返すので、経過時間で見分ける。
 	elapsed := g.Io.Now() - started
 	timedOut := r.TimedOut || (r.Error != "" && float64(elapsed) >= math.Min(timeout*1000, gateMaxTimeoutMs)-1000)

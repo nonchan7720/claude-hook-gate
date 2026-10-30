@@ -27,3 +27,16 @@ func removeEmptyDir(path string) {
 func trackGroup(int) {}
 
 func untrackGroup(int) {}
+
+// Windows には ExtraFiles もプロセスグループの SIGKILL も無いので、親の死を子へ伝える仕組みは何もしない。
+type deathPipe struct{}
+
+func attachDeathPipe(*exec.Cmd) *deathPipe { return nil }
+
+func (*deathPipe) started() {}
+
+func (*deathPipe) finish() {}
+
+func (*deathPipe) abort() {}
+
+func deathWatch() string { return "" }

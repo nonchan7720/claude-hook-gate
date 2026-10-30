@@ -102,10 +102,12 @@ Every event is a command hook `bash "${PLUGIN_ROOT}/plugins/codex/scripts/hook.s
 | Stop | `all-stop` (gate `checks`, `stop_check`, `stop` notification) | None. |
 | SubagentStop | gate `checks`, `stop_check`, `saveSubagentReport` | None. |
 
-Two differences in the output:
+Differences in the output and in process handling:
 
 - **`ask` becomes `deny`.** Codex's PreToolUse has no `ask` (returning it fails the hook and the tool runs). A rule with `severity: ask` (or `count` 3-4 without `severity`) denies the call and the reason says so. As in Claude Code, the same rule on the same target is downgraded to `warn` from the next call in the session, so Codex can fix the call and retry.
 - **Warnings reach the model.** Claude Code shows what a hook prints on stderr; Codex does not. On PreToolUse (when nothing is denied) and PostToolUse they are added as `additionalContext`, on Stop / SubagentStop as `systemMessage`. They are still printed on stderr.
+- **The Stop reason is a summary.** The `reason` of a block becomes a continuation prompt shown in the Codex conversation, so it carries only the tail (last 60 lines) of the failed commands and the log path. The full output is in the log file.
+- **Killed hooks take the gate commands with them.** Codex sends SIGKILL to the hook's process group on Esc or timeout. The gate runs each command in its own process group, so it detects the hook's death and kills those groups too; no test run is left behind.
 
 ## Settings
 

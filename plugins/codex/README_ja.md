@@ -102,10 +102,12 @@ Codex は一致したフックを全ファイル分すべて走らせるので�
 | Stop | `all-stop`（gate の `checks`、`stop_check`、`stop` 通知） | なし。 |
 | SubagentStop | gate の `checks`、`stop_check`、`saveSubagentReport` | なし。 |
 
-出力の違いは 2 つです。
+出力とプロセスの扱いの違いは次のとおりです。
 
 - **`ask` は `deny` になる。** Codex の PreToolUse には `ask` が無く、返すとフックが失敗扱いになってツールがそのまま動きます。`severity: ask`（または `severity` 無しの `count` 3〜4）のルールは呼び出しを拒否し、理由にその旨を添えます。Claude Code と同じく、同じセッション・同じ対象への同じルールは次の呼び出しから `warn` に落ちるので、Codex は呼び出しを直してやり直せます。
 - **warn がモデルに届く。** Claude Code はフックが stderr に出した warn を表示しますが、Codex は表示しません。PreToolUse（拒否しないとき）と PostToolUse では `additionalContext` として、Stop / SubagentStop では `systemMessage` として渡します。stderr にも従来どおり出します。
+- **Stop の理由は要約。** block の `reason` は Codex の会話に継続プロンプトとして表示されるので、失敗したコマンドの出力は末尾 60 行とログのパスだけにします。全出力はログファイルにあります。
+- **hook が kill されても gate のコマンドは道連れになる。** Codex は Esc や timeout で hook のプロセスグループに SIGKILL を送ります。gate は各コマンドを独立したプロセスグループで走らせるので、hook の死を検知してそのグループも kill し、テストの実行が孤児として残りません。
 
 ## 設定
 
