@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.14.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.14.0...v0.14.1) (2026-10-31)
+
+
+### Bug Fixes
+
+* **codex:** kill the gate commands with the hook when Codex sends SIGKILL ([#80](https://github.com/nonchan7720/claude-hook-gate/issues/80)) ([759b625](https://github.com/nonchan7720/claude-hook-gate/commit/759b625538e53e7f63f5b8185a90792d739ae773))
+
+
+### Build System
+
+* **deps-dev:** bump the dev-dependencies group across 1 directory with 5 updates ([#57](https://github.com/nonchan7720/claude-hook-gate/issues/57)) ([c87f9ef](https://github.com/nonchan7720/claude-hook-gate/commit/c87f9efbf2e1f5a5471e68ee526c94c20fbb1a6a))
+* **deps:** bump the actions group with 2 updates ([#74](https://github.com/nonchan7720/claude-hook-gate/issues/74)) ([e3feaa9](https://github.com/nonchan7720/claude-hook-gate/commit/e3feaa9f25d3afe882e62fec006d6535b67e5abc))
+
 ## [0.14.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.13.0...v0.14.0) (2026-10-29)
 
 
