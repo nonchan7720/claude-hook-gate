@@ -59,6 +59,10 @@ type RunOptions struct {
 	Stdin string
 	// TimeoutMs が 0 のときは打ち切らない。
 	TimeoutMs int64
+	// DieWithParent は、hook のプロセスが SIGKILL などで突然死んだときに、子のプロセスグループも道連れにしたいときに立てる
+	// （unix のみ）。子の fd 3 に「親が生きている間だけ開いているパイプ」を渡す。子のシェルがこれを見張る
+	// （deathWatchSnippet、osio_unix.go）。Windows では何もしない。
+	DieWithParent bool
 }
 
 // RunResult は Io.Run の結果。

@@ -188,3 +188,68 @@ func TestHookProcessForwardsSignalToChildGroups(t *testing.T) {
 	}
 	assert.True(t, gone, "the gate command's process group (pid %d) must be killed with the hook", pid)
 }
+
+// Codex は Esc や timeout で hook を SIGKILL する（hook のプロセスグループに killpg）。SIGKILL は捕まえられないので
+// 信号の転送は働かないが、gate のコマンド（独立したプロセスグループ）は canary pipe で道連れになる。
+func TestHookProcessKilledBySIGKILLTakesGateCommandDown(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	cmd, cancel := startHook(t, "sh -c 'echo $$ > "+pidFile+"; sleep 30'")
+	defer cancel()
+	// Codex と同じく hook を新しいセッション（独立したプロセスグループ）として起動する。
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, cmd.Start())
+	hookPid := cmd.Process.Pid
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+
+	var pid int
+	require.Eventually(t, func() bool {
+		b, err := os.ReadFile(pidFile)
+		if err != nil {
+			return false
+		}
+		p, err := strconv.Atoi(strings.TrimSpace(string(b)))
+		pid = p
+		return err == nil && p > 0
+	}, 5*time.Second, 20*time.Millisecond)
+	defer func() { _ = syscall.Kill(-pid, syscall.SIGKILL) }()
+	// 見張りのサブシェルが fd 3 を読み始めるのを待つ
+	time.Sleep(300 * time.Millisecond)
+
+	require.NoError(t, syscall.Kill(-hookPid, syscall.SIGKILL))
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the hook process did not terminate within 2s of SIGKILL")
+	}
+
+	gone := false
+	for range 150 {
+		if processGone(pid) {
+			gone = true
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	assert.True(t, gone, "the gate command (pid %d) must not survive the SIGKILL of the hook", pid)
+}
+
+// 正常に終わったときは見張りが何も殺さない: コマンドの結果は保たれ、バックグラウンドに残った孫も殺さない。
+func TestRunCmdDieWithParentKeepsBackgroundGrandchild(t *testing.T) {
+	g := &Gate{Io: MakeIo(IoOpts{ProjectDir: t.TempDir()}), LogDir: t.TempDir()}
+	started := time.Now()
+	r := g.RunCmd("sh -c 'sleep 20 & echo $! > "+filepath.Join(g.LogDir, "gc")+"; echo done; exit 3'", g.LogDir, 30, "bg", nil, nil)
+	assert.Less(t, time.Since(started), 5*time.Second)
+	assert.False(t, r.Ok)
+	assert.False(t, r.TimedOut)
+	assert.Equal(t, "done\n", r.Out)
+
+	b, err := os.ReadFile(filepath.Join(g.LogDir, "gc"))
+	require.NoError(t, err)
+	gc, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	require.NoError(t, err)
+	defer func() { _ = syscall.Kill(gc, syscall.SIGKILL) }()
+	// 見張りは正常終了の合図を読んで静かに終わる。孫を殺すなら少し待てば現れる。
+	time.Sleep(500 * time.Millisecond)
+	assert.False(t, processGone(gc), "the background grandchild must survive a normal completion")
+}

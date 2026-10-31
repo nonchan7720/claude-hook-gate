@@ -290,9 +290,16 @@ func runProcess(argv []string, opts RunOptions) RunResult {
 	// 'close' ではなく終了を基準にする: 孫がパイプを継いでいても、終了の後は exitGrace だけ待って返る。
 	cmd.WaitDelay = exitGrace
 	setProcessGroup(cmd)
+	var canary *deathPipe // nil のときは何もしない
+	if opts.DieWithParent {
+		canary = attachDeathPipe(cmd)
+	}
 	if err := cmd.Start(); err != nil {
+		canary.abort()
 		return RunResult{ExitCode: 1, Error: err.Error()}
 	}
+	// 子に渡した読み口は親では不要。書き口だけを持ち続ける（親が死ねば書き口が閉じて子が EOF を読む）。
+	canary.started()
 	// hook のプロセス自体がシグナルで止められたとき、走っているグループを道連れにする（unix のみ）。
 	pid := cmd.Process.Pid
 	trackGroup(pid)
@@ -311,6 +318,8 @@ func runProcess(argv []string, opts RunOptions) RunResult {
 		})
 	}
 	waitErr := cmd.Wait()
+	// 正常に終わった合図。子の見張りはこれを読んで静かに終わる（バックグラウンドに残った孫は殺さない）。
+	canary.finish()
 	if timer != nil {
 		timer.Stop()
 	}
