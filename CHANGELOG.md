@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.15.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.14.0...v0.15.0) (2026-11-03)
+
+
+### Features
+
+* **gate:** run session_start commands on SessionStart and add their stdout to the context ([#85](https://github.com/nonchan7720/claude-hook-gate/issues/85)) ([0f15025](https://github.com/nonchan7720/claude-hook-gate/commit/0f1502592e85c810f8d38333d1978f28cf2e294a))
+
+
+### Bug Fixes
+
+* **codex:** kill the gate commands with the hook when Codex sends SIGKILL ([#80](https://github.com/nonchan7720/claude-hook-gate/issues/80)) ([759b625](https://github.com/nonchan7720/claude-hook-gate/commit/759b625538e53e7f63f5b8185a90792d739ae773))
+* **codex:** use the summarized reason, not the whole stderr, for the Stop reason shown in the conversation ([#81](https://github.com/nonchan7720/claude-hook-gate/issues/81)) ([f91eec4](https://github.com/nonchan7720/claude-hook-gate/commit/f91eec4b1ba9af04d853f8ae5702fe36ce10c639))
+
+
+### Build System
+
+* **deps-dev:** bump the dev-dependencies group across 1 directory with 5 updates ([#57](https://github.com/nonchan7720/claude-hook-gate/issues/57)) ([c87f9ef](https://github.com/nonchan7720/claude-hook-gate/commit/c87f9efbf2e1f5a5471e68ee526c94c20fbb1a6a))
+* **deps:** bump jdx/mise-action from 5.2.1 to 5.2.4 in the actions group ([#82](https://github.com/nonchan7720/claude-hook-gate/issues/82)) ([bd0bef1](https://github.com/nonchan7720/claude-hook-gate/commit/bd0bef1a0ce0566285a9542b6b0c68b3183f7cf7))
+* **deps:** bump the actions group with 2 updates ([#74](https://github.com/nonchan7720/claude-hook-gate/issues/74)) ([e3feaa9](https://github.com/nonchan7720/claude-hook-gate/commit/e3feaa9f25d3afe882e62fec006d6535b67e5abc))
+
 ## [0.14.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.13.0...v0.14.0) (2026-10-29)
 
 
