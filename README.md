@@ -15,7 +15,7 @@ The hooks are registered in `src/register.ts` (bundled into `hooks/register.js` 
 
 | Event | Module | Role | Settings hook |
 | --- | --- | --- | --- |
-| SessionStart | `src/reset-gate.ts` | Clears this session's gate state on `startup` / `clear`; keeps it on resume / compact. | Same (see below) |
+| SessionStart | `src/reset-gate.ts`, then `src/gate-session-start.ts` | Clears this session's gate state on `startup` / `clear`; keeps it on resume / compact. Then runs the commands of `session_start` in `gate.yaml` and adds their stdout to the context (see [session_start](#session_start)). | Same (see below) |
 | UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | Adds the rules file (your `rulesFile` if it exists, otherwise the bundled `rules/feedback_rules.md`, or `rules/feedback_rules.en.md` when the language is English) and the confirmed feedback rules (`count >= 3`) to the context. Rules with a `files` key are left out here and injected by `feedback-file-inject` instead (see [File-scoped rules](#file-scoped-rules)); this hook also forgets what that injected in the previous turn. | Same (see below) |
 | PostToolUse (Read) | `src/feedback-file-inject.ts` | Adds the confirmed feedback rules whose `files` globs match the file just read to the context, once per turn per rule. | Same (see below) |
 | PreToolUse (Bash / Edit / Write / MultiEdit) | `src/feedback-guard.ts` | Evaluates `pre_bash` / `pre_edit` enforce entries; denies, asks or warns by `count`. For Bash, a heredoc whose target and body are plain in the command (`cat > path <<'EOF' ... EOF`, `tee path <<EOF`; see [Files written by Bash](#files-written-by-bash)) is checked by `pre_edit` like a Write, before the command runs. | Same (see below) |
@@ -234,6 +234,26 @@ Finished commands stay in start order with `✓` for success or `✗` for failur
 The band is shared by the agents of one session (the main agent and its subagents): their running commands are merged into one list, e.g. `  lint $ bun lint (3s)` and `  test $ bun test waiting (2s)` under `[gate] running:`. `waiting` marks a command that is waiting for the same run in another agent (see below). The band disappears only when every agent of the session has finished; while another agent of the session is still running, its list stays. Other Claude Code sessions open on the same project (for example in another terminal) are not shown, and the one-line summary below is kept per session too.
 
 When everything has finished, the band goes away and the result of that round is left on the one-line status line instead, as counts only, e.g. `[gate] done: ✓ 5 / ✗ 1 (81.0s)` (`✗` is left out when nothing failed, `✓` when nothing passed; the seconds run from the first start to the last finish, not the sum, since checks run in parallel; check names are not shown, see the Stop hook output for which one failed. The status line cannot hold line breaks or long text, so it stays short). It stays until the next gate command starts running and the band appears again. Feedback checks still use the status line while they run: `[feedback-guard] evaluating: <rule>` or `[feedback-stop-check] checking: <rule> (<file>)`, cleared when the hook finishes.
+
+### session_start
+
+<a id="session_start"></a>A third phase of `gate.yaml`, `session_start`, runs commands on SessionStart (main session only; a payload with an `agent_id` is skipped) and adds their stdout to the session context (`additionalContext`), e.g. to load a code-graph summary. It runs after the reset step.
+
+```yaml
+session_start:
+  - name: depgraph
+    cmd: "command -v depgraph >/dev/null || exit 0; depgraph hook session-start"
+    timeout: 10                        # seconds, default 10 (not 300)
+    on: [startup, resume, clear, compact]   # optional; default: every source
+    background: false                  # optional; true = start and do not wait
+```
+
+- `on` filters by the `source` of the SessionStart payload; the source is passed as `CLAUDE_SESSION_SOURCE`. Unknown values never match. A plain string item is shorthand for `{cmd: ...}`.
+- Environment: `CLAUDE_PROJECT_DIR`, `CLAUDE_SESSION_ID`, `CLAUDE_SESSION_SOURCE`, `CLAUDE_GATE_FILES` (empty); `CLAUDE_AGENT_ID` is unset.
+- Commands run in parallel, bounded by `max_parallel`. The stdout of each command that exits 0 is joined in declaration order under a header `[gate] session_start: <name>`; empty output injects nothing. The total is capped at 8 KiB (8192 characters), with a note when truncated.
+- A failing or timed-out command never blocks the session: it is reported once on stderr with its exit status and log path (`.claude/.gate-status/logs/<session>/<name>.<id>.log`), the hook still exits 0, and the other commands still run.
+- `background: true` starts the command detached (output goes to the log only, nothing is injected) and the hook does not wait for it.
+- No policy and no sharing: these commands are not deferred by dogwood and not shared between agents, because their output is needed now. Only the project root's `gate.yaml` is read.
 
 ### Sharing runs between agents
 

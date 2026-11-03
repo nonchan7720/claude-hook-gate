@@ -17,6 +17,11 @@ runs the project's own checks in two phases:
   that matched referenced them in `run_checks`. A failure blocks the stop until fixed
   (up to 5 times). When everything passed, the agent is told to report the result.
 
+- **`session_start`** (SessionStart, optional third phase): commands whose stdout is
+  added to the session context (e.g. a code-graph summary). Parallel, default timeout
+  10 s, never blocks the session; not part of the lint / test setup, add it only when
+  the user asks (see reference.md).
+
 Field semantics are in [reference.md](reference.md) (the authoritative schema is
 `${CLAUDE_PLUGIN_ROOT}/scripts/gate.schema.json`; read it when a detail matters). How to
 find what the project runs is in [discovery.md](discovery.md). Ready-made blocks per

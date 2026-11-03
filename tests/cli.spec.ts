@@ -259,6 +259,35 @@ describe('SessionStart / Notification', () => {
       expect(exists(changed)).toBe(false)
     }))
 
+  test('SessionStart runs gate.yaml session_start and answers with additionalContext', () =>
+    withEnv(async (env) => {
+      writeGateYaml(env.proj, {
+        session_start: [
+          { name: 'depgraph', cmd: 'echo "graph for $CLAUDE_SESSION_SOURCE"' },
+          { name: 'resume-only', cmd: 'echo R', on: ['resume'] },
+          { name: 'broken', cmd: 'echo partial; exit 4' },
+        ],
+      })
+      const r = await hook(env, 'SessionStart', { source: 'startup' })
+      expect(r.exitCode).toBe(0)
+      expect(r.json?.hookSpecificOutput.hookEventName).toBe('SessionStart')
+      expect(r.json?.hookSpecificOutput.additionalContext).toContain('[gate] session_start: depgraph\ngraph for startup')
+      expect(r.json?.hookSpecificOutput.additionalContext).not.toContain('resume-only')
+      expect(r.json?.hookSpecificOutput.additionalContext).not.toContain('partial')
+      expect(r.stderr).toContain('broken')
+      expect(r.stderr).toContain('.gate-status/logs/sess-1/broken.')
+      const resumed = await hook(env, 'SessionStart', { source: 'resume' })
+      expect(resumed.json?.hookSpecificOutput.additionalContext).toContain('[gate] session_start: resume-only\nR')
+    }))
+
+  test('SessionStart skips session_start for a subagent payload', () =>
+    withEnv(async (env) => {
+      writeGateYaml(env.proj, { session_start: [{ name: 'a', cmd: 'echo A' }] })
+      const r = await hook(env, 'SessionStart', { source: 'startup', agent_id: 'sub1' })
+      expect(r.exitCode).toBe(0)
+      expect(r.stdout).toBe('')
+    }))
+
   test('an unknown event is a usage error; broken stdin still exits 0', async () => {
     await withEnv(async (env) => {
       expect((await hook(env, 'Bogus', {})).exitCode).toBe(1)

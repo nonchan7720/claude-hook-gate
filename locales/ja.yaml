@@ -146,3 +146,8 @@ gate:
   notePolicySkipped: "(ポリシー判定で見送り。控えに積んだので後で自動実行)"
   notePolicyUnevaluated: "(ポリシーを評価できず見送り。控えに積んだので後で自動実行: {{reason}})"
   internalError: "[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。"
+  sessionStartHeader: "[gate] session_start: {{name}}"
+  sessionStartTruncated: "[gate] session_start の出力が長すぎたため途中で切り詰めました（上限 {{limit}} 文字）。"
+  sessionStartExit: "終了コード {{code}}"
+  sessionStartTimeout: "{{seconds}} 秒でタイムアウト"
+  sessionStartFailed: "[gate] session_start: {{name}} が失敗しました（{{reason}}）。ログ: {{logpath}}"

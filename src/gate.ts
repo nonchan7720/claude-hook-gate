@@ -159,7 +159,13 @@ export type GateRule = Setting & {
   timeout?: number
 }
 export type GateCheck = Setting & { name: string; dir?: string; run?: RunItem[]; timeout?: number }
-export type GateConfig = Setting & { report_success?: boolean; max_parallel?: number | false; rules?: GateRule[]; consistency_checks?: GateCheck[] }
+export type GateConfig = Setting & {
+  report_success?: boolean
+  max_parallel?: number | false
+  rules?: GateRule[]
+  consistency_checks?: GateCheck[]
+  session_start?: unknown[]
+}
 
 /** gate.yaml の max_parallel（同時実行枠の数）。省略時は DEFAULT_MAX_PARALLEL、false か 0 以下は無制限（0）。数値でない値は既定値として扱う。 */
 export function maxParallelOf(cfg: GateConfig | null | undefined): number {
@@ -430,7 +436,7 @@ export class Gate {
   /** 全エージェントの実行中一覧（running-registry）の中での、この Gate の持ち分の名前。 */
   private readonly runningOwner: string
   /** 同時実行枠の数（gate.yaml の max_parallel。loadAction が設定する。0 は無制限）。 */
-  private maxParallel = DEFAULT_MAX_PARALLEL
+  maxParallel = DEFAULT_MAX_PARALLEL
   /** この Gate が実行した（または共有で結果を受け取った）コマンドの (root, cwd, cmd) キー。同じ回で控えを二重に走らせないために使う。 */
   private readonly ranThisRun = new Set<string>()
   /** この Gate が実際に実行した（または共有で結果を受け取った）コマンドの表示名。成功報告に使う。 */
@@ -761,6 +767,12 @@ export class Gate {
   }
 
   // ---- コマンド実行 ----
+  /** logDir/{name もしくは cmd}.{uid}.log の新しいパス（session_start のログ用。runCmd と同じ命名）。 */
+  async newLogPath(name: string | null | undefined, cmd: string): Promise<string> {
+    const uid = `${Math.floor((await this.io.now()) / 1000)}-${logSeq++}`
+    return join(this.logDir, `${slug(name || cmd)}.${uid}.log`)
+  }
+
   /**
    * コマンドを実行し { out, ok, timedOut, logpath } を返す。出力（stdout と stderr を混ぜたもの）は
    * logDir/{name もしくは cmd}.{uid}.log に書き出す。タイムアウト時は強制終了して失敗扱い。

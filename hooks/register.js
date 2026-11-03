@@ -389,6 +389,11 @@ gate:
   notePolicySkipped: "(deferred by the policy verdict; queued to run automatically later)"
   notePolicyUnevaluated: "(deferred because the policy could not be evaluated; queued to run automatically later: {{reason}})"
   internalError: "[gate] An internal error occurred, so the checks were skipped (work continues). See stderr for details."
+  sessionStartHeader: "[gate] session_start: {{name}}"
+  sessionStartTruncated: "[gate] session_start output was truncated (limit: {{limit}} characters)."
+  sessionStartExit: "exit status {{code}}"
+  sessionStartTimeout: "timed out after {{seconds}}s"
+  sessionStartFailed: "[gate] session_start: {{name}} failed ({{reason}}). Log: {{logpath}}"
 `;
 
 // locales/ja.yaml
@@ -540,6 +545,11 @@ gate:
   notePolicySkipped: "(ポリシー判定で見送り。控えに積んだので後で自動実行)"
   notePolicyUnevaluated: "(ポリシーを評価できず見送り。控えに積んだので後で自動実行: {{reason}})"
   internalError: "[gate] 内部エラーが発生したためチェックをスキップしました（作業は継続します）。詳細は stderr を参照してください。"
+  sessionStartHeader: "[gate] session_start: {{name}}"
+  sessionStartTruncated: "[gate] session_start の出力が長すぎたため途中で切り詰めました（上限 {{limit}} 文字）。"
+  sessionStartExit: "終了コード {{code}}"
+  sessionStartTimeout: "{{seconds}} 秒でタイムアウト"
+  sessionStartFailed: "[gate] session_start: {{name}} が失敗しました（{{reason}}）。ログ: {{logpath}}"
 `;
 
 // src/i18n.ts
@@ -3063,6 +3073,10 @@ class Gate {
       return null;
     return new PolicyContext(this, rootDir, resolved.policy, resolved.schema, resolved.isDefault, state);
   }
+  async newLogPath(name, cmd) {
+    const uid = `${Math.floor(await this.io.now() / 1000)}-${logSeq++}`;
+    return join(this.logDir, `${slug(name || cmd)}.${uid}.log`);
+  }
   async runCmd(cmd, cwd, timeout, name, extraEnv, pidFiles = []) {
     const uid = `${Math.floor(await this.io.now() / 1000)}-${logSeq++}`;
     const logpath = join(this.logDir, `${slug(name || cmd)}.${uid}.log`);
@@ -4905,6 +4919,105 @@ async function feedbackPostEdit(io, payload) {
   }
 }
 
+// src/gate-session-start.ts
+var SESSION_START_TIMEOUT = 10;
+var SESSION_START_MAX_CHARS = 8192;
+var MAX_TIMEOUT_MS2 = 600000;
+function parseItem(raw) {
+  const d = isDict(raw) ? raw : { cmd: raw };
+  if (typeof d.cmd !== "string" || d.cmd.trim() === "")
+    return;
+  const t = Number(d.timeout);
+  const on = typeof d.on === "string" ? [d.on] : Array.isArray(d.on) ? d.on.map(String) : undefined;
+  return {
+    cmd: d.cmd,
+    name: truthy(d.name) ? String(d.name) : slug(d.cmd),
+    timeout: truthy(d.timeout) && Number.isFinite(t) && t > 0 ? t : SESSION_START_TIMEOUT,
+    on,
+    background: d.background === true
+  };
+}
+async function runForeground(gate, item, env) {
+  const { io } = gate;
+  const logpath = await gate.newLogPath(item.name, item.cmd);
+  const header = `$ ${item.cmd}  (cwd: ${gate.projectDir})
+`;
+  await io.writeFile(logpath, header).catch(() => {
+    return;
+  });
+  const timeoutMs = Math.min(Math.round(item.timeout * 1000), MAX_TIMEOUT_MS2);
+  const started = await io.now();
+  let code = 1;
+  const r = await runWithSlot(io, gate.maxParallel, timeoutMs, async (pidFiles) => {
+    const writePid = pidFiles.map((f) => `{ echo $$ > ${shellQuote(f)}; } 2>/dev/null; `).join("");
+    const run = await io.run(["sh", "-c", `${writePid}${item.cmd}`], { cwd: gate.projectDir, env, timeoutMs });
+    const elapsed = await io.now() - started;
+    const timedOut = run.timedOut || run.error !== undefined && elapsed >= timeoutMs - 1000;
+    const out = run.stdout + (run.error !== undefined && !timedOut ? `${run.error}
+` : "");
+    code = run.exitCode;
+    await io.writeFile(logpath, `${header}${out}${run.stderr}`).catch(() => {
+      return;
+    });
+    return { out, ok: run.exitCode === 0 && !timedOut && run.error === undefined, timedOut, logpath };
+  });
+  if (!r.ok) {
+    const reason = r.timedOut ? gate.t("gate.sessionStartTimeout", { seconds: item.timeout }) : gate.t("gate.sessionStartExit", { code });
+    return { note: `${gate.t("gate.sessionStartFailed", { name: item.name, reason, logpath })}
+` };
+  }
+  const text = r.out.trim();
+  return text === "" ? {} : { block: `${gate.t("gate.sessionStartHeader", { name: item.name })}
+${text}` };
+}
+async function startBackground(gate, item, env) {
+  const { io } = gate;
+  const logpath = await gate.newLogPath(item.name, item.cmd);
+  await io.writeFile(logpath, `$ ${item.cmd}  (cwd: ${gate.projectDir}) [background]
+`).catch(() => {
+    return;
+  });
+  const script = "if command -v setsid >/dev/null 2>&1; then " + 'setsid nohup sh -c "$CLAUDE_GATE_BG_CMD" >>"$CLAUDE_GATE_BG_LOG" 2>&1 </dev/null & ' + 'else nohup sh -c "$CLAUDE_GATE_BG_CMD" >>"$CLAUDE_GATE_BG_LOG" 2>&1 </dev/null & fi';
+  const r = await io.run(["sh", "-c", script], {
+    cwd: gate.projectDir,
+    env: { ...env, CLAUDE_GATE_BG_CMD: item.cmd, CLAUDE_GATE_BG_LOG: logpath },
+    timeoutMs: 5000
+  });
+  if (r.exitCode !== 0 || r.error !== undefined) {
+    return { note: `${gate.t("gate.sessionStartFailed", { name: item.name, reason: gate.t("gate.sessionStartExit", { code: r.exitCode }), logpath })}
+` };
+  }
+  return {};
+}
+async function sessionStartGate(io, payload) {
+  if (jqStr(payload.agent_id))
+    return ok();
+  const path = await findGateYaml(io);
+  if (!path)
+    return ok();
+  const gate = new Gate(io, { sessionId: jqStr(payload.session_id) || "unknown", phase: "session_start" });
+  const cfg = await gate.loadAction(path).catch(() => null);
+  const raw = isDict(cfg) && Array.isArray(cfg.session_start) ? cfg.session_start : [];
+  const source = jqStr(payload.source);
+  const items = raw.map(parseItem).filter((i) => i !== undefined && (i.on === undefined || i.on.includes(source)));
+  if (items.length === 0)
+    return ok();
+  const env = { ...gate.baseEnv, CLAUDE_GATE_FILES: "", CLAUDE_SESSION_SOURCE: source };
+  const done = await Promise.all(items.map((item) => (item.background ? startBackground(gate, item, env) : runForeground(gate, item, env)).catch((e) => ({
+    note: `[gate] session_start: ${item.name}: ${e instanceof Error ? e.message : String(e)}
+`
+  }))));
+  let text = done.map((d) => d.block).filter((b) => b !== undefined).join(`
+
+`);
+  if (text.length > SESSION_START_MAX_CHARS) {
+    text = `${text.slice(0, SESSION_START_MAX_CHARS).trimEnd()}
+${gate.t("gate.sessionStartTruncated", { limit: SESSION_START_MAX_CHARS })}`;
+  }
+  return ok(text === "" ? "" : `${text}
+`, done.map((d) => d.note ?? "").join(""));
+}
+
 // src/outcome.ts
 var TEXT_CONTEXT_EVENTS = new Set(["UserPromptSubmit", "SessionStart"]);
 var parseJson = (text) => {
@@ -5188,7 +5301,7 @@ async function runSteps(base, sessionId, event, steps, first = {}) {
   }
   return { outcome: acc, stderr };
 }
-var sessionStart = (io, sessionId, payload) => runSteps(io, sessionId, "SessionStart", [(i) => resetGate(i, payload)]);
+var sessionStart = (io, sessionId, payload) => runSteps(io, sessionId, "SessionStart", [(i) => resetGate(i, payload), (i) => sessionStartGate(i, payload)]);
 async function userPromptSubmit(io, sessionId, options) {
   const text = await loadRules(io, options.rulesFile);
   return runSteps(io, sessionId, "UserPromptSubmit", [(i) => feedbackInject(i, sessionId)], text === "" ? {} : { additionalContext: [text] });

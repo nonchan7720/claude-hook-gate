@@ -2,10 +2,9 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://example.com/schemas/claude-action.schema.json",
   "title": "Claude Code test-gate action config",
-  "description": "各プロジェクトの .claude/gate.yaml のスキーマ。二相構造: rules は PostToolUse で動き、変更ファイルの glob にマッチしたパッケージ単位の lint/test を実行する（ブロックしない）。consistency_checks は Stop/SubagentStop で動き、rules フェーズで実際にマッチした rule が run_checks で名前を参照したものだけを実行する、パッケージを跨いだ整合性検証（失敗すると停止をブロックする）。",
+  "description": "各プロジェクトの .claude/gate.yaml のスキーマ。二相構造（加えて任意の session_start）: rules は PostToolUse で動き、変更ファイルの glob にマッチしたパッケージ単位の lint/test を実行する（ブロックしない）。consistency_checks は Stop/SubagentStop で動き、rules フェーズで実際にマッチした rule が run_checks で名前を参照したものだけを実行する、パッケージを跨いだ整合性検証（失敗すると停止をブロックする）。",
   "type": "object",
   "additionalProperties": false,
-  "required": ["rules"],
   "properties": {
     "policy": {
       "$ref": "#/definitions/policySetting",
@@ -30,6 +29,13 @@
       "description": "rules フェーズ（PostToolUse）で評価される。上から順に評価され、マッチした全ルールが実行される（早期終了しない）。失敗しても停止はブロックしない。",
       "items": {
         "$ref": "#/definitions/rule"
+      }
+    },
+    "session_start": {
+      "type": "array",
+      "description": "SessionStart（メインのセッションのみ）で実行するコマンド。exit 0 で終わったコマンドの stdout が、宣言順に [gate] session_start: <name> の見出し付きで additionalContext に足される（合計 8 KiB で切り詰め）。全コマンドを並列に実行する（max_parallel が上限）。失敗・タイムアウトしてもセッションはブロックせず、stderr に 1 回通知する。ポリシー（dogwood）と実行共有は使わない。rules は通常の入口だが、session_start だけのプロジェクトでは省略できる。",
+      "items": {
+        "$ref": "#/definitions/sessionStartCommand"
       }
     },
     "consistency_checks": {
@@ -177,6 +183,47 @@
         },
         {
           "$ref": "#/definitions/parallelGroup"
+        }
+      ]
+    },
+    "sessionStartCommand": {
+      "description": "session_start の要素。文字列（{cmd: 文字列} の省略形）、またはオブジェクト形式。",
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cmd"],
+          "properties": {
+            "cmd": {
+              "type": "string",
+              "description": "実行するシェルコマンド（sh -c、プロジェクトルートで実行）。環境変数 CLAUDE_PROJECT_DIR / CLAUDE_SESSION_ID / CLAUDE_SESSION_SOURCE が渡され、CLAUDE_GATE_FILES は空、CLAUDE_AGENT_ID は未設定。",
+              "minLength": 1
+            },
+            "name": {
+              "type": "string",
+              "description": "見出しとログファイル名に使う名前。省略時は cmd から生成される。",
+              "minLength": 1
+            },
+            "timeout": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 10,
+              "description": "タイムアウト秒数。省略時は 10 秒（起動を遅らせないため、他のコマンドの 300 秒より短い）。超過するとプロセスグループごと強制終了され、失敗として stderr に通知される。"
+            },
+            "on": {
+              "description": "このコマンドを走らせる SessionStart の source（startup / resume / clear / compact）。文字列または文字列の配列。省略時はすべての source。未知の値は一致しない。source は CLAUDE_SESSION_SOURCE としてコマンドに渡される。",
+              "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "string" } }]
+            },
+            "background": {
+              "type": "boolean",
+              "default": false,
+              "description": "true にすると、コマンドを切り離して起動するだけで完了を待たない。出力はログにだけ残り、context には入らない。"
+            }
+          }
         }
       ]
     },

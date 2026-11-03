@@ -148,9 +148,12 @@ func RunSteps(base Io, sessionID, event string, steps []Step, first Outcome) Hoo
 	return HookRun{Outcome: acc, Stderr: stderr}
 }
 
-// SessionStart: 自セッションの gate 状態を消す（startup / clear）。
+// SessionStart: 自セッションの gate 状態を消す（startup / clear）。そのあと gate.yaml の session_start のコマンドを走らせ、stdout を context に足す。
 func SessionStart(io Io, sessionID string, payload Dict) HookRun {
-	return RunSteps(io, sessionID, "SessionStart", []Step{func(i Io) ScriptResult { return ResetGate(i, payload) }}, Outcome{})
+	return RunSteps(io, sessionID, "SessionStart", []Step{
+		func(i Io) ScriptResult { return ResetGate(i, payload) },
+		func(i Io) ScriptResult { return SessionStartGate(i, payload) },
+	}, Outcome{})
 }
 
 // UserPromptSubmit: rules ファイル（rulesFile か同梱のもの）と、確定した feedback ルールを context に足す。
