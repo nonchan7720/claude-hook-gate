@@ -10,6 +10,8 @@ export type Outcome = {
   preventContinuation?: true
   stopReason?: string
   additionalContext?: string[]
+  /** ユーザーに見せるメッセージ（step の ScriptResult.systemMessage から。stdout の JSON の systemMessage は読まない）。 */
+  systemMessage?: string
 }
 
 const TEXT_CONTEXT_EVENTS = new Set(['UserPromptSubmit', 'SessionStart'])
@@ -54,9 +56,14 @@ export const toOutcome = (event: string, ran: ScriptResult): Outcome => {
     return event === 'PreToolUse' ? { deny: reason } : { block: reason }
   }
   if (ran.exitCode !== 0) return {}
-  const json = parseJson(ran.stdout)
+  const base = toOutcomeStdout(event, ran.stdout)
+  return ran.systemMessage ? { ...base, systemMessage: ran.systemMessage } : base
+}
+
+const toOutcomeStdout = (event: string, stdout: string): Outcome => {
+  const json = parseJson(stdout)
   if (json) return fromJson(event, json)
-  const text = ran.stdout.trim()
+  const text = stdout.trim()
   return text !== '' && TEXT_CONTEXT_EVENTS.has(event) ? { additionalContext: [text] } : {}
 }
 
@@ -66,6 +73,9 @@ export const merge = (first: Outcome, second: Outcome): Outcome => {
   const ctx = [...(first.additionalContext ?? []), ...(second.additionalContext ?? [])]
   if (ctx.length > 0) out.additionalContext = ctx
   else delete out.additionalContext
+  const sys = [first.systemMessage, second.systemMessage].filter((m): m is string => m !== undefined && m !== '')
+  if (sys.length > 0) out.systemMessage = sys.join('\n')
+  else delete out.systemMessage
   return out
 }
 
@@ -92,6 +102,7 @@ export const outcomeToClassic = (event: string, outcome: Outcome, stderr = ''): 
   }
   if (context !== '' && event !== 'Stop' && event !== 'SubagentStop' && event !== 'Notification') specific.additionalContext = context
   if (Object.keys(specific).length > 0) json.hookSpecificOutput = { hookEventName: event, ...specific }
+  if (outcome.systemMessage) json.systemMessage = outcome.systemMessage
   if (outcome.preventContinuation) {
     json.continue = false
     if (outcome.stopReason !== undefined) json.stopReason = outcome.stopReason

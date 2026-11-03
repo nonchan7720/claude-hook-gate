@@ -12,6 +12,7 @@ import { feedbackGuard } from './feedback-guard.ts'
 import { feedbackInject } from './feedback-inject.ts'
 import { feedbackPostEdit } from './feedback-post-edit.ts'
 import { feedbackStopCheck } from './feedback-stop-check.ts'
+import { sessionStartGate } from './gate-session-start.ts'
 import type { Io, ScriptResult } from './io.ts'
 import { notification as desktopNotification } from './notification.ts'
 import { merge, type Outcome, toOutcome } from './outcome.ts'
@@ -79,9 +80,9 @@ async function runSteps(base: Io, sessionId: string, event: string, steps: Step[
   return { outcome: acc, stderr }
 }
 
-/** SessionStart: 自セッションの gate 状態を消す（startup / clear）。 */
+/** SessionStart: 自セッションの gate 状態を消す（startup / clear）。そのあと gate.yaml の session_start のコマンドを走らせ、stdout を context に足す。 */
 export const sessionStart = (io: Io, sessionId: string, payload: Dict): Promise<HookRun> =>
-  runSteps(io, sessionId, 'SessionStart', [(i) => resetGate(i, payload)])
+  runSteps(io, sessionId, 'SessionStart', [(i) => resetGate(i, payload), (i) => sessionStartGate(i, payload)])
 
 /** UserPromptSubmit: rules ファイル（rulesFile か同梱のもの）と、確定した feedback ルールを context に足す。 */
 export async function userPromptSubmit(io: Io, sessionId: string, options: PluginOptions): Promise<HookRun> {

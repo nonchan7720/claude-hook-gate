@@ -15,7 +15,7 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 
 | イベント | モジュール | 役割 | settings hook |
 | --- | --- | --- | --- |
-| SessionStart | `src/reset-gate.ts` | `startup` / `clear` のときだけ自セッションのゲート状態を消す。resume / compact では消さない。 | 同じ（下記） |
+| SessionStart | `src/reset-gate.ts`、続けて `src/gate-session-start.ts` | `startup` / `clear` のときだけ自セッションのゲート状態を消す。resume / compact では消さない。そのあと `gate.yaml` の `session_start` のコマンドを走らせ、stdout を context に足す（[session_start](#session_start) を参照）。 | 同じ（下記） |
 | UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | ルールファイル（`rulesFile` のファイルがあればそれ、無ければ同梱の `rules/feedback_rules.md`。言語が英語なら `rules/feedback_rules.en.md`）と確定済みフィードバックルール（`count >= 3`）をコンテキストに追加する。`files` キーを持つルールはここでは出さず、代わりに `feedback-file-inject` が注入する（[ファイル種別スコープのルール](#file-scoped-rules)）。前のターンにそこで注入した記録もここで忘れる。 | 同じ（下記） |
 | PostToolUse（Read） | `src/feedback-file-inject.ts` | 今読んだファイルに `files` の glob がマッチする確定フィードバックルールを、ターンごと・ルールごとに 1 回だけコンテキストに追加する。 | 同じ（下記） |
 | PreToolUse（Bash / Edit / Write / MultiEdit） | `src/feedback-guard.ts` | `pre_bash` / `pre_edit` の enforce を評価し、`count` に応じて deny / ask / warn する。Bash では、書き先と本文がコマンドの文面に書かれている heredoc（`cat > path <<'EOF' ... EOF`、`tee path <<EOF`。[Bash で書いたファイル](#bash-で書いたファイル)）を Write と同じく実行前に `pre_edit` で検査する。 | 同じ（下記） |
@@ -234,6 +234,26 @@ gate のコマンドが走っている間、プロンプトの上の帯に実行
 帯は同じセッションのエージェント（メインとそのサブエージェント）で共有され、実行中のコマンドを 1 つの一覧にまとめて表示します（例: `[gate] 実行中:` の下に `  lint $ bun lint (3s)` と `  test $ bun test 待機中 (2s)` の 2 行）。`待機中` は、別のエージェントで走っている同じ実行の完了を待っているコマンドです（下記）。帯が消えるのは同じセッションの全エージェントの実行が終わったときだけで、同じセッションの他のエージェントがまだ実行中の間はその一覧が残ります。同じプロジェクトを開いている別の Claude Code セッション（別ターミナルなど）の分は表示されず、下記の 1 行サマリもセッションごとに保持されます。
 
 すべて終わると帯は消え、代わりにその回の結果が 1 行でステータス行に残ります。件数だけを出します。例: `[gate] 完了: ✓ 5 / ✗ 1 (81.0s)`（失敗が 0 件なら `✗` は、成功が 0 件なら `✓` は付けません。秒数は並列実行なので合計ではなく、最初の開始から最後の完了までの経過時間です。チェック名は出さないので、どれが落ちたかは Stop hook の出力で確認してください。ステータス行は改行を描けず幅も限られるため、短く保ちます）。次の gate のコマンドが走り始めて帯が出るまで残ります。feedback の検証は従来どおり、走っている間だけステータス行に `[feedback-guard] 評価中: <rule>`、`[feedback-stop-check] 検査中: <rule> (<file>)` と表示し、hook が終わると消えます。
+
+### session_start
+
+<a id="session_start"></a>`gate.yaml` の 3 つめのフェーズ `session_start` は、SessionStart でコマンドを走らせ、その stdout をセッションの context（`additionalContext`）に足します（コードグラフの要約を渡す、など）。対象はメインのセッションだけで、payload に `agent_id` があれば何もしません。リセットの後に走ります。
+
+```yaml
+session_start:
+  - name: depgraph
+    cmd: "command -v depgraph >/dev/null || exit 0; depgraph hook session-start --format text"
+    timeout: 10                        # 秒。既定は 10（300 ではない）
+    on: [startup, resume, clear, compact]   # 省略可。既定はすべての source
+    background: false                  # 省略可。true なら起動するだけで待たない
+```
+
+- `on` は SessionStart の payload の `source` で絞ります。source は `CLAUDE_SESSION_SOURCE` としてコマンドに渡されます。未知の値は一致しません。文字列だけの要素は `{cmd: ...}` の省略形です。
+- 環境変数: `CLAUDE_PROJECT_DIR`、`CLAUDE_SESSION_ID`、`CLAUDE_SESSION_SOURCE`、`CLAUDE_GATE_FILES`（空）。`CLAUDE_AGENT_ID` は未設定です。
+- コマンドは `max_parallel` を上限に並列で走ります。exit 0 で終わったコマンドの stdout が、宣言順に `[gate] session_start: <name>` の見出し付きで連結されます。出力が空なら何も足しません。出力は平文か SessionStart の hook JSON（オブジェクト）で、JSON のときは `hookSpecificOutput.additionalContext` だけを使います（空でない additionalContext が無い JSON は何も足さず、最上位の `systemMessage` はユーザーに表示します）。合計は 8 KiB（8192 文字）が上限で、切り詰めたときはその旨を添えます。
+- 失敗やタイムアウトでセッションを止めることはありません。終了コードとログのパス（`.claude/.gate-status/logs/<session>/<name>.<id>.log`）を stderr に 1 回だけ知らせ、あわせて hook 出力の最上位 `systemMessage` にも載せ（exit 0 の hook の stderr は Claude Code に表示されないため）、hook の終了コードは 0 のまま、ほかのコマンドも走ります。`timeout` が 600 を超える場合は 600 に切り詰めます。SessionStart の hook 自体はフェーズ全体で最大 600 秒まで待ちます（`hooks/hooks.json` の `timeout: 600`）。
+- `background: true` はコマンドを切り離して起動し、hook は待ちません（出力はログにだけ残り、context には入りません）。
+- ポリシーも実行共有も使いません: 出力をいま必要とするので、dogwood による後回しも、エージェント間の共有もしません。読むのはプロジェクトルートの `gate.yaml` だけです。
 
 ### エージェント間の実行共有
 

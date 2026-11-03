@@ -146,3 +146,8 @@ gate:
   notePolicySkipped: "(deferred by the policy verdict; queued to run automatically later)"
   notePolicyUnevaluated: "(deferred because the policy could not be evaluated; queued to run automatically later: {{reason}})"
   internalError: "[gate] An internal error occurred, so the checks were skipped (work continues). See stderr for details."
+  sessionStartHeader: "[gate] session_start: {{name}}"
+  sessionStartTruncated: "[gate] session_start output was truncated (limit: {{limit}} characters)."
+  sessionStartExit: "exit status {{code}}"
+  sessionStartTimeout: "timed out after {{seconds}}s"
+  sessionStartFailed: "[gate] session_start: {{name}} failed ({{reason}}). Log: {{logpath}}"

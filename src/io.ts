@@ -92,7 +92,8 @@ export interface Io {
 
 /** Hook スクリプト相当の結果（classic コマンド hook の終了コード・stdout・stderr）。 */
 /** reportConsumed: gate が成功報告の印を消費し、検証を走らせずに Stop を通した（成功報告の直後の Stop だった）。 */
+/** systemMessage: ユーザーに見せる 1 行以上のメッセージ（session_start の失敗通知など。outcome の systemMessage になり、classic の出力では最上位の systemMessage）。JSON の stdout からは読まない。 */
 /** report: gate の checks フェーズの最終結果の要約（サブエージェントの結果を呼び出し元へ渡すのに使う）。 */
-export type ScriptResult = { exitCode: number; stdout: string; stderr: string; reportConsumed?: boolean; report?: string }
+export type ScriptResult = { exitCode: number; stdout: string; stderr: string; reportConsumed?: boolean; report?: string; systemMessage?: string }
 
 export const ok = (stdout = '', stderr = ''): ScriptResult => ({ exitCode: 0, stdout, stderr })

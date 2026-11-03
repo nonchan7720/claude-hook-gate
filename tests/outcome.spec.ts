@@ -92,3 +92,20 @@ describe('outcomeToClassic', () => {
     for (const [event, o] of cases) expect(toOutcome(event, outcomeToClassic(event, o))).toEqual(o)
   })
 })
+
+describe('systemMessage', () => {
+  test('comes only from the step side channel, never from stdout JSON', () => {
+    expect(toOutcome('PostToolUse', ran(0, '{"systemMessage":"x"}'))).toEqual({})
+    expect(toOutcome('SessionStart', { ...ran(0), systemMessage: 'note' })).toEqual({ systemMessage: 'note' })
+    expect(toOutcome('SessionStart', { ...ran(1), systemMessage: 'note' })).toEqual({})
+  })
+  test('merge joins with a newline and outcomeToClassic emits it at the top level', () => {
+    const m = merge({ systemMessage: 'a' }, { systemMessage: 'b' })
+    expect(m.systemMessage).toBe('a\nb')
+    expect(merge({}, { systemMessage: 'b' }).systemMessage).toBe('b')
+    expect(JSON.parse(outcomeToClassic('SessionStart', { systemMessage: 'hi', additionalContext: ['c'] }).stdout)).toEqual({
+      hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: 'c' },
+      systemMessage: 'hi',
+    })
+  })
+})
