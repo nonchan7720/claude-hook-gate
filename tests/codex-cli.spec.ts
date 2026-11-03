@@ -196,6 +196,25 @@ describe('Stop / SubagentStop', () => {
       expect(r.json?.reason).toContain('検証に失敗しました（試行')
     }))
 
+  test('block: the reason is the summary (tail + log path), not the full output of the failed check', () =>
+    withEnv(async (env) => {
+      writeGateYaml(env.proj, {
+        rules: [{ match: '**/*.py', run: ['true'], run_checks: ['chk'] }],
+        consistency_checks: [{ name: 'chk', run: ['seq 1 500; exit 1'] }],
+      })
+      await hook(env, 'PostToolUse', { ...applyPatch(['*** Add File: x.py', '+x = 1']), tool_response: 'Done' })
+      const r = await hook(env, 'Stop', { stop_hook_active: false, last_assistant_message: 'done' })
+      expect(r.json?.decision).toBe('block')
+      const reason = r.json?.reason ?? ''
+      expect(reason).toContain('検証に失敗しました（試行')
+      expect(reason).toContain('[gate] log:')
+      expect(reason).toContain('\n500\n')
+      // 末尾 60 行だけ（見出しは要約にも 1 つ残る）。全出力なら先頭側の行や 2 つ目以降の見出しが入る。
+      expect(reason).not.toContain('\n440\n')
+      expect(reason).not.toMatch(/^1$/m)
+      expect(reason).not.toContain('\n2\n')
+    }))
+
   test('the report of a finished subagent is handed to the caller through spawn_agent', () =>
     withEnv(async (env) => {
       writeGateYaml(env.proj, failingCheck)
