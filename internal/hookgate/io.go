@@ -184,6 +184,9 @@ type ScriptResult struct {
 	ReportConsumed bool
 	Report         string
 	HasReport      bool
+	// SystemMessage はユーザーに見せるメッセージ（session_start の失敗通知など。Outcome.SystemMessage になり、classic の出力では最上位の systemMessage）。
+	// stdout の JSON からは読まない。
+	SystemMessage string
 }
 
 // Ok は終了コード 0 の結果。

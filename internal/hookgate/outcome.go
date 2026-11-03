@@ -19,6 +19,8 @@ type Outcome struct {
 	PreventContinuation bool
 	StopReason          *string
 	AdditionalContext   []string
+	// SystemMessage はユーザーに見せるメッセージ（step の ScriptResult.SystemMessage から。stdout の JSON の systemMessage は読まない）。
+	SystemMessage *string
 }
 
 // StrPtr は *string を作る。
@@ -112,10 +114,18 @@ func ToOutcome(event string, ran ScriptResult) Outcome {
 	if ran.ExitCode != 0 {
 		return Outcome{}
 	}
-	if j, ok := parseJSONDict(ran.Stdout); ok {
+	out := toOutcomeStdout(event, ran.Stdout)
+	if ran.SystemMessage != "" {
+		out.SystemMessage = StrPtr(ran.SystemMessage)
+	}
+	return out
+}
+
+func toOutcomeStdout(event, stdout string) Outcome {
+	if j, ok := parseJSONDict(stdout); ok {
 		return outcomeFromJSON(event, j)
 	}
-	text := strings.TrimSpace(ran.Stdout)
+	text := strings.TrimSpace(stdout)
 	if text != "" && textContextEvents[event] {
 		return Outcome{AdditionalContext: []string{text}}
 	}
@@ -155,6 +165,16 @@ func Merge(first, second Outcome) Outcome {
 	} else {
 		out.AdditionalContext = nil
 	}
+	var sys []string
+	for _, m := range []*string{first.SystemMessage, second.SystemMessage} {
+		if m != nil && *m != "" {
+			sys = append(sys, *m)
+		}
+	}
+	out.SystemMessage = nil
+	if len(sys) > 0 {
+		out.SystemMessage = StrPtr(strings.Join(sys, "\n"))
+	}
 	return out
 }
 
@@ -193,6 +213,9 @@ func OutcomeToClassic(event string, outcome Outcome, stderr string) ScriptResult
 	}
 	if len(specific) > 0 {
 		j = append(j, KV{"hookSpecificOutput", append(OMap{{"hookEventName", event}}, specific...)})
+	}
+	if outcome.SystemMessage != nil && *outcome.SystemMessage != "" {
+		j = append(j, KV{"systemMessage", *outcome.SystemMessage})
 	}
 	if outcome.PreventContinuation {
 		j = append(j, KV{"continue", false})

@@ -2,7 +2,7 @@
   "hooks": {
     "SessionStart": [
       {
-        "hooks": [{ "type": "command", "command": "bash \"${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh\" SessionStart" }]
+        "hooks": [{ "type": "command", "command": "bash \"${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh\" SessionStart", "timeout": 600 }]
       }
     ],
     "UserPromptSubmit": [

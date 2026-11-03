@@ -8,6 +8,7 @@ import { MISSING_DOGWOOD_BIN, REPO_ROOT, rmTree, tmpDir } from './helpers/node-i
 
 type Out = Record<string, unknown>
 type Json = {
+  systemMessage?: string
   decision?: string
   reason?: string
   hookSpecificOutput: { hookEventName: string; permissionDecision?: string; permissionDecisionReason?: string; additionalContext?: string }
@@ -275,6 +276,8 @@ describe('SessionStart / Notification', () => {
       expect(r.json?.hookSpecificOutput.additionalContext).not.toContain('resume-only')
       expect(r.json?.hookSpecificOutput.additionalContext).not.toContain('partial')
       expect(r.stderr).toContain('broken')
+      expect(r.json?.systemMessage).toContain('broken')
+      expect(r.json?.systemMessage).toContain('.gate-status/logs/sess-1/broken.')
       expect(r.stderr).toContain('.gate-status/logs/sess-1/broken.')
       const resumed = await hook(env, 'SessionStart', { source: 'resume' })
       expect(resumed.json?.hookSpecificOutput.additionalContext).toContain('[gate] session_start: resume-only\nR')

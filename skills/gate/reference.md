@@ -46,14 +46,14 @@ is read. The output is added after the reset step.
 
 | Key | Type | Meaning |
 | --- | --- | --- |
-| `cmd` | string, **required** | Run with `sh -c` in the project root. Stdout of a command that exits 0 is injected, labelled `[gate] session_start: <name>`, in declaration order; all output together is capped at 8 KiB (a truncation note is appended). |
+| `cmd` | string, **required** | Run with `sh -c` in the project root. Stdout of a command that exits 0 is injected, labelled `[gate] session_start: <name>`, in declaration order; all output together is capped at 8 KiB (a truncation note is appended). Output is plain text, or a SessionStart hook JSON object of which only `hookSpecificOutput.additionalContext` is taken (no usable one: nothing injected; a top-level `systemMessage` is shown to the user). |
 | `name` | string | Label and log file name. Default: derived from `cmd`. |
-| `timeout` | integer seconds | Default 10 (not 300). On expiry the process group is killed. |
+| `timeout` | integer seconds | Default 10 (not 300); a value above 600 is capped to 600 (the SessionStart hook waits at most 600 s for the whole phase). On expiry the process group is killed. |
 | `on` | string or list | Only for these SessionStart sources (`startup`, `resume`, `clear`, `compact`). Default: all. Unknown values never match. |
 | `background` | boolean, default `false` | Start the command detached and do not wait; its output goes to the log only and is not injected. |
 
 A failing or timed-out command never blocks the session: it is reported once on stderr
-with its exit status and log path, the hook exits 0, and the others still run.
+with its exit status and log path (on stderr and as a `systemMessage` shown to the user), the hook exits 0, and the others still run.
 
 ## run item
 

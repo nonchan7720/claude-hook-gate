@@ -4922,7 +4922,8 @@ async function feedbackPostEdit(io, payload) {
 // src/gate-session-start.ts
 var SESSION_START_TIMEOUT = 10;
 var SESSION_START_MAX_CHARS = 8192;
-var MAX_TIMEOUT_MS2 = 600000;
+var SESSION_START_MAX_TIMEOUT = 600;
+var MAX_TIMEOUT_MS2 = SESSION_START_MAX_TIMEOUT * 1000;
 function parseItem(raw) {
   const d = isDict(raw) ? raw : { cmd: raw };
   if (typeof d.cmd !== "string" || d.cmd.trim() === "")
@@ -4932,10 +4933,24 @@ function parseItem(raw) {
   return {
     cmd: d.cmd,
     name: truthy(d.name) ? String(d.name) : slug(d.cmd),
-    timeout: truthy(d.timeout) && Number.isFinite(t) && t > 0 ? t : SESSION_START_TIMEOUT,
+    timeout: truthy(d.timeout) && Number.isFinite(t) && t > 0 ? Math.min(t, SESSION_START_MAX_TIMEOUT) : SESSION_START_TIMEOUT,
     on,
     background: d.background === true
   };
+}
+function readOutput(stdout) {
+  const t = stdout.trim();
+  if (t.startsWith("{")) {
+    try {
+      const v = JSON.parse(t);
+      if (isDict(v)) {
+        const spec = v.hookSpecificOutput;
+        const ctx = isDict(spec) && typeof spec.additionalContext === "string" ? spec.additionalContext.trim() : "";
+        return { text: ctx, ...typeof v.systemMessage === "string" && v.systemMessage.trim() !== "" ? { sys: v.systemMessage.trim() } : {} };
+      }
+    } catch {}
+  }
+  return { text: t };
 }
 async function runForeground(gate, item, env) {
   const { io } = gate;
@@ -4966,9 +4981,9 @@ async function runForeground(gate, item, env) {
     return { note: `${gate.t("gate.sessionStartFailed", { name: item.name, reason, logpath })}
 ` };
   }
-  const text = r.out.trim();
-  return text === "" ? {} : { block: `${gate.t("gate.sessionStartHeader", { name: item.name })}
-${text}` };
+  const { text, sys } = readOutput(r.out);
+  return { ...text === "" ? {} : { block: `${gate.t("gate.sessionStartHeader", { name: item.name })}
+${text}` }, ...sys ? { sys } : {} };
 }
 async function startBackground(gate, item, env) {
   const { io } = gate;
@@ -5011,11 +5026,19 @@ async function sessionStartGate(io, payload) {
 
 `);
   if (text.length > SESSION_START_MAX_CHARS) {
-    text = `${text.slice(0, SESSION_START_MAX_CHARS).trimEnd()}
+    let cut = text.slice(0, SESSION_START_MAX_CHARS);
+    const last = cut.charCodeAt(cut.length - 1);
+    if (last >= 55296 && last <= 56319)
+      cut = cut.slice(0, -1);
+    text = `${cut.trimEnd()}
 ${gate.t("gate.sessionStartTruncated", { limit: SESSION_START_MAX_CHARS })}`;
   }
-  return ok(text === "" ? "" : `${text}
-`, done.map((d) => d.note ?? "").join(""));
+  const notes = done.map((d) => d.note ?? "").join("");
+  const result = ok(text === "" ? "" : `${text}
+`, notes);
+  const sys = [...done.flatMap((d) => [d.note?.trimEnd(), d.sys])].filter((m) => !!m).join(`
+`);
+  return sys === "" ? result : { ...result, systemMessage: sys };
 }
 
 // src/outcome.ts
@@ -5064,10 +5087,14 @@ var toOutcome = (event, ran) => {
   }
   if (ran.exitCode !== 0)
     return {};
-  const json = parseJson(ran.stdout);
+  const base = toOutcomeStdout(event, ran.stdout);
+  return ran.systemMessage ? { ...base, systemMessage: ran.systemMessage } : base;
+};
+var toOutcomeStdout = (event, stdout) => {
+  const json = parseJson(stdout);
   if (json)
     return fromJson(event, json);
-  const text = ran.stdout.trim();
+  const text = stdout.trim();
   return text !== "" && TEXT_CONTEXT_EVENTS.has(event) ? { additionalContext: [text] } : {};
 };
 var merge = (first, second) => {
@@ -5077,6 +5104,12 @@ var merge = (first, second) => {
     out.additionalContext = ctx;
   else
     delete out.additionalContext;
+  const sys = [first.systemMessage, second.systemMessage].filter((m) => m !== undefined && m !== "");
+  if (sys.length > 0)
+    out.systemMessage = sys.join(`
+`);
+  else
+    delete out.systemMessage;
   return out;
 };
 

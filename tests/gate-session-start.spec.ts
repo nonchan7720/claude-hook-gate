@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { SESSION_START_MAX_CHARS, sessionStartGate } from '../src/gate-session-start.ts'
+import { parseItem, SESSION_START_MAX_CHARS, sessionStartGate } from '../src/gate-session-start.ts'
 import { sessionStart } from '../src/hooks.ts'
 import { exists, writeGateYaml } from './helpers/gate.ts'
 import { MISSING_DOGWOOD_BIN, makeIo, withTmp } from './helpers/node-io.ts'
@@ -51,6 +51,42 @@ describe('session_start phase', () => {
       expect(r.stdout.length).toBeLessThan(SESSION_START_MAX_CHARS + 200)
     }))
 
+  test('truncation never splits a surrogate pair', () =>
+    withTmp(async (proj) => {
+      const header = '[gate] session_start: big\n'
+      // 絵文字（UTF-16 で 2 単位）が 8192 の境界をまたぐ位置に置く。
+      const pad = SESSION_START_MAX_CHARS - header.length - 1
+      writeGateYaml(proj, { session_start: [{ name: 'big', cmd: `head -c ${pad} /dev/zero | tr '\\0' a; printf '\\360\\237\\230\\200 tail'` }] })
+      const r = await start(proj)
+      const body = r.stdout.split('\n[gate] session_start output')[0] as string
+      expect(r.stdout).toContain('output was truncated')
+      expect(body.length).toBeLessThanOrEqual(SESSION_START_MAX_CHARS)
+      expect(body).not.toContain('\ufffd')
+      expect(/[\ud800-\udbff]$/.test(body)).toBe(false)
+      expect(body.endsWith('a')).toBe(true)
+    }))
+
+  test('hook JSON output: additionalContext is taken, systemMessage is surfaced, no usable context injects nothing; plain text stays', () =>
+    withTmp(async (proj) => {
+      const json = (o: unknown) => `printf '%s' '${JSON.stringify(o)}'`
+      writeGateYaml(proj, {
+        session_start: [
+          { name: 'j1', cmd: json({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: 'from json' }, systemMessage: 'hello user' }) },
+          { name: 'j2', cmd: json({ hookSpecificOutput: { additionalContext: '' }, other: 1 }) },
+          { name: 'j3', cmd: json({ foo: 'bar' }) },
+          { name: 'plain', cmd: 'echo [1,2]' },
+        ],
+      })
+      const r = await start(proj)
+      expect(r.stdout).toBe('[gate] session_start: j1\nfrom json\n\n[gate] session_start: plain\n[1,2]\n')
+      expect(r.systemMessage).toBe('hello user')
+    }))
+
+  test('a timeout above 600 is capped to 600', () => {
+    expect(parseItem({ cmd: 'x', timeout: 9999 })?.timeout).toBe(600)
+    expect(parseItem({ cmd: 'x' })?.timeout).toBe(10)
+  })
+
   test('a failing command is reported once on stderr, exit 0, and others still run', () =>
     withTmp(async (proj) => {
       writeGateYaml(proj, {
@@ -63,6 +99,7 @@ describe('session_start phase', () => {
       expect(r.exitCode).toBe(0)
       expect(r.stdout).toBe('[gate] session_start: good\nfine\n')
       expect(r.stderr).toContain('session_start: bad failed (exit status 3)')
+      expect(r.systemMessage).toBe(r.stderr.trimEnd())
       expect(r.stderr.match(/bad failed/g)?.length).toBe(1)
       const log = logs(proj).find((l) => path.basename(l).startsWith('bad.'))
       expect(log).toBeDefined()
@@ -155,5 +192,21 @@ describe('session_start phase', () => {
       writeGateYaml(proj, { session_start: [{ name: 'ctx', cmd: 'echo hi' }] })
       const r = await sessionStart(io(proj), 's1', { session_id: 's1', source: 'startup' })
       expect(r.outcome.additionalContext?.join('\n')).toContain('[gate] session_start: ctx\nhi')
+      expect(r.outcome.systemMessage).toBeUndefined()
+    }))
+
+  test('sessionStart hook carries failure notes as outcome.systemMessage', () =>
+    withTmp(async (proj) => {
+      writeGateYaml(proj, {
+        session_start: [
+          { name: 'bad', cmd: 'exit 2' },
+          { name: 'good', cmd: 'echo ok' },
+        ],
+      })
+      const r = await sessionStart(io(proj), 's1', { session_id: 's1', source: 'startup' })
+      expect(r.outcome.systemMessage).toContain('session_start: bad failed (exit status 2)')
+      expect(r.outcome.systemMessage).toContain('.gate-status/logs/s1/bad.')
+      expect(r.outcome.additionalContext?.join('\n')).toContain('good')
+      expect(r.outcome.block).toBeUndefined()
     }))
 })

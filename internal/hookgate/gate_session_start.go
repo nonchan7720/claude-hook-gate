@@ -10,7 +10,6 @@ import (
 	"math"
 	"strings"
 	"sync"
-	"unicode/utf16"
 )
 
 const (
@@ -18,6 +17,8 @@ const (
 	SessionStartTimeout = 10
 	// SessionStartMaxChars は additionalContext に入れる出力の合計の上限（文字）。
 	SessionStartMaxChars = 8192
+	// SessionStartMaxTimeout は timeout: の上限（秒。hooks.json の SessionStart の timeout と同じ）。
+	SessionStartMaxTimeout = 600
 )
 
 type sessionStartItem struct {
@@ -44,7 +45,7 @@ func parseSessionStartItem(raw any) (sessionStartItem, bool) {
 		item.name = gateTruthyStr(d["name"])
 	}
 	if t, ok := numberOf(d["timeout"]); ok && t > 0 && !math.IsInf(t, 0) {
-		item.timeout = t
+		item.timeout = math.Min(t, SessionStartMaxTimeout)
 	}
 	switch on := d["on"].(type) {
 	case string:
@@ -73,6 +74,29 @@ func (it sessionStartItem) matches(source string) bool {
 type sessionStartDone struct {
 	block string
 	note  string
+	// sys は stdout の hook JSON にあった最上位の systemMessage。
+	sys string
+}
+
+// sessionStartReadOutput はコマンドの stdout を context 用の文章にする。SessionStart の hook JSON（オブジェクト）なら
+// hookSpecificOutput.additionalContext（空でない文字列）だけを取り、最上位の systemMessage（文字列）は sys として返す。
+// JSON でなければ trim した平文。
+func sessionStartReadOutput(stdout string) (string, string) {
+	t := gateTrim(stdout)
+	j, ok := parseJSONDict(t)
+	if !ok {
+		return t, ""
+	}
+	var text, sys string
+	if spec, ok := AsDict(j["hookSpecificOutput"]); ok {
+		if s, ok := spec["additionalContext"].(string); ok {
+			text = gateTrim(s)
+		}
+	}
+	if s, ok := j["systemMessage"].(string); ok {
+		sys = gateTrim(s)
+	}
+	return text, sys
 }
 
 func (g *Gate) sessionStartFailed(item sessionStartItem, reason, logpath string) string {
@@ -109,11 +133,11 @@ func (g *Gate) sessionStartForeground(item sessionStartItem, env GateEnv) sessio
 		}
 		return sessionStartDone{note: g.sessionStartFailed(item, reason, logpath)}
 	}
-	text := gateTrim(r.Out)
+	text, sys := sessionStartReadOutput(r.Out)
 	if text == "" {
-		return sessionStartDone{}
+		return sessionStartDone{sys: sys}
 	}
-	return sessionStartDone{block: g.T("gate.sessionStartHeader", map[string]any{"name": item.name}) + "\n" + text}
+	return sessionStartDone{block: g.T("gate.sessionStartHeader", map[string]any{"name": item.name}) + "\n" + text, sys: sys}
 }
 
 // sessionStartBackground は background: true のコマンドを起動して待たない。出力は注入せず、ログにだけ残す。
@@ -188,7 +212,14 @@ func SessionStartGate(io Io, payload Dict) ScriptResult {
 	wg.Wait()
 	var blocks []string
 	var notes strings.Builder
+	var sysParts []string
 	for _, d := range done {
+		if n := gateTrimEnd(d.note); n != "" {
+			sysParts = append(sysParts, n)
+		}
+		if d.sys != "" {
+			sysParts = append(sysParts, d.sys)
+		}
 		if d.block != "" {
 			blocks = append(blocks, d.block)
 		}
@@ -196,12 +227,31 @@ func SessionStartGate(io Io, payload Dict) ScriptResult {
 	}
 	text := strings.Join(blocks, "\n\n")
 	if gateJSLen(text) > SessionStartMaxChars {
-		text = gateTrimEnd(string(utf16.Decode(utf16.Encode([]rune(text))[:SessionStartMaxChars]))) + "\n" + g.T("gate.sessionStartTruncated", map[string]any{"limit": SessionStartMaxChars})
+		text = gateTrimEnd(sessionStartCut(text, SessionStartMaxChars)) + "\n" + g.T("gate.sessionStartTruncated", map[string]any{"limit": SessionStartMaxChars})
 	}
 	if text != "" {
 		text += "\n"
 	}
-	return Ok(text, notes.String())
+	res := Ok(text, notes.String())
+	// stderr は exit 0 だと表示されないので、失敗の通知と JSON の systemMessage をユーザーに見せる systemMessage にも載せる。
+	res.SystemMessage = strings.Join(sysParts, "\n")
+	return res
+}
+
+// sessionStartCut は text を UTF-16 の n 単位以内で切る。rune を単位に数え、n を超える rune の手前で止める（サロゲートペアを割らない）。
+func sessionStartCut(text string, n int) string {
+	units := 0
+	for i, r := range text {
+		w := 1
+		if r >= 0x10000 {
+			w = 2
+		}
+		if units+w > n {
+			return text[:i]
+		}
+		units += w
+	}
+	return text
 }
 
 // sessionStartLoad は LoadAction の panic（読めない・壊れた YAML）を error にする。

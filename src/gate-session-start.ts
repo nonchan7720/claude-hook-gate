@@ -12,7 +12,8 @@ import { shellQuote } from './shell.ts'
 
 export const SESSION_START_TIMEOUT = 10 // 秒。session_start の既定のタイムアウト（起動を遅らせないため短い）
 export const SESSION_START_MAX_CHARS = 8192 // additionalContext に入れる出力の合計の上限（文字）
-const MAX_TIMEOUT_MS = 600_000
+export const SESSION_START_MAX_TIMEOUT = 600 // 秒。timeout: の上限（hooks.json の SessionStart の timeout と同じ）
+const MAX_TIMEOUT_MS = SESSION_START_MAX_TIMEOUT * 1000
 
 type Item = { cmd: string; name: string; timeout: number; on: string[] | undefined; background: boolean }
 
@@ -25,13 +26,34 @@ export function parseItem(raw: unknown): Item | undefined {
   return {
     cmd: d.cmd,
     name: truthy(d.name) ? String(d.name) : slug(d.cmd),
-    timeout: truthy(d.timeout) && Number.isFinite(t) && t > 0 ? t : SESSION_START_TIMEOUT,
+    timeout: truthy(d.timeout) && Number.isFinite(t) && t > 0 ? Math.min(t, SESSION_START_MAX_TIMEOUT) : SESSION_START_TIMEOUT,
     on,
     background: d.background === true,
   }
 }
 
-type Done = { block?: string; note?: string }
+type Done = { block?: string; note?: string; sys?: string }
+
+/**
+ * コマンドの stdout を context 用の文章にする。SessionStart の hook JSON（オブジェクト）なら hookSpecificOutput.additionalContext
+ * （空でない文字列）だけを取り、最上位の systemMessage（文字列）は sys として返す。JSON でなければ trim した平文。
+ */
+export function readOutput(stdout: string): { text: string; sys?: string } {
+  const t = stdout.trim()
+  if (t.startsWith('{')) {
+    try {
+      const v: unknown = JSON.parse(t)
+      if (isDict(v)) {
+        const spec = v.hookSpecificOutput
+        const ctx = isDict(spec) && typeof spec.additionalContext === 'string' ? spec.additionalContext.trim() : ''
+        return { text: ctx, ...(typeof v.systemMessage === 'string' && v.systemMessage.trim() !== '' ? { sys: v.systemMessage.trim() } : {}) }
+      }
+    } catch {
+      // JSON でなければ平文として扱う
+    }
+  }
+  return { text: t }
+}
 
 async function runForeground(gate: Gate, item: Item, env: Record<string, string>): Promise<Done> {
   const { io } = gate
@@ -55,8 +77,8 @@ async function runForeground(gate: Gate, item: Item, env: Record<string, string>
     const reason = r.timedOut ? gate.t('gate.sessionStartTimeout', { seconds: item.timeout }) : gate.t('gate.sessionStartExit', { code })
     return { note: `${gate.t('gate.sessionStartFailed', { name: item.name, reason, logpath })}\n` }
   }
-  const text = r.out.trim()
-  return text === '' ? {} : { block: `${gate.t('gate.sessionStartHeader', { name: item.name })}\n${text}` }
+  const { text, sys } = readOutput(r.out)
+  return { ...(text === '' ? {} : { block: `${gate.t('gate.sessionStartHeader', { name: item.name })}\n${text}` }), ...(sys ? { sys } : {}) }
 }
 
 /** background: true: 起動して待たない。出力は注入せず、ログにだけ残す。 */
@@ -105,7 +127,15 @@ export async function sessionStartGate(io: Io, payload: Dict): Promise<ScriptRes
     .filter((b): b is string => b !== undefined)
     .join('\n\n')
   if (text.length > SESSION_START_MAX_CHARS) {
-    text = `${text.slice(0, SESSION_START_MAX_CHARS).trimEnd()}\n${gate.t('gate.sessionStartTruncated', { limit: SESSION_START_MAX_CHARS })}`
+    let cut = text.slice(0, SESSION_START_MAX_CHARS)
+    // サロゲートペアの途中で切らない（末尾が上位サロゲートなら落とす）。
+    const last = cut.charCodeAt(cut.length - 1)
+    if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1)
+    text = `${cut.trimEnd()}\n${gate.t('gate.sessionStartTruncated', { limit: SESSION_START_MAX_CHARS })}`
   }
-  return ok(text === '' ? '' : `${text}\n`, done.map((d) => d.note ?? '').join(''))
+  const notes = done.map((d) => d.note ?? '').join('')
+  const result = ok(text === '' ? '' : `${text}\n`, notes)
+  // stderr は exit 0 だと表示されないので、失敗の通知と JSON の systemMessage をユーザーに見せる systemMessage にも載せる。
+  const sys = [...done.flatMap((d) => [d.note?.trimEnd(), d.sys])].filter((m): m is string => !!m).join('\n')
+  return sys === '' ? result : { ...result, systemMessage: sys }
 }

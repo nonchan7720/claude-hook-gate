@@ -242,7 +242,7 @@ When everything has finished, the band goes away and the result of that round is
 ```yaml
 session_start:
   - name: depgraph
-    cmd: "command -v depgraph >/dev/null || exit 0; depgraph hook session-start"
+    cmd: "command -v depgraph >/dev/null || exit 0; depgraph hook session-start --format text"
     timeout: 10                        # seconds, default 10 (not 300)
     on: [startup, resume, clear, compact]   # optional; default: every source
     background: false                  # optional; true = start and do not wait
@@ -250,8 +250,8 @@ session_start:
 
 - `on` filters by the `source` of the SessionStart payload; the source is passed as `CLAUDE_SESSION_SOURCE`. Unknown values never match. A plain string item is shorthand for `{cmd: ...}`.
 - Environment: `CLAUDE_PROJECT_DIR`, `CLAUDE_SESSION_ID`, `CLAUDE_SESSION_SOURCE`, `CLAUDE_GATE_FILES` (empty); `CLAUDE_AGENT_ID` is unset.
-- Commands run in parallel, bounded by `max_parallel`. The stdout of each command that exits 0 is joined in declaration order under a header `[gate] session_start: <name>`; empty output injects nothing. The total is capped at 8 KiB (8192 characters), with a note when truncated.
-- A failing or timed-out command never blocks the session: it is reported once on stderr with its exit status and log path (`.claude/.gate-status/logs/<session>/<name>.<id>.log`), the hook still exits 0, and the other commands still run.
+- Commands run in parallel, bounded by `max_parallel`. The stdout of each command that exits 0 is joined in declaration order under a header `[gate] session_start: <name>`; empty output injects nothing. The output is plain text, or a SessionStart hook JSON object, from which only `hookSpecificOutput.additionalContext` is taken (a JSON object without a non-empty one injects nothing; a top-level `systemMessage` in it is shown to the user). The total is capped at 8 KiB (8192 characters), with a note when truncated.
+- A failing or timed-out command never blocks the session: it is reported with its exit status and log path (`.claude/.gate-status/logs/<session>/<name>.<id>.log`) once on stderr and as a top-level `systemMessage` of the hook output (Claude Code does not show the stderr of an exit-0 hook), the hook still exits 0, and the other commands still run. A `timeout` above 600 is capped to 600; the SessionStart hook itself waits at most 600 s (`timeout: 600` in `hooks/hooks.json`) for the whole phase.
 - `background: true` starts the command detached (output goes to the log only, nothing is injected) and the hook does not wait for it.
 - No policy and no sharing: these commands are not deferred by dogwood and not shared between agents, because their output is needed now. Only the project root's `gate.yaml` is read.
 

@@ -125,3 +125,20 @@ func TestOutcomeToClassic(t *testing.T) {
 		}
 	})
 }
+
+func TestOutcomeSystemMessage(t *testing.T) {
+	t.Run("comes only from the step side channel, never from stdout JSON", func(t *testing.T) {
+		assert.Equal(t, Outcome{}, ToOutcome("PostToolUse", Ok(`{"systemMessage":"x"}`, "")))
+		o := ToOutcome("SessionStart", ScriptResult{Stdout: "", SystemMessage: "note"})
+		require.NotNil(t, o.SystemMessage)
+		assert.Equal(t, "note", *o.SystemMessage)
+		assert.Nil(t, ToOutcome("SessionStart", ScriptResult{ExitCode: 1, SystemMessage: "note"}).SystemMessage)
+	})
+	t.Run("Merge joins with a newline and OutcomeToClassic emits it at the top level", func(t *testing.T) {
+		m := Merge(Outcome{SystemMessage: StrPtr("a")}, Outcome{SystemMessage: StrPtr("b")})
+		assert.Equal(t, "a\nb", *m.SystemMessage)
+		assert.Equal(t, "b", *Merge(Outcome{}, Outcome{SystemMessage: StrPtr("b")}).SystemMessage)
+		assert.JSONEq(t, `{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"c"},"systemMessage":"hi"}`,
+			OutcomeToClassic("SessionStart", Outcome{SystemMessage: StrPtr("hi"), AdditionalContext: []string{"c"}}, "").Stdout)
+	})
+}

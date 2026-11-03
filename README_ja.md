@@ -242,7 +242,7 @@ gate のコマンドが走っている間、プロンプトの上の帯に実行
 ```yaml
 session_start:
   - name: depgraph
-    cmd: "command -v depgraph >/dev/null || exit 0; depgraph hook session-start"
+    cmd: "command -v depgraph >/dev/null || exit 0; depgraph hook session-start --format text"
     timeout: 10                        # 秒。既定は 10（300 ではない）
     on: [startup, resume, clear, compact]   # 省略可。既定はすべての source
     background: false                  # 省略可。true なら起動するだけで待たない
@@ -250,8 +250,8 @@ session_start:
 
 - `on` は SessionStart の payload の `source` で絞ります。source は `CLAUDE_SESSION_SOURCE` としてコマンドに渡されます。未知の値は一致しません。文字列だけの要素は `{cmd: ...}` の省略形です。
 - 環境変数: `CLAUDE_PROJECT_DIR`、`CLAUDE_SESSION_ID`、`CLAUDE_SESSION_SOURCE`、`CLAUDE_GATE_FILES`（空）。`CLAUDE_AGENT_ID` は未設定です。
-- コマンドは `max_parallel` を上限に並列で走ります。exit 0 で終わったコマンドの stdout が、宣言順に `[gate] session_start: <name>` の見出し付きで連結されます。出力が空なら何も足しません。合計は 8 KiB（8192 文字）が上限で、切り詰めたときはその旨を添えます。
-- 失敗やタイムアウトでセッションを止めることはありません。終了コードとログのパス（`.claude/.gate-status/logs/<session>/<name>.<id>.log`）を stderr に 1 回だけ知らせ、hook の終了コードは 0 のまま、ほかのコマンドも走ります。
+- コマンドは `max_parallel` を上限に並列で走ります。exit 0 で終わったコマンドの stdout が、宣言順に `[gate] session_start: <name>` の見出し付きで連結されます。出力が空なら何も足しません。出力は平文か SessionStart の hook JSON（オブジェクト）で、JSON のときは `hookSpecificOutput.additionalContext` だけを使います（空でない additionalContext が無い JSON は何も足さず、最上位の `systemMessage` はユーザーに表示します）。合計は 8 KiB（8192 文字）が上限で、切り詰めたときはその旨を添えます。
+- 失敗やタイムアウトでセッションを止めることはありません。終了コードとログのパス（`.claude/.gate-status/logs/<session>/<name>.<id>.log`）を stderr に 1 回だけ知らせ、あわせて hook 出力の最上位 `systemMessage` にも載せ（exit 0 の hook の stderr は Claude Code に表示されないため）、hook の終了コードは 0 のまま、ほかのコマンドも走ります。`timeout` が 600 を超える場合は 600 に切り詰めます。SessionStart の hook 自体はフェーズ全体で最大 600 秒まで待ちます（`hooks/hooks.json` の `timeout: 600`）。
 - `background: true` はコマンドを切り離して起動し、hook は待ちません（出力はログにだけ残り、context には入りません）。
 - ポリシーも実行共有も使いません: 出力をいま必要とするので、dogwood による後回しも、エージェント間の共有もしません。読むのはプロジェクトルートの `gate.yaml` だけです。
 

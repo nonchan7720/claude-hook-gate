@@ -1,11 +1,13 @@
 package hookgate
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,6 +76,44 @@ func TestSessionStartGate(t *testing.T) {
 		assert.Less(t, len(r.Stdout), SessionStartMaxChars+200)
 	})
 
+	t.Run("truncation never splits a surrogate pair", func(t *testing.T) {
+		proj := tmpProj(t)
+		header := "[gate] session_start: big\n"
+		pad := SessionStartMaxChars - len(header) - 1
+		WriteGateYaml(proj, Dict{"session_start": []any{Dict{"name": "big", "cmd": fmt.Sprintf(`head -c %d /dev/zero | tr '\0' a; printf '\360\237\230\200 tail'`, pad)}}})
+		r := ssStart(proj, nil)
+		body, _, _ := strings.Cut(r.Stdout, "\n[gate] session_start output")
+		assert.Contains(t, r.Stdout, "output was truncated")
+		assert.LessOrEqual(t, gateJSLen(body), SessionStartMaxChars)
+		assert.NotContains(t, body, "\ufffd")
+		assert.True(t, utf8.ValidString(body))
+		assert.True(t, strings.HasSuffix(body, "a"))
+		assert.Equal(t, "ab", sessionStartCut("ab😀", 3))
+		assert.Equal(t, "ab😀", sessionStartCut("ab😀", 4))
+	})
+
+	t.Run("hook JSON output: additionalContext is taken, systemMessage is surfaced, no usable context injects nothing; plain text stays", func(t *testing.T) {
+		proj := tmpProj(t)
+		js := func(o any) string { return "printf '%s' '" + JSONStringify(o) + "'" }
+		WriteGateYaml(proj, Dict{"session_start": []any{
+			Dict{"name": "j1", "cmd": js(Dict{"hookSpecificOutput": Dict{"hookEventName": "SessionStart", "additionalContext": "from json"}, "systemMessage": "hello user"})},
+			Dict{"name": "j2", "cmd": js(Dict{"hookSpecificOutput": Dict{"additionalContext": ""}, "other": 1})},
+			Dict{"name": "j3", "cmd": js(Dict{"foo": "bar"})},
+			Dict{"name": "plain", "cmd": "echo [1,2]"},
+		}})
+		r := ssStart(proj, nil)
+		assert.Equal(t, "[gate] session_start: j1\nfrom json\n\n[gate] session_start: plain\n[1,2]\n", r.Stdout)
+		assert.Equal(t, "hello user", r.SystemMessage)
+	})
+
+	t.Run("a timeout above 600 is capped to 600", func(t *testing.T) {
+		it, ok := parseSessionStartItem(Dict{"cmd": "x", "timeout": float64(9999)})
+		require.True(t, ok)
+		assert.InDelta(t, 600, it.timeout, 0)
+		it, _ = parseSessionStartItem(Dict{"cmd": "x"})
+		assert.InDelta(t, 10, it.timeout, 0)
+	})
+
 	t.Run("a failing command is reported once on stderr, exit 0, and others still run", func(t *testing.T) {
 		proj := tmpProj(t)
 		WriteGateYaml(proj, Dict{"session_start": []any{Dict{"name": "bad", "cmd": "echo oops; echo err >&2; exit 3"}, Dict{"name": "good", "cmd": "echo fine"}}})
@@ -81,6 +121,7 @@ func TestSessionStartGate(t *testing.T) {
 		assert.Equal(t, 0, r.ExitCode)
 		assert.Equal(t, "[gate] session_start: good\nfine\n", r.Stdout)
 		assert.Contains(t, r.Stderr, "session_start: bad failed (exit status 3)")
+		assert.Equal(t, strings.TrimRight(r.Stderr, "\n"), r.SystemMessage)
 		assert.Equal(t, 1, strings.Count(r.Stderr, "bad failed"))
 		log := ssLog(proj, "bad.")
 		require.NotEmpty(t, log)
@@ -157,5 +198,18 @@ func TestSessionStartGate(t *testing.T) {
 		r := SessionStart(ssIo(proj), "s1", Dict{"session_id": "s1", "source": "startup"})
 		require.Len(t, r.Outcome.AdditionalContext, 1)
 		assert.Contains(t, r.Outcome.AdditionalContext[0], "[gate] session_start: ctx\nhi")
+		assert.Nil(t, r.Outcome.SystemMessage)
+	})
+
+	t.Run("SessionStart carries failure notes as Outcome.SystemMessage", func(t *testing.T) {
+		proj := tmpProj(t)
+		WriteGateYaml(proj, Dict{"session_start": []any{Dict{"name": "bad", "cmd": "exit 2"}, Dict{"name": "good", "cmd": "echo ok"}}})
+		r := SessionStart(ssIo(proj), "s1", Dict{"session_id": "s1", "source": "startup"})
+		require.NotNil(t, r.Outcome.SystemMessage)
+		assert.Contains(t, *r.Outcome.SystemMessage, "session_start: bad failed (exit status 2)")
+		assert.Contains(t, *r.Outcome.SystemMessage, filepath.Join(".gate-status", "logs", "s1", "bad."))
+		assert.Nil(t, r.Outcome.Block)
+		assert.Contains(t, r.Outcome.AdditionalContext[0], "good")
+		assert.Contains(t, OutcomeToClassic("SessionStart", r.Outcome, "").Stdout, `"systemMessage":`)
 	})
 }
