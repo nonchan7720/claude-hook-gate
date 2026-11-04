@@ -937,8 +937,11 @@ export class Gate {
     this.executedLabels.push(name || oneLine(cmd))
     this.note(ok ? 'ok' : 'fail', label, cmd, `(${(((await this.io.now()) - started) / 1000).toFixed(1)}s)`)
     const detail = [chunk.lines[0] as string]
+    // rules フェーズ（ツール使用の直後）では出力を載せない。編集のたびに全出力を返すとトランスクリプトを圧迫するので、
+    // 成功したコマンドは 1 行ログ（status）だけ、失敗したコマンドは見出しと log のパスだけを返し、ログを読ませる。
+    const brief = this.phase === 'rules'
     if (out) {
-      chunk.lines.push(out.trimEnd())
+      if (!brief) chunk.lines.push(out.trimEnd())
       detail.push(tailOutput(this.io.lang, out))
     }
     if (timedOut) {
@@ -950,6 +953,8 @@ export class Gate {
       chunk.lines.push(`[gate] log: ${logpath}`)
       detail.push(`[gate] log: ${logpath}`)
       chunk.detail = detail.join('\n')
+    } else if (brief) {
+      chunk.lines.length = 0
     }
     return [chunk, ok]
   }

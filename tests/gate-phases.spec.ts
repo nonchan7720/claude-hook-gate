@@ -236,6 +236,32 @@ describe('rules phase does not block the conversation', () => {
       expect(r.stderr).toContain('BOOM')
       expect(r.stdout).not.toContain('decision')
     }))
+
+  test('failure returns only the log path, not the command output', () =>
+    withTmp(async (proj) => {
+      writeGateYaml(proj, {
+        rules: [
+          {
+            match: '**/*.py',
+            run: [
+              { name: 'ok', cmd: "printf 'GOOD%s' OUT" },
+              { name: 'lint', cmd: "printf 'LINT%s' ERROR && false" },
+            ],
+          },
+        ],
+      })
+      writeChangedFiles(proj, 'sess1', 'x.py')
+      const r = await rules(proj)
+      expect(r.exitCode).toBe(2)
+      expect(r.stderr).not.toContain('LINTERROR')
+      expect(r.stderr).not.toContain('GOODOUT')
+      expect(r.stderr).toContain('[gate] ok: ')
+      expect(r.stderr).toContain('[gate] fail: ')
+      const logpath = /\[gate\] log: (\S+)/.exec(r.stderr)?.[1] ?? ''
+      expect(path.basename(logpath)).toStartWith('lint.')
+      expect(fs.readFileSync(logpath, 'utf8')).toContain('LINTERROR')
+      expect(r.stderr).toContain('ログファイル')
+    }))
 })
 
 describe('checks phase reruns rules that failed and were not fixed', () => {

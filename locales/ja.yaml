@@ -127,7 +127,7 @@ gate:
   skipNoCwd: "[skip: cwd無し]"
   noteNoCwd: "(cwd が存在しません)"
   worktreeNotFound: "=== [gate] worktree が見つかりません: {{root}}。対象から外します。 ==="
-  rulesFailed: "[gate] 検証に失敗しました。直すまで終了（Stop）はブロックされ、完了報告もできません。上のエラーを見て、今ここで修正してください。"
+  rulesFailed: "[gate] 検証に失敗しました。直すまで終了（Stop）はブロックされ、完了報告もできません。コマンドの出力はここには載せていません。失敗したコマンドのログファイル（上の [gate] log: のパス）を開いてエラーを確認し、今ここで修正してください。"
   rulesPassed: "[gate] rules フェーズ成功:\n{{body}}"
   checkNotFound: "=== [gate] consistency_checks に \"{{name}}\" が見つかりません。スキップします。 ==="
   checkNotFoundSummary: "(check:{{name}}) 見つかりません、スキップ"

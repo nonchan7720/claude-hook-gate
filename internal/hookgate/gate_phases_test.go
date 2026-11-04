@@ -314,6 +314,28 @@ func TestGatePhases(t *testing.T) {
 			assert.Contains(t, r.Stderr, "BOOM")
 			assert.NotContains(t, r.Stdout, "decision")
 		})
+
+		t.Run("failure returns only the log path, not the command output", func(t *testing.T) {
+			proj := tmpProj(t)
+			WriteGateYaml(proj, Dict{"rules": gList(Dict{"match": "**/*.py", "run": gList(
+				Dict{"name": "ok", "cmd": "printf 'GOOD%s' OUT"},
+				Dict{"name": "lint", "cmd": "printf 'LINT%s' ERROR && false"},
+			)})})
+			WriteChangedFiles(proj, "sess1", "x.py")
+			r := rules(proj)
+			assert.Equal(t, 2, r.ExitCode)
+			assert.NotContains(t, r.Stderr, "LINTERROR")
+			assert.NotContains(t, r.Stderr, "GOODOUT")
+			assert.Contains(t, r.Stderr, "[gate] ok: ")
+			assert.Contains(t, r.Stderr, "[gate] fail: ")
+			m := regexp.MustCompile(`\[gate\] log: (\S+)`).FindStringSubmatch(r.Stderr)
+			require.NotNil(t, m)
+			assert.True(t, strings.HasPrefix(filepath.Base(m[1]), "lint."))
+			b, err := os.ReadFile(m[1])
+			require.NoError(t, err)
+			assert.Contains(t, string(b), "LINTERROR")
+			assert.Contains(t, r.Stderr, "ログファイル")
+		})
 	})
 
 	t.Run("checks phase reruns rules that failed and were not fixed", func(t *testing.T) {
