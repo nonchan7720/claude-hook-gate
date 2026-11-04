@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.15.0...v0.16.0) (2026-11-04)
+
+
+### Features
+
+* **gate:** return only the log path, not the command output, when a rules phase command fails ([#87](https://github.com/nonchan7720/claude-hook-gate/issues/87)) ([f0cef3d](https://github.com/nonchan7720/claude-hook-gate/commit/f0cef3d4d9098a7d24538967679d49ee86e703dd))
+
 ## [0.15.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.14.0...v0.15.0) (2026-11-03)
 
 
