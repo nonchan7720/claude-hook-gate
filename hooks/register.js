@@ -370,7 +370,7 @@ gate:
   skipNoCwd: "[skip: no cwd]"
   noteNoCwd: "(cwd does not exist)"
   worktreeNotFound: "=== [gate] worktree not found: {{root}}. Excluding it. ==="
-  rulesFailed: "[gate] Verification failed. Stopping (and reporting the work as done) is blocked until it is fixed. See the errors above and fix them now."
+  rulesFailed: "[gate] Verification failed. Stopping (and reporting the work as done) is blocked until it is fixed. The command output is not shown here: open the log file of each failed command (the [gate] log: path above), find the errors and fix them now."
   rulesPassed: "[gate] rules phase passed:\\n{{body}}"
   checkNotFound: "=== [gate] \\"{{name}}\\" was not found in consistency_checks. Skipping. ==="
   checkNotFoundSummary: "(check:{{name}}) not found, skipped"
@@ -526,7 +526,7 @@ gate:
   skipNoCwd: "[skip: cwd無し]"
   noteNoCwd: "(cwd が存在しません)"
   worktreeNotFound: "=== [gate] worktree が見つかりません: {{root}}。対象から外します。 ==="
-  rulesFailed: "[gate] 検証に失敗しました。直すまで終了（Stop）はブロックされ、完了報告もできません。上のエラーを見て、今ここで修正してください。"
+  rulesFailed: "[gate] 検証に失敗しました。直すまで終了（Stop）はブロックされ、完了報告もできません。コマンドの出力はここには載せていません。失敗したコマンドのログファイル（上の [gate] log: のパス）を開いてエラーを確認し、今ここで修正してください。"
   rulesPassed: "[gate] rules フェーズ成功:\\n{{body}}"
   checkNotFound: "=== [gate] consistency_checks に \\"{{name}}\\" が見つかりません。スキップします。 ==="
   checkNotFoundSummary: "(check:{{name}}) 見つかりません、スキップ"
@@ -3198,8 +3198,10 @@ ${this.t("gate.sharedResult", { logpath: r.outcome.logpath })}
     this.executedLabels.push(name || oneLine2(cmd));
     this.note(ok ? "ok" : "fail", label, cmd, `(${((await this.io.now() - started) / 1000).toFixed(1)}s)`);
     const detail = [chunk.lines[0]];
+    const brief = this.phase === "rules";
     if (out) {
-      chunk.lines.push(out.trimEnd());
+      if (!brief)
+        chunk.lines.push(out.trimEnd());
       detail.push(tailOutput(this.io.lang, out));
     }
     if (timedOut) {
@@ -3212,6 +3214,8 @@ ${this.t("gate.sharedResult", { logpath: r.outcome.logpath })}
       detail.push(`[gate] log: ${logpath}`);
       chunk.detail = detail.join(`
 `);
+    } else if (brief) {
+      chunk.lines.length = 0;
     }
     return [chunk, ok];
   }
