@@ -1,6 +1,6 @@
 {
   "name": "claude-hook-gate",
-  "version": "0.15.0",
+  "version": "0.16.0",
   "devDependencies": {
     "@anthropic-ai/claude-code": "2.1.296",
     "@biomejs/biome": "2.5.15",
