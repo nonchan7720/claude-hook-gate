@@ -127,7 +127,7 @@ gate:
   skipNoCwd: "[skip: no cwd]"
   noteNoCwd: "(cwd does not exist)"
   worktreeNotFound: "=== [gate] worktree not found: {{root}}. Excluding it. ==="
-  rulesFailed: "[gate] Verification failed. Stopping (and reporting the work as done) is blocked until it is fixed. See the errors above and fix them now."
+  rulesFailed: "[gate] Verification failed. Stopping (and reporting the work as done) is blocked until it is fixed. The command output is not shown here: open the log file of each failed command (the [gate] log: path above), find the errors and fix them now."
   rulesPassed: "[gate] rules phase passed:\n{{body}}"
   checkNotFound: "=== [gate] \"{{name}}\" was not found in consistency_checks. Skipping. ==="
   checkNotFoundSummary: "(check:{{name}}) not found, skipped"
