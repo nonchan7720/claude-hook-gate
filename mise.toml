@@ -5,6 +5,12 @@ go = "1.27.3"
 golangci-lint = "2.15.0"
 goreleaser = "2.18.3"
 
+# golangci-lint の配布バイナリは古い Go でビルドされていて、go.mod の Go（1.27）を対象にできない
+# （"the Go language version used to build golangci-lint is lower than the targeted Go version"）。
+# go backend で GitHub のソースから、上の go でビルドする。
+[tool_alias]
+golangci-lint = "go:github.com/golangci/golangci-lint/v2/cmd/golangci-lint"
+
 [tasks.lint]
 description = "Lint the Go sources and the TypeScript sources"
 run = "golangci-lint run ./... && bun run lint"
