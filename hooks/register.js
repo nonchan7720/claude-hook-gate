@@ -350,13 +350,12 @@ dogwood:
   badVerdict: "could not interpret the verdict of dogwood replay: {{verdict}}"
 
 gate:
-  headOmitted: "… (first {{n}} lines omitted)"
   restOmitted: "… (rest omitted)"
   failuresOmitted: "… ({{n}} more failures omitted; see the [gate] log path of each)"
   policyNotFound: "=== [gate] The policy file was not found: {{policy}}. Running without policy evaluation. ==="
   sharedResult: "[gate] The same run was in progress in another agent, so its result was taken over (log of the running side: {{logpath}})"
   timeout: "[gate] Killed after the timeout ({{seconds}}s). The command may be in an infinite loop or hung."
-  failedOutputHeader: "--- output of the failed commands ---"
+  failedOutputHeader: "--- failed commands (the output is in each log file) ---"
   nestedParallel: "=== [gate] ({{label}}) parallel cannot be nested inside parallel. Treated as a failure. ==="
   deferredNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Dropping this deferred entry. ==="
   cannotReadYaml: "cannot read gate.yaml: {{path}}"
@@ -382,7 +381,7 @@ gate:
   checksPassed: "[gate] {{title}} passed:\\n{{body}}"
   checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
   checksGaveUp: "[gate] Gave up because consistency checks failed {{max}} times in a row. The target files were returned to CHANGED unverified. Please check them manually. To clear this now, start a new session or run /clear (reset-gate on SessionStart removes the state files)."
-  checksFailed: "[gate] Verification failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
+  checksFailed: "[gate] Verification failed (attempt {{attempt}}/{{max}}). The command output is not shown here: open the log file of each failed command (the [gate] log: path) to find the errors, and keep fixing."
   ymlTypo: "[gate] gate.yaml was not found but {{path}} exists. Check whether the extension is yml instead of yaml."
   policyUnevaluated: "=== [gate] ({{label}}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [{{reason}}] $ {{cmd}} ==="
   policySkipped: "=== [gate] ({{label}}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ {{cmd}} ==="
@@ -506,13 +505,12 @@ dogwood:
   badVerdict: "dogwood replay の verdict を解釈できませんでした: {{verdict}}"
 
 gate:
-  headOmitted: "…（先頭 {{n}} 行省略）"
   restOmitted: "…（以降省略）"
   failuresOmitted: "…（残り {{n}} 件の失敗は省略。各 [gate] log のパスを見てください）"
   policyNotFound: "=== [gate] policy に指定されたファイルが見つかりません: {{policy}}。ポリシー判定を行わず実行します。 ==="
   sharedResult: "[gate] 同じ実行が他のエージェントで走っていたため、その結果を受け取りました（実行側のログ: {{logpath}}）"
   timeout: "[gate] タイムアウト（{{seconds}}秒）で強制終了しました。無限ループやハングの可能性があります。"
-  failedOutputHeader: "--- 失敗したコマンドの出力 ---"
+  failedOutputHeader: "--- 失敗したコマンド（出力は各ログファイルにあります） ---"
   nestedParallel: "=== [gate] ({{label}}) parallel の中に parallel はネストできません。失敗扱いにします。 ==="
   deferredNoCwd: "=== [gate] ({{label}}) cwd が存在しません: {{cwd}}。この控えを破棄します。 ==="
   cannotReadYaml: "gate.yaml を読めません: {{path}}"
@@ -538,7 +536,7 @@ gate:
   checksPassed: "[gate] {{title}} 成功:\\n{{body}}"
   checksGaveUpStderr: "consistency checks が {{max}} 回連続失敗。ループを打ち切ります。手動確認を。"
   checksGaveUp: "[gate] consistency checks が{{max}}回連続で失敗したため打ち切りました。対象ファイルは未検証のまま CHANGED へ戻しました。手動で確認してください。今すぐ解除したい場合は新しいセッションを開始するか /clear を実行してください（SessionStart の reset-gate が状態ファイルを削除します）。"
-  checksFailed: "[gate] 検証に失敗しました（試行 {{attempt}}/{{max}}）。上のエラーを見て修正を継続してください。"
+  checksFailed: "[gate] 検証に失敗しました（試行 {{attempt}}/{{max}}）。コマンドの出力はここには載せていません。失敗したコマンドのログファイル（[gate] log: のパス）を開いてエラーを確認し、修正を継続してください。"
   ymlTypo: "[gate] gate.yaml が見つかりませんが {{path}} があります。拡張子が yaml ではなく yml になっていないか確認してください。"
   policyUnevaluated: "=== [gate] ({{label}}) ポリシーを評価できないため今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます）［{{reason}}］ $ {{cmd}} ==="
   policySkipped: "=== [gate] ({{label}}) ポリシーにより今回はスキップしました（意図的な間引き。理由の調査は不要。控えに積んだので後で自動実行されます） $ {{cmd}} ==="
@@ -2582,7 +2580,6 @@ var FILES_ENV_KEY = "CLAUDE_GATE_FILES";
 var DOGWOOD_FALLBACKS = ["~/.cargo/bin/dogwood", "~/.local/share/mise/shims/dogwood"];
 var GATE_PRINCIPAL = 'Gate::Agent::"gate"';
 var STATUS_CMD_MAX = 100;
-var FAIL_TAIL_LINES = 60;
 var FAIL_DETAIL_MAX = 12000;
 var UNMATCHED_SHOWN = 5;
 var MAX_TIMEOUT_MS = 600000;
@@ -2700,14 +2697,6 @@ function summarizeCmds(cmds) {
       parts.push(c);
   }
   return parts.join(" ; ");
-}
-function tailOutput(lang, out, limit = FAIL_TAIL_LINES) {
-  const lines = out.trimEnd().split(/\r?\n/);
-  if (lines.length <= limit)
-    return lines.join(`
-`);
-  return [tr(lang)("gate.headOmitted", { n: lines.length - limit }), ...lines.slice(-limit)].join(`
-`);
 }
 function failureDetails(lang, failures) {
   if (failures.length === 0)
@@ -3194,29 +3183,18 @@ ${this.t("gate.sharedResult", { logpath: r.outcome.logpath })}
     }
     this.ranThisRun.add(Gate.deferKey({ root: scope.root, cwd, cmd }));
     await this.undeferCmd(scope.root, cwd, cmd);
-    const { out, ok, timedOut, logpath } = ran;
+    const { ok, timedOut, logpath } = ran;
     this.executedLabels.push(name || oneLine2(cmd));
     this.note(ok ? "ok" : "fail", label, cmd, `(${((await this.io.now() - started) / 1000).toFixed(1)}s)`);
-    const detail = [chunk.lines[0]];
-    const brief = this.phase === "rules";
-    if (out) {
-      if (!brief)
-        chunk.lines.push(out.trimEnd());
-      detail.push(tailOutput(this.io.lang, out));
-    }
-    if (timedOut) {
-      const msg = this.t("gate.timeout", { seconds: timeout });
-      chunk.lines.push(msg);
-      detail.push(msg);
-    }
-    if (!ok) {
-      chunk.lines.push(`[gate] log: ${logpath}`);
-      detail.push(`[gate] log: ${logpath}`);
-      chunk.detail = detail.join(`
-`);
-    } else if (brief) {
+    if (ok) {
       chunk.lines.length = 0;
+      return [chunk, ok];
     }
+    if (timedOut)
+      chunk.lines.push(this.t("gate.timeout", { seconds: timeout }));
+    chunk.lines.push(`[gate] log: ${logpath}`);
+    chunk.detail = chunk.lines.join(`
+`);
     return [chunk, ok];
   }
   collectFailure(chunk) {
