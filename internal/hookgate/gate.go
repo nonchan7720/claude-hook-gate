@@ -149,7 +149,6 @@ const (
 
 	gatePrincipal      = `Gate::Agent::"gate"`
 	gateStatusCmdMax   = 100     // 文字。1 行ログに載せるコマンドの最大長
-	gateFailTailLines  = 60      // 失敗コマンド1本あたりに載せる出力の末尾行数
 	gateFailDetailMax  = 12000   // 失敗詳細全体の最大文字数
 	gateUnmatchedShown = 5       // どのルールにもマッチしなかったファイルを 1 行に列挙する最大数
 	gateMaxTimeoutMs   = 600_000 // $.process.run の上限（10 分）
@@ -623,16 +622,6 @@ func SummarizeCmds(cmds []any) string {
 		}
 	}
 	return strings.Join(parts, " ; ")
-}
-
-// TailOutput は出力を末尾 limit 行に切り詰める。切ったときは先頭に省略表示を付ける。
-func TailOutput(lang Lang, out string, limit int) string {
-	lines := gateNewlineRe.Split(gateTrimEnd(out), -1)
-	if len(lines) <= limit {
-		return strings.Join(lines, "\n")
-	}
-	head := Tr(lang)("gate.headOmitted", map[string]any{"n": len(lines) - limit})
-	return strings.Join(append([]string{head}, lines[len(lines)-limit:]...), "\n")
 }
 
 // FailureDetails は失敗詳細を1つの文字列にまとめる。全体が上限を超えたら残りは省略して log を見るよう促す。

@@ -107,13 +107,12 @@ dogwood:
   badVerdict: "could not interpret the verdict of dogwood replay: {{verdict}}"
 
 gate:
-  headOmitted: "… (first {{n}} lines omitted)"
   restOmitted: "… (rest omitted)"
   failuresOmitted: "… ({{n}} more failures omitted; see the [gate] log path of each)"
   policyNotFound: "=== [gate] The policy file was not found: {{policy}}. Running without policy evaluation. ==="
   sharedResult: "[gate] The same run was in progress in another agent, so its result was taken over (log of the running side: {{logpath}})"
   timeout: "[gate] Killed after the timeout ({{seconds}}s). The command may be in an infinite loop or hung."
-  failedOutputHeader: "--- output of the failed commands ---"
+  failedOutputHeader: "--- failed commands (the output is in each log file) ---"
   nestedParallel: "=== [gate] ({{label}}) parallel cannot be nested inside parallel. Treated as a failure. ==="
   deferredNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Dropping this deferred entry. ==="
   cannotReadYaml: "cannot read gate.yaml: {{path}}"
@@ -139,7 +138,7 @@ gate:
   checksPassed: "[gate] {{title}} passed:\n{{body}}"
   checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
   checksGaveUp: "[gate] Gave up because consistency checks failed {{max}} times in a row. The target files were returned to CHANGED unverified. Please check them manually. To clear this now, start a new session or run /clear (reset-gate on SessionStart removes the state files)."
-  checksFailed: "[gate] Verification failed (attempt {{attempt}}/{{max}}). See the errors above and keep fixing."
+  checksFailed: "[gate] Verification failed (attempt {{attempt}}/{{max}}). The command output is not shown here: open the log file of each failed command (the [gate] log: path) to find the errors, and keep fixing."
   ymlTypo: "[gate] gate.yaml was not found but {{path}} exists. Check whether the extension is yml instead of yaml."
   policyUnevaluated: "=== [gate] ({{label}}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [{{reason}}] $ {{cmd}} ==="
   policySkipped: "=== [gate] ({{label}}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ {{cmd}} ==="

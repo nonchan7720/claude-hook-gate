@@ -140,7 +140,6 @@ export const FILES_ENV_KEY = 'CLAUDE_GATE_FILES' // run のコマンドへ「今
 const DOGWOOD_FALLBACKS = ['~/.cargo/bin/dogwood', '~/.local/share/mise/shims/dogwood']
 const GATE_PRINCIPAL = 'Gate::Agent::"gate"'
 const STATUS_CMD_MAX = 100 // 文字。1 行ログに載せるコマンドの最大長
-const FAIL_TAIL_LINES = 60 // 失敗コマンド1本あたりに載せる出力の末尾行数
 const FAIL_DETAIL_MAX = 12000 // 失敗詳細全体の最大文字数
 const UNMATCHED_SHOWN = 5 // どのルールにもマッチしなかったファイルを 1 行に列挙する最大数
 const MAX_TIMEOUT_MS = 600_000 // $.process.run の上限（10 分）
@@ -332,13 +331,6 @@ export function summarizeCmds(cmds: RunItem[]): string {
     else parts.push(c as string)
   }
   return parts.join(' ; ')
-}
-
-/** 出力を末尾 limit 行に切り詰める。切ったときは先頭に省略表示を付ける。 */
-export function tailOutput(lang: Lang, out: string, limit = FAIL_TAIL_LINES): string {
-  const lines = out.trimEnd().split(/\r?\n/)
-  if (lines.length <= limit) return lines.join('\n')
-  return [tr(lang)('gate.headOmitted', { n: lines.length - limit }), ...lines.slice(-limit)].join('\n')
 }
 
 /** 失敗詳細を1つの文字列にまとめる。全体が上限を超えたら残りは省略して log を見るよう促す。 */
@@ -933,29 +925,18 @@ export class Gate {
     // 実行した（または共有で受け取った）コマンドは、控えに同じものが残っていれば消化済みとして外す。
     this.ranThisRun.add(Gate.deferKey({ root: scope.root, cwd, cmd }))
     await this.undeferCmd(scope.root, cwd, cmd)
-    const { out, ok, timedOut, logpath } = ran
+    const { ok, timedOut, logpath } = ran
     this.executedLabels.push(name || oneLine(cmd))
     this.note(ok ? 'ok' : 'fail', label, cmd, `(${(((await this.io.now()) - started) / 1000).toFixed(1)}s)`)
-    const detail = [chunk.lines[0] as string]
-    // rules フェーズ（ツール使用の直後）では出力を載せない。編集のたびに全出力を返すとトランスクリプトを圧迫するので、
-    // 成功したコマンドは 1 行ログ（status）だけ、失敗したコマンドは見出しと log のパスだけを返し、ログを読ませる。
-    const brief = this.phase === 'rules'
-    if (out) {
-      if (!brief) chunk.lines.push(out.trimEnd())
-      detail.push(tailOutput(this.io.lang, out))
-    }
-    if (timedOut) {
-      const msg = this.t('gate.timeout', { seconds: timeout })
-      chunk.lines.push(msg)
-      detail.push(msg)
-    }
-    if (!ok) {
-      chunk.lines.push(`[gate] log: ${logpath}`)
-      detail.push(`[gate] log: ${logpath}`)
-      chunk.detail = detail.join('\n')
-    } else if (brief) {
+    // コマンドの出力は返さない（rules / checks の両フェーズ）。返すとトランスクリプトを圧迫するので、成功したコマンドは
+    // 1 行ログ（status）だけ、失敗したコマンドは見出し・タイムアウトの文言・log のパスだけを返し、出力はログファイルを読ませる。
+    if (ok) {
       chunk.lines.length = 0
+      return [chunk, ok]
     }
+    if (timedOut) chunk.lines.push(this.t('gate.timeout', { seconds: timeout }))
+    chunk.lines.push(`[gate] log: ${logpath}`)
+    chunk.detail = chunk.lines.join('\n')
     return [chunk, ok]
   }
 
