@@ -243,28 +243,17 @@ func (g *Gate) execOne(label, cmd, cwd string, timeout float64, mark, name strin
 		kind = "ok"
 	}
 	g.Note(kind, label, cmd, fmt.Sprintf("(%ss)", ToFixed(float64(g.Io.Now()-started)/1000, 1)))
-	detail := []string{chunk.Lines[0]}
-	// rules フェーズ（ツール使用の直後）では出力を載せない。編集のたびに全出力を返すとトランスクリプトを圧迫するので、
-	// 成功したコマンドは 1 行ログ（Status）だけ、失敗したコマンドは見出しと log のパスだけを返し、ログを読ませる。
-	brief := g.Phase == "rules"
-	if ran.Out != "" {
-		if !brief {
-			chunk.Lines = append(chunk.Lines, gateTrimEnd(ran.Out))
-		}
-		detail = append(detail, TailOutput(g.Io.Lang(), ran.Out, gateFailTailLines))
+	// コマンドの出力は返さない（rules / checks の両フェーズ）。返すとトランスクリプトを圧迫するので、成功したコマンドは
+	// 1 行ログ（Status）だけ、失敗したコマンドは見出し・タイムアウトの文言・log のパスだけを返し、出力はログファイルを読ませる。
+	if ran.Ok {
+		chunk.Lines = nil
+		return chunk, true
 	}
 	if ran.TimedOut {
-		msg := g.T("gate.timeout", map[string]any{"seconds": timeout})
-		chunk.Lines = append(chunk.Lines, msg)
-		detail = append(detail, msg)
+		chunk.Lines = append(chunk.Lines, g.T("gate.timeout", map[string]any{"seconds": timeout}))
 	}
-	if !ran.Ok {
-		chunk.Lines = append(chunk.Lines, "[gate] log: "+ran.Logpath)
-		detail = append(detail, "[gate] log: "+ran.Logpath)
-		chunk.Detail = strings.Join(detail, "\n")
-	} else if brief {
-		chunk.Lines = nil
-	}
+	chunk.Lines = append(chunk.Lines, "[gate] log: "+ran.Logpath)
+	chunk.Detail = strings.Join(chunk.Lines, "\n")
 	return chunk, ran.Ok
 }
 

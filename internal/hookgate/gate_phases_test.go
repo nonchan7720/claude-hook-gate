@@ -328,7 +328,7 @@ func TestGatePhases(t *testing.T) {
 			assert.NotContains(t, r.Stderr, "GOODOUT")
 			assert.Contains(t, r.Stderr, "[gate] ok: ")
 			assert.Contains(t, r.Stderr, "[gate] fail: ")
-			m := regexp.MustCompile(`\[gate\] log: (\S+)`).FindStringSubmatch(r.Stderr)
+			m := regexp.MustCompile(`\[gate\] log: (/\S+)`).FindStringSubmatch(r.Stderr)
 			require.NotNil(t, m)
 			assert.True(t, strings.HasPrefix(filepath.Base(m[1]), "lint."))
 			b, err := os.ReadFile(m[1])
@@ -453,9 +453,18 @@ func TestGatePhases(t *testing.T) {
 			requireExit0(t, rules(proj))
 			r := checks(proj, GateOpts{StopHookActive: false})
 			assert.Equal(t, 2, r.ExitCode)
-			assert.Contains(t, strings.ToLower(r.Stderr), "no such file")
 			assert.NotEqual(t, "", strings.TrimSpace(r.Stdout))
-			assert.True(t, json.Valid([]byte(r.Stdout)))
+			require.True(t, json.Valid([]byte(r.Stdout)))
+			// コマンドの出力は stderr にも理由にも載せず、ログファイルにだけ残す。
+			assert.NotContains(t, strings.ToLower(r.Stderr), "no such file")
+			var payload struct{ Reason string }
+			require.NoError(t, json.Unmarshal([]byte(r.Stdout), &payload))
+			assert.NotContains(t, strings.ToLower(payload.Reason), "no such file")
+			m := regexp.MustCompile(`\[gate\] log: (/\S+)`).FindStringSubmatch(payload.Reason)
+			require.NotNil(t, m)
+			b, err := os.ReadFile(m[1])
+			require.NoError(t, err)
+			assert.Contains(t, strings.ToLower(string(b)), "no such file")
 		})
 
 		t.Run("success under stop_hook_active has no decision field", func(t *testing.T) {

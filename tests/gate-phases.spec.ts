@@ -257,7 +257,7 @@ describe('rules phase does not block the conversation', () => {
       expect(r.stderr).not.toContain('GOODOUT')
       expect(r.stderr).toContain('[gate] ok: ')
       expect(r.stderr).toContain('[gate] fail: ')
-      const logpath = /\[gate\] log: (\S+)/.exec(r.stderr)?.[1] ?? ''
+      const logpath = /\[gate\] log: (\/\S+)/.exec(r.stderr)?.[1] ?? ''
       expect(path.basename(logpath)).toStartWith('lint.')
       expect(fs.readFileSync(logpath, 'utf8')).toContain('LINTERROR')
       expect(r.stderr).toContain('ログファイル')
@@ -360,9 +360,14 @@ describe('checks phase failure stdout', () => {
       ok(await rules(proj))
       const r = await checks(proj, 'sess1', { stopHookActive: false })
       expect(r.exitCode).toBe(2)
-      expect(r.stderr.toLowerCase()).toContain('no such file')
       expect(r.stdout.trim()).not.toBe('')
       expect(() => JSON.parse(r.stdout)).not.toThrow()
+      // コマンドの出力は stderr にも理由にも載せず、ログファイルにだけ残す。
+      expect(r.stderr.toLowerCase()).not.toContain('no such file')
+      const reason = JSON.parse(r.stdout).reason as string
+      expect(reason.toLowerCase()).not.toContain('no such file')
+      const logpath = /\[gate\] log: (\/\S+)/.exec(reason)?.[1] ?? ''
+      expect(fs.readFileSync(logpath, 'utf8').toLowerCase()).toContain('no such file')
     }))
 
   test('success under stop_hook_active has no decision field', () =>
