@@ -158,6 +158,9 @@ func TestSessionStartGate(t *testing.T) {
 		assert.Equal(t, "[gate] session_start: a\nA\n", ssStart(proj, Dict{"source": "startup"}).Stdout)
 		assert.Equal(t, "[gate] session_start: b\nB\n", ssStart(proj, Dict{"source": "resume"}).Stdout)
 		assert.Equal(t, "", ssStart(proj, Dict{"source": "compact"}).Stdout)
+		// 引用した "on" が空でも、引用しない on: の値を使う。
+		writeText(filepath.Join(proj, ".claude", "gate.yaml"), "session_start:\n  - name: a\n    cmd: echo A\n    on: [resume]\n    \"on\":\n")
+		assert.Equal(t, "", ssStart(proj, Dict{"source": "startup"}).Stdout)
 	})
 
 	t.Run("skipped when the payload has agent_id", func(t *testing.T) {

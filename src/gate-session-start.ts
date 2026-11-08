@@ -23,7 +23,7 @@ export function parseItem(raw: unknown): Item | undefined {
   if (typeof d.cmd !== 'string' || d.cmd.trim() === '') return undefined
   const t = Number(d.timeout)
   // gate.yaml は YAML 1.1 で読むので、引用しないキー `on` は真偽値 true になる（読んだ辞書ではキー "true"）。どちらの書き方でも効くようにする。
-  const rawOn = 'on' in d ? d.on : d.true
+  const rawOn = d.on !== undefined && d.on !== null ? d.on : d.true
   const on = typeof rawOn === 'string' ? [rawOn] : Array.isArray(rawOn) ? rawOn.map(String) : undefined
   return {
     cmd: d.cmd,

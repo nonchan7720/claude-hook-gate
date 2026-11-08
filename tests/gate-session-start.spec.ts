@@ -146,6 +146,9 @@ describe('session_start phase', () => {
       expect((await start(proj, { source: 'startup' })).stdout).toBe('[gate] session_start: a\nA\n')
       expect((await start(proj, { source: 'resume' })).stdout).toBe('[gate] session_start: b\nB\n')
       expect((await start(proj, { source: 'compact' })).stdout).toBe('')
+      // 引用した "on" が空でも、引用しない on: の値を使う。
+      fs.writeFileSync(path.join(proj, '.claude', 'gate.yaml'), 'session_start:\n  - name: a\n    cmd: echo A\n    on: [resume]\n    "on":\n')
+      expect((await start(proj, { source: 'startup' })).stdout).toBe('')
     }))
 
   test('skipped when the payload has agent_id', () =>
