@@ -1,6 +1,6 @@
 package hookgate
 
-// tests/host-claude.spec.ts の移植。Claude Code の settings hook 向けの Host（host_claude.go）: classic の payload は中核の形そのものなので
+//Claude Code の settings hook 向けの Host（host_claude.go）: classic の payload は中核の形そのものなので
 // 素通し、出力は OutcomeToClassic。
 
 import (

@@ -1,6 +1,6 @@
 package hookgate
 
-// gate のコマンド実行（src/gate.ts の runCmd / runCmdShared / showRunning / execOne / runParallel / runCmds / runDeferred）。
+// gate のコマンド実行（runCmd / runCmdShared / showRunning / execOne / runParallel / runCmds / runDeferred）。
 
 import (
 	"fmt"

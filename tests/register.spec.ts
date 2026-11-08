@@ -2,14 +2,22 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
+import type { Io } from '../src/io.ts'
 import { register } from '../src/register.ts'
-import { publishRunning } from '../src/running-registry.ts'
+import { gateStatusDir, type RunningEntry } from '../src/running-registry.ts'
 import { loadMod } from './helpers/fake-engine.ts'
 import { exists, writeChangedFiles, writeGateYaml } from './helpers/gate.ts'
 import { feedbackGateBin } from './helpers/go-binary.ts'
 import { MISSING_DOGWOOD_BIN, makeIo, rmTree, tmpDir } from './helpers/node-io.ts'
 
 type Out = Record<string, unknown>
+
+// 一覧のファイルは Go 版の gate（internal/hookgate/running_registry.go の PublishRunning）が書く。ここでは同じ形で置く。
+const publishRunning = async (io: Io, owner: string, entries: readonly RunningEntry[]): Promise<void> => {
+  const dir = path.join(gateStatusDir(io), 'running')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, `${owner}.json`), JSON.stringify(entries))
+}
 
 const statusLog: Array<string | undefined> = []
 const invalidateLog: string[] = []
@@ -18,8 +26,25 @@ const timerLog: number[] = []
 const commandLog: Array<{ name: string; description: string }> = []
 // true の間、遅延表示の待ち時間（$.clock.every）は既に経過したものとして扱う。
 let elapsed = false
-// 完了通知は最初に osascript で前面ウィンドウを調べるので、その実行回数を通知を試みた回数として数える
-const notifyCount = () => runLog.filter((argv) => argv[0] === 'osascript').length
+// 完了通知は最初に osascript で前面ウィンドウを調べるので、その実行回数を通知を試みた回数として数える。
+// 通知は Go 版が自分で起動するので、PATH の先頭に置いた偽の osascript / terminal-notifier が呼び出しを記録する（失敗で返す）。
+let stubLog = ''
+const notifyCount = () =>
+  fs.existsSync(stubLog)
+    ? fs
+        .readFileSync(stubLog, 'utf8')
+        .split('\n')
+        .filter((l) => l === 'osascript').length
+    : 0
+function writeStubs(dir: string): string {
+  fs.mkdirSync(dir, { recursive: true })
+  for (const name of ['osascript', 'terminal-notifier']) {
+    const p = path.join(dir, name)
+    fs.writeFileSync(p, `#!/bin/sh\necho ${name} >> "${path.join(dir, 'calls.log')}"\nexit 1\n`)
+    fs.chmodSync(p, 0o755)
+  }
+  return path.join(dir, 'calls.log')
+}
 
 async function withMod<T>(
   body: (m: ReturnType<typeof loadMod>, proj: string, feedback: string, home: string) => Promise<T>,
@@ -35,6 +60,8 @@ async function withMod<T>(
   timerLog.length = 0
   commandLog.length = 0
   elapsed = false
+  const stubs = path.join(home, 'stub-bin')
+  stubLog = writeStubs(stubs)
   try {
     const m = loadMod(register, {
       projectDir: proj,
@@ -46,7 +73,7 @@ async function withMod<T>(
       commandLog,
       elapsed: () => elapsed,
       stubCommands: ['osascript', 'terminal-notifier'],
-      env: { HOME: home, CLAUDE_FEEDBACK_DIR: feedback, DOGWOOD_BIN: MISSING_DOGWOOD_BIN, ...env },
+      env: { HOME: home, CLAUDE_FEEDBACK_DIR: feedback, DOGWOOD_BIN: MISSING_DOGWOOD_BIN, PATH: `${stubs}:${process.env.PATH ?? ''}`, ...env },
     })
     return await body(m, proj, feedback, home)
   } finally {
@@ -171,9 +198,11 @@ describe('UserPromptSubmit', () => {
       writeRule(feedback, 'unconfirmed', 1)
       const r = (await m.call('classic.UserPromptSubmit', { prompt: 'hi' })) as { additionalContext: string[] }
       const bundled = fs.readFileSync(path.join(import.meta.dir, '..', 'rules', 'feedback_rules.md'), 'utf8').trim()
-      expect(r.additionalContext[0]).toBe(bundled)
-      expect(r.additionalContext[1]).toContain('■ confirmed (これまで 3 回指摘されています)')
-      expect(r.additionalContext[1]).not.toContain('unconfirmed')
+      // Go 版は context を 1 つの文字列（空行区切り）で返す。
+      const [ctx = ''] = r.additionalContext
+      expect(ctx.startsWith(`${bundled}\n\n`)).toBe(true)
+      expect(ctx).toContain('■ confirmed (これまで 3 回指摘されています)')
+      expect(ctx).not.toContain('unconfirmed')
     }))
 
   test('a rules file at the default path replaces the bundled one', () =>
@@ -198,9 +227,10 @@ describe('UserPromptSubmit', () => {
         writeRule(feedback, 'confirmed', 3)
         const r = (await m.call('classic.UserPromptSubmit', { prompt: 'hi' })) as { additionalContext: string[] }
         const bundled = fs.readFileSync(path.join(import.meta.dir, '..', 'rules', 'feedback_rules.en.md'), 'utf8').trim()
-        expect(r.additionalContext[0]).toBe(bundled)
-        expect(r.additionalContext[1]).toContain('# Confirmed feedback rules (count >= 3)')
-        expect(r.additionalContext[1]).toContain('■ confirmed (pointed out 3 times so far)')
+        const [ctx = ''] = r.additionalContext
+        expect(ctx.startsWith(`${bundled}\n\n`)).toBe(true)
+        expect(ctx).toContain('# Confirmed feedback rules (count >= 3)')
+        expect(ctx).toContain('■ confirmed (pointed out 3 times so far)')
       },
       { language: 'en' },
     ))
@@ -620,48 +650,55 @@ describe('Stop / SubagentStop / Notification', () => {
       expect(invalidateLog).toContain('ui.render')
     }))
 
+  // 3 秒の遅延表示は Go 版が数える（internal/hookgate/hooks.go の progressIo）。Go は表示を stderr の行で流し、mod がそれを
+  // $.ui.status に渡す（src/go-bridge.ts）。ここでは check を 3 秒より長く走らせて、実際の時間で確かめる。
+  const SLOW_RULE = "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    check: 'sleep 3.5; false'\n    message: 'forbidden'\n    severity: deny\n"
+  const FAST_RULE = "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    check: 'false'\n    message: 'forbidden'\n    severity: deny\n"
+
   test('PreToolUse shows the evaluated rule only after 3 seconds, and clears even on deny', () =>
     withMod(async (m, _proj, feedback) => {
-      writeRule(feedback, 'no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    check: 'false'\n    message: 'forbidden'\n    severity: deny\n")
-      elapsed = true
+      writeRule(feedback, 'no_rm', 6, SLOW_RULE)
       const r = (await m.call('classic.PreToolUse', { tool: 'Bash', command: 'rm -rf x' })) as Out
       expect(String(r.deny)).toContain('no_rm')
-      expect(timerLog).toEqual([3000])
       expect(statusLog).toEqual(['[feedback-guard] 評価中: no_rm', undefined])
     }))
 
   test('PreToolUse that finishes within 3 seconds never touches the status line', () =>
     withMod(async (m, proj, feedback) => {
       writeGateYaml(proj, { rules: [{ match: '**/*.py', run: [{ cmd: 'true', name: 'fmt' }] }] })
-      writeRule(feedback, 'no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    check: 'false'\n    message: 'forbidden'\n    severity: deny\n")
+      writeRule(feedback, 'no_rm', 6, FAST_RULE)
       await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
       statusLog.length = 0
-      timerLog.length = 0
       const r = (await m.call('classic.PreToolUse', { tool: 'Bash', command: 'rm -rf x' })) as Out
       expect(String(r.deny)).toContain('no_rm')
-      expect(timerLog).toEqual([3000])
       expect(statusLog).toEqual([])
     }))
 
   test('PreToolUse returns the status line to the gate summary after showing the evaluated rule', () =>
     withMod(async (m, proj, feedback) => {
       writeGateYaml(proj, { rules: [{ match: '**/*.py', run: [{ cmd: 'true', name: 'fmt' }] }] })
-      writeRule(feedback, 'no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    check: 'false'\n    message: 'forbidden'\n    severity: deny\n")
+      writeRule(feedback, 'no_rm', 6, SLOW_RULE)
       await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
       statusLog.length = 0
-      elapsed = true
       await m.call('classic.PreToolUse', { tool: 'Bash', command: 'rm -rf x' })
       expect(statusLog).toEqual(['[feedback-guard] 評価中: no_rm', expect.stringMatching(/^\[gate\] 完了: ✓ 1 \(\d+\.\ds\)$/)])
+    }))
+
+  test('the gate results are shown on the status line while PostToolUse runs', () =>
+    withMod(async (m, proj) => {
+      writeGateYaml(proj, { rules: [{ match: '**/*.py', run: [{ cmd: 'true', name: 'fmt' }] }] })
+      await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
+      expect(statusLog.at(-1)).toMatch(/^\[gate\] 完了: ✓ 1 /)
+      expect(invalidateLog.length).toBeGreaterThan(0)
     }))
 
   test('the kept gate summary is dropped once the next gate command starts', () =>
     withMod(async (m, proj, feedback) => {
       writeGateYaml(proj, { rules: [{ match: '**/*.py', run: [{ cmd: 'true', name: 'fmt' }] }] })
-      writeRule(feedback, 'no_rm', 6, "enforce:\n  - event: pre_bash\n    when: 'rm -rf'\n    check: 'false'\n    message: 'forbidden'\n    severity: deny\n")
+      writeRule(feedback, 'no_rm', 6, SLOW_RULE)
       await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'x.py' } })
       await m.call('classic.PostToolUse', { session_id: 'sess-1', tool_name: 'Write', tool_input: { file_path: 'y.py' } })
       statusLog.length = 0
-      elapsed = true
       await m.call('classic.PreToolUse', { tool: 'Bash', command: 'rm -rf x' })
       expect(statusLog.at(-1)).toMatch(/^\[gate\] 完了: ✓ 1 /)
       expect(statusLog.filter((t) => t?.startsWith('[gate]')).length).toBe(1)

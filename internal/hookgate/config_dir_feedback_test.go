@@ -1,6 +1,6 @@
 package hookgate
 
-// tests/config-dir.spec.ts のうち feedback ルール（feedback_rules.go）に触れるテストの移植。
+// 設定ディレクトリのうち feedback ルール（feedback_rules.go）に触れるテスト。
 // （'the gate.yml typo...' は stop_test_gate.go の移植担当が stop_test_gate_test.go に足す。'the default rules file...' は
 // config_dir_test.go にある。）
 

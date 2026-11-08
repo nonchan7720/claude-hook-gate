@@ -1,6 +1,6 @@
 package hookgate
 
-// tests/feedback-bash-edit.spec.ts のうち、BashStarted / BashChanges（Bash が書き換えたファイルの検出）を通して
+// feedback_bash_edit.go のテストのうち、BashStarted / BashChanges（Bash が書き換えたファイルの検出）を通して
 // FeedbackBashEdits を呼ぶテストの移植。feedback_bash_edit_test.go に置いた、検出を通さずに直接呼ぶテストの残り。
 // 実際に git リポジトリを作り（bash_changes_test.go のヘルパー bctGit / bctGitAt / bctSetMtime を使う）、mtime を動かす。
 

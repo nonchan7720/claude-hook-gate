@@ -1,6 +1,8 @@
 // テスト用の擬似エンジン: register() が登録する hook を保持し、`$`（Engine）を Node の fs / プロセスで実装する。
+import { spawn } from 'node:child_process'
 import * as fs from 'node:fs'
-import type { Engine, Hook, HookEvent, HookResult, PluginOptions, Register } from 'claude-code'
+import type { Engine, Hook, HookEvent, HookResult, PluginOptions, ProcessSpawnChunk, ProcessSpawnInit, Register } from 'claude-code'
+import { feedbackGateBin } from './go-binary.ts'
 import { makeIo, REPO_ROOT, TEST_HOME } from './node-io.ts'
 
 export type FakeEngineOptions = {
@@ -20,6 +22,8 @@ export type FakeEngineOptions = {
   runLog?: string[][]
   /** argv[0] がこの一覧にあるコマンドは実行せず、記録だけして失敗扱いで返す。 */
   stubCommands?: string[]
+  /** $.process.spawn に渡された引数を順に記録する。 */
+  spawnLog?: ProcessSpawnInit[]
   /** $.command.register に渡された引数を順に記録する。 */
   commandLog?: Array<{ name: string; description: string }>
 }
@@ -82,6 +86,14 @@ export function makeEngine(opts: FakeEngineOptions): FakeEngine {
         if (r.error !== undefined) throw new Error(r.error)
         return { exitCode: r.exitCode, stdout: r.stdout, stderr: r.stderr }
       },
+      // 本物のエンジンと同じく、環境は $.env の値に init.env を重ねたもの。scripts/hook.sh がテスト用にビルドした
+      // Go 版のバイナリを使うよう FEEDBACK_GATE_BIN を足す。
+      spawn: (init) => {
+        opts.spawnLog?.push(init)
+        const childEnv: Record<string, string> = { FEEDBACK_GATE_BIN: feedbackGateBin() }
+        for (const [k, v] of Object.entries({ ...env, ...init.env })) if (v !== undefined) childEnv[k] = v
+        return spawnChunks(init, childEnv)
+      },
     },
     command: {
       register: async (command) => {
@@ -116,4 +128,33 @@ export function loadMod(register: Register, opts: FakeEngineOptions) {
   const engine = makeEngine(opts)
   engine.register(register)
   return engine
+}
+
+/** 子プロセスを起動し、stdout / stderr の塊を届いた順に返す（$.process.spawn と同じ形）。 */
+async function* spawnChunks(init: ProcessSpawnInit, env: Record<string, string>): AsyncGenerator<ProcessSpawnChunk> {
+  const [cmd = '', ...args] = init.argv
+  const child = spawn(cmd, args, { cwd: init.cwd, env, stdio: ['pipe', 'pipe', 'pipe'] })
+  const queue: Array<ProcessSpawnChunk | null> = []
+  let wake: (() => void) | undefined
+  const push = (c: ProcessSpawnChunk | null) => {
+    queue.push(c)
+    wake?.()
+  }
+  child.stdout.on('data', (b: Buffer) => push({ stream: 'stdout', text: b.toString('utf8') }))
+  child.stderr.on('data', (b: Buffer) => push({ stream: 'stderr', text: b.toString('utf8') }))
+  child.on('close', () => push(null))
+  child.on('error', () => push(null))
+  child.stdin.end(init.input ?? '')
+  while (true) {
+    const c = queue.shift()
+    if (c === undefined) {
+      await new Promise<void>((r) => {
+        wake = r
+      })
+      wake = undefined
+      continue
+    }
+    if (c === null) return
+    yield c
+  }
 }

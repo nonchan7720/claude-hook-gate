@@ -1,6 +1,6 @@
 package hookgate
 
-// tests/host-codex.spec.ts の移植。Codex 向けの Host（host_codex.go）: Claude Code との違い（apply_patch、PermissionRequest、
+//Codex 向けの Host（host_codex.go）: Claude Code との違い（apply_patch、PermissionRequest、
 // ask が無いこと、warn の渡し方）を CodexNormalize / CodexRender で吸収し、中核（hooks.go）は共有する。中核の呼び出しは RunCore。
 
 import (

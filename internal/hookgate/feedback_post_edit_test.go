@@ -1,7 +1,5 @@
 package hookgate
 
-// tests/feedback-post-edit.spec.ts の移植。
-
 import (
 	"path/filepath"
 	"strconv"

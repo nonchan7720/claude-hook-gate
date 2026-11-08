@@ -2,11 +2,9 @@
 import { describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { CLAUDE_CONFIG_DIRS, configPaths, findGateYaml, pickConfigDir } from '../src/config-dir.ts'
+import { CLAUDE_CONFIG_DIRS, configPaths, pickConfigDir } from '../src/config-dir.ts'
 import { feedbackDir, feedbackDirs, listRules, projectFeedbackDir, projectFeedbackDirs } from '../src/feedback-rules.ts'
-import { loadRules } from '../src/rules-file.ts'
 import { gateStatusDir } from '../src/running-registry.ts'
-import { stopTestGate } from '../src/stop-test-gate.ts'
 import { makeIo, rmTree, tmpDir } from './helpers/node-io.ts'
 
 const writeRule = (dir: string, name: string, count: number) => {
@@ -41,31 +39,12 @@ describe('pickConfigDir / configPaths', () => {
     }))
 })
 
-describe('gate.yaml and the state directory', () => {
-  test('Claude Code finds .agents/gate.yaml when .claude has none, and keeps the state next to it', () =>
+describe('the state directory', () => {
+  // gate.yaml の探索と gate.yml の誤記の報告は Go 版（internal/hookgate/config_dir_test.go）。
+  test('the state directory follows the existing config directory (.agents when .claude has none)', () =>
     withDirs(async (proj) => {
       fs.mkdirSync(path.join(proj, '.agents'))
-      fs.writeFileSync(path.join(proj, '.agents', 'gate.yaml'), '{"rules":[]}')
-      const io = makeIo({ projectDir: proj })
-      expect(await findGateYaml(io)).toBe(path.join(proj, '.agents', 'gate.yaml'))
-      expect(gateStatusDir(io)).toBe(path.join(proj, '.agents', '.gate-status'))
-    }))
-
-  test('Claude Code prefers .claude over .agents when both have a gate.yaml', () =>
-    withDirs(async (proj) => {
-      for (const d of ['.agents', '.claude']) {
-        fs.mkdirSync(path.join(proj, d))
-        fs.writeFileSync(path.join(proj, d, 'gate.yaml'), '{"rules":[]}')
-      }
-      expect(await findGateYaml(makeIo({ projectDir: proj }))).toBe(path.join(proj, '.claude', 'gate.yaml'))
-    }))
-
-  test('the gate.yml typo is reported with the path it was found at, in either directory', () =>
-    withDirs(async (proj) => {
-      fs.mkdirSync(path.join(proj, '.agents'))
-      fs.writeFileSync(path.join(proj, '.agents', 'gate.yml'), '{"rules":[]}')
-      const r = await stopTestGate(makeIo({ projectDir: proj }), 'rules', { session_id: 's' })
-      expect(r.stdout).toContain(path.join(proj, '.agents', 'gate.yml'))
+      expect(gateStatusDir(makeIo({ projectDir: proj }))).toBe(path.join(proj, '.agents', '.gate-status'))
     }))
 })
 
@@ -101,12 +80,5 @@ describe('feedback rules in .claude and .agents', () => {
       const io = makeIo({ projectDir: proj, env: { HOME: home, CLAUDE_FEEDBACK_DIR: '/override' } })
       expect(feedbackDirs(io)).toEqual(['/override'])
       expect(feedbackDir(io)).toBe('/override')
-    }))
-
-  test('the default rules file is looked up in ~/.claude and ~/.agents', () =>
-    withDirs(async (proj, home) => {
-      fs.mkdirSync(path.join(home, '.agents', 'feedback-gate'), { recursive: true })
-      fs.writeFileSync(path.join(home, '.agents', 'feedback-gate', 'feedback_rules.md'), 'AGENTS RULES\n')
-      expect(await loadRules(makeIo({ projectDir: proj, env: { HOME: home } }), undefined)).toBe('AGENTS RULES')
     }))
 })

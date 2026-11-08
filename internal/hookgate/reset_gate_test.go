@@ -1,7 +1,5 @@
 package hookgate
 
-// tests/reset-gate.spec.ts の移植。
-
 import (
 	"os"
 	"path/filepath"

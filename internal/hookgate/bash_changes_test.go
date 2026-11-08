@@ -1,6 +1,6 @@
 package hookgate
 
-// tests/bash-changes.spec.ts の移植。実際に git リポジトリを作り（git init / commit）、mtime を os.Chtimes で動かす。
+//実際に git リポジトリを作り（git init / commit）、mtime を os.Chtimes で動かす。
 
 import (
 	"context"

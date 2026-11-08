@@ -1,6 +1,6 @@
 package hookgate
 
-// PostToolUse hook: 変更ファイルのパスをセッション別メモに記録する（src/record-changes.ts）。
+// PostToolUse hook: 変更ファイルのパスをセッション別メモに記録する。
 // PJ が gate.yaml を持つ場合のみ動く（オプトイン）。
 
 import "strings"

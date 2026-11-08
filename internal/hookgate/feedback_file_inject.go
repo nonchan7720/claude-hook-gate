@@ -1,7 +1,7 @@
 package hookgate
 
 // PostToolUse hook: files を持つ feedback ルール（ファイル種別にスコープされたルール）を、対象のファイルに触れた直後に注入する
-// （src/feedback-file-inject.ts の移植）。
+// 。
 //
 // files 付きのルールは毎プロンプトには注入されない（feedback_inject.go）。代わりに、
 //   - Read: 読んだファイル（ほぼ必ず編集の前にある。ここで届けば、編集内容を考える前にルールが手元にある）

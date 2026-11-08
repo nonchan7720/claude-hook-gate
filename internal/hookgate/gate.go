@@ -1,6 +1,6 @@
 package hookgate
 
-// gate hook 本体（src/gate.ts の移植）。PostToolUse（rules フェーズ）と Stop / SubagentStop（checks フェーズ）の両方から
+// gate hook 本体。PostToolUse（rules フェーズ）と Stop / SubagentStop（checks フェーズ）の両方から
 // 呼ばれ、gate.yaml の glob ルールに従って変更ファイルに対応するコマンドを実行する。
 //
 // 二相構造:

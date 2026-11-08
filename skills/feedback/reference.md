@@ -1,6 +1,6 @@
 # Feedback rule file: format reference
 
-What `src/feedback-rules.ts` reads. Anything not listed here is ignored by the hooks (but
+What the hooks (`internal/hookgate/feedback_rules.go`) read. Anything not listed here is ignored by the hooks (but
 costs context when the file is injected).
 
 ## Template

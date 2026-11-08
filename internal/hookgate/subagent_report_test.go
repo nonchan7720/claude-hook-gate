@@ -1,6 +1,6 @@
 package hookgate
 
-// src/subagent-report.ts のテスト。TS 版には専用の spec が無い（register.spec.ts が mod 越しに触れるだけ）ので、
+// subagent_report.go のテスト。旧 TS 版には専用の spec が無かった（register.spec.ts が mod 越しに触れるだけ）ので、
 // README「Results of subagents」の仕様どおりに状態ファイルの書き込み・引き渡し・削除を検証する。
 
 import (

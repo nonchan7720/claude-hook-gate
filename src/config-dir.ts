@@ -16,12 +16,3 @@ export async function pickConfigDir(names: readonly string[], base: string, exis
 
 /** base 直下の各候補に rel を付けたパス（存在は見ない）。 */
 export const configPaths = (io: Io, base: string, ...rel: string[]): string[] => io.configDirNames.map((name) => join(base, name, ...rel))
-
-/** base/<候補>/rel のうち最初に存在するもの。 */
-export async function findConfigPath(io: Io, base: string, ...rel: string[]): Promise<string | undefined> {
-  for (const path of configPaths(io, base, ...rel)) if (await io.exists(path)) return path
-  return undefined
-}
-
-/** プロジェクトの gate.yaml（候補のうち最初に存在するもの）。 */
-export const findGateYaml = (io: Io, base: string = io.projectDir || io.cwd): Promise<string | undefined> => findConfigPath(io, base, 'gate.yaml')

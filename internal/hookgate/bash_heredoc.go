@@ -1,6 +1,6 @@
 package hookgate
 
-// Bash コマンドのうち、実行前に「どのファイルに何を書くか」が文面から分かる heredoc の書き込みを取り出す（src/bash-heredoc.ts）。
+// Bash コマンドのうち、実行前に「どのファイルに何を書くか」が文面から分かる heredoc の書き込みを取り出す。
 // PreToolUse(Bash) で Edit / Write と同じ pre_edit の検査（feedback_guard.go）を掛け、PostToolUse(Bash) の
 // 実行後の pre_edit（feedback_bash_edit.go）はこれらのファイルを飛ばす（二重に判定しない）ため。
 //

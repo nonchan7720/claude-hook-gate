@@ -1,7 +1,5 @@
 package hookgate
 
-// tests/feedback-inject.spec.ts の移植。
-
 import (
 	"fmt"
 	"os"

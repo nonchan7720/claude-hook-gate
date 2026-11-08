@@ -1,5 +1,5 @@
 // プロジェクトルート / worktree ルートの判定（gate と feedback ルールで共通）。
-import { basename, isAbsolute, join, normpath, relpath } from './path.ts'
+import { isAbsolute, join, normpath, relpath } from './path.ts'
 
 export function relativize(p: string, projectDir: string): string {
   let rp = p
@@ -25,6 +25,3 @@ export function splitRoot(projectDir: string, path: string): [root: string, rel:
   }
   return [projectDir, relativize(path, projectDir)]
 }
-
-/** label 用: ルートが projectDir ならそのまま、worktree なら "<worktree名>/<rel>"。 */
-export const rootLabel = (root: string, projectDir: string, rel: string): string => (root === projectDir ? rel : `${basename(root)}/${rel}`)

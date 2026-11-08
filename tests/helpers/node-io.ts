@@ -8,7 +8,6 @@ import { CLAUDE_CONFIG_DIRS } from '../../src/config-dir.ts'
 import type { Lang } from '../../src/i18n.ts'
 import type { DirEntry, EnvVars, Io, RunOptions, RunResult, Stat } from '../../src/io.ts'
 import { mergeRunning, runningBand, runningLines } from '../../src/running-registry.ts'
-import { sharedDir } from '../../src/shared-run.ts'
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -21,9 +20,6 @@ export const MISSING_DOGWOOD_BIN = path.join(REPO_ROOT, 'tests', 'no-such-dogwoo
 // 一時ディレクトリに向ける（プロセスの終了時に消す）。
 export const TEST_HOME = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'gate-home-')))
 process.on('exit', () => fs.rmSync(TEST_HOME, { recursive: true, force: true }))
-
-/** projectDir（と HOME）に対応する共有ディレクトリ（src/shared-run.ts の sharedDir）。 */
-export const sharedDirOf = (projectDir: string, home: string = TEST_HOME): Promise<string> => sharedDir(makeIo({ projectDir, env: { HOME: home } }))
 
 export type NodeIoOptions = {
   projectDir: string
@@ -222,16 +218,4 @@ export async function withTmp<T>(body: (dir: string) => Promise<T> | T): Promise
   } finally {
     rmTree(dir)
   }
-}
-
-/** 実行側のロック（<ハッシュ>.*.run/info.json）が現れるまで待つ。sleep で「先に始まっている」ことを仮定しないための順序付け。 */
-export async function waitForSharedLock(proj: string, timeoutMs = 10_000): Promise<void> {
-  const dir = await sharedDirOf(proj)
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    const has = fs.existsSync(dir) && fs.readdirSync(dir).some((f) => f.endsWith('.run') && fs.existsSync(path.join(dir, f, 'info.json')))
-    if (has) return
-    await new Promise((r) => setTimeout(r, 10))
-  }
-  throw new Error('shared lock did not appear')
 }

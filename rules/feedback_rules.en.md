@@ -64,9 +64,8 @@ A rule with `files` (optional; a string or an array of globs relative to the pro
 
 ### enforce (enforcement by count)
 
-When a hook (`src/feedback-guard.ts` / `src/feedback-post-edit.ts` / `src/feedback-stop-check.ts`) can actually
-detect and enforce the rule, add `enforce:` to the frontmatter. `src/feedback-rules.ts` reads it and evaluates it on
-PreToolUse (Bash / Edit, Write, MultiEdit), PostToolUse (Edit, Write, MultiEdit) and Stop.
+When a hook can actually detect and enforce the rule, add `enforce:` to the frontmatter. The hook (`internal/hookgate/feedback_rules.go`)
+reads it and evaluates it on PreToolUse (Bash / Edit, Write, MultiEdit), PostToolUse (Edit, Write, MultiEdit) and Stop.
 
 ```yaml
 enforce:

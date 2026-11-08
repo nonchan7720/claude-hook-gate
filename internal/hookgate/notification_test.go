@@ -1,6 +1,6 @@
 package hookgate
 
-// src/notification.ts のテスト。TS 版には専用の spec が無い（register.spec.ts が mod 越しに触れるだけ）ので、
+// notification.go のテスト。旧 TS 版には専用の spec が無かった（register.spec.ts が mod 越しに触れるだけ）ので、
 // terminal-notifier / osascript / code の偽スクリプトを一時 PATH に置いて argv を記録し、引数を直接検証する。
 
 import (

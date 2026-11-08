@@ -64,8 +64,7 @@ files: ['**/*.go']           # 任意。毎プロンプトではなく、この 
 
 ### enforce（count に応じた強制力）
 
-hook（`src/feedback-guard.ts` / `src/feedback-post-edit.ts` / `src/feedback-stop-check.ts`）が
-実際にルールを検知・強制できる場合は、frontmatter に `enforce:` を追記できる。`src/feedback-rules.ts`
+hook が実際にルールを検知・強制できる場合は、frontmatter に `enforce:` を追記できる。hook（`internal/hookgate/feedback_rules.go`）
 がこれを読み、PreToolUse（Bash / Edit・Write・MultiEdit）・PostToolUse（Edit・Write・MultiEdit）・Stop で評価する。
 
 ```yaml

@@ -1,7 +1,7 @@
 package hookgate
 
 // 設定ディレクトリの候補（.claude / .agents）: どちらにあっても読め、状態ファイルは 1 か所に置く。
-// tests/config-dir.spec.ts のうち feedback ルール（feedback_rules.go）と gate.yml の綴り間違い（stop_test_gate.go）に
+// 設定ディレクトリのテストのうち feedback ルール（feedback_rules.go）と gate.yml の綴り間違い（stop_test_gate.go）に
 // 触れるテストは、それらのモジュールの移植担当が feedback_rules_test.go / stop_test_gate_test.go に足す。
 
 import (

@@ -1,8 +1,8 @@
 package hookgate
 
-// tests/feedback-bash-edit.spec.ts の移植（FeedbackBashEdits を直接呼ぶ部分）。
+// feedback_bash_edit.go のテスト（FeedbackBashEdits を直接呼ぶ部分）。
 //
-// 元のテストの大半は src/bash-changes.ts の bashStarted / bashChanges（Bash が書き換えたファイルの検出）を通して
+// 元のテストの大半は bash_changes.go の BashStarted / BashChanges（Bash が書き換えたファイルの検出）を通して
 // feedbackBashEdits を呼ぶ。それらは bash_changes.go とともに feedback_bash_edit_steps_test.go に移植してある。
 // ここには、bashChanges を通さずに FeedbackBashEdits を直接呼ぶ元のテスト（'an internal error is logged...'、addedLines）と、
 // 同じ挙動を FeedbackBashEdits の直接呼び出しで確かめる追加のテスト（TS 版には無い）を置く。

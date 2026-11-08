@@ -1,7 +1,5 @@
 package hookgate
 
-// tests/gate-sharing.spec.ts の移植。
-
 import (
 	"context"
 	"os"
