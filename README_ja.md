@@ -154,9 +154,27 @@ flowchart LR
 
 自動引き上げ（`autoCount`）が有効なら、違反したセッションごとに `count` が 1 ずつ上がります。`bump` 提案は窓内の違反回数を根拠に 3 や 5 へ一気に引き上げるもので、`apply` は提案時の `count` がファイルと一致するときだけ書き換えるため、自動引き上げと二重に上がることはありません（提案は常に現在の `count` から出ます）。
 
+### `/hook-list`
+
+このプロジェクトで feedback-gate が「いつ・何を」動かすかを、ブラウザの画面で一覧表示するコマンドです。ルールやゲートのファイルは何も書き換えません。
+
+```
+/hook-list [--no-open]
+```
+
+一覧を作るのは Go のバイナリ（`feedback-gate <claude|codex> hook-list`、`internal/hookgate/hook_list.go`）で、画面は `webui/hook-list.html`（バイナリに埋め込み）です。mod の `/hook-list`（`src/hook-list.ts`）は `scripts/hook-list.sh` でそれを呼ぶだけなので、mod のフックが動かない組織管理の環境や Codex でも、同じスクリプト（スキル `/feedback-gate:hook-list`、Codex では `bash <プラグイン>/scripts/hook-list.sh codex`）で同じ画面が出ます。HTML は `~/.claude/feedback-gate/hook-list/<プロジェクトのパス>-<ハッシュ>.html` に書き出し、既定のブラウザ（macOS は `open`、ほかは `xdg-open` か `wslview`、Windows は `start`）で開きます。開けない環境（リモートなど）や `--no-open` では、書き出したファイルのパスだけを返します。
+
+画面に出るもの:
+
+- **gate.yaml**: 見つかったファイルのパスと、`rules`（ファイル編集直後の PostToolUse。`match`・`run` のコマンド・`parallel`・`run_checks`・`dir` / `per_file_dir` / `timeout` / `policy`）、`consistency_checks`（Stop / SubagentStop。どの rule の `run_checks` にも無いものは「実行されない」と表示）、`session_start`（SessionStart。`on` / `background`）を、それぞれが動くタイミングの説明付きで。無い・YAML として読めない場合はその旨。
+- **feedback ルール**: グローバルとプロジェクトをマージした有効なルールごとに、置き場所、`count` と段階（暫定・確定・deny）、注入のされ方（毎プロンプト / `files` に一致するファイルを読んだ・編集したとき / しない）、`enforce` の各要素（イベントと実効の severity、`path` / `changed` / `when` / `unless` / `check` のコマンドなど）、ファイルのパス。続けて無効なルール（`expires` 切れ・`projects` / `when_exists` 不一致）と読めないルールを理由付きで。
+- **プラグイン設定**: `agentLaunchGuard`・`autoCount`・`language` の現在値。
+
+feedback ルールは 1 ルール 1 行の一覧表で、行を開くと上記の詳細が出ます。段階・置き場所・イベントのボタンと、名前・コマンド・glob の文字で絞り込めます（数十件のルールでも見渡せるように）。無効なルールは折りたたんで件数だけ、読めないルールは開いた状態で出します。ライト / ダークの両方に対応しています。
+
 ## スキル
 
-`skills/` に 2 つのスキルを同梱しています。プラグインと一緒に Claude Code が読み込み、`/feedback-gate:<name>` で呼び出せます（説明文から Claude が自分で使うこともあります）。それぞれ手順を書いた `SKILL.md` と、必要なときに読む参照ファイルからなり、フックの動作はスキルに依存しません。
+`skills/` に 3 つのスキルを同梱しています。プラグインと一緒に Claude Code が読み込み、`/feedback-gate:<name>` で呼び出せます（説明文から Claude が自分で使うこともあります）。それぞれ手順を書いた `SKILL.md` と、必要なときに読む参照ファイルからなり、フックの動作はスキルに依存しません。
 
 ### `/feedback-gate:feedback`
 
@@ -181,6 +199,10 @@ flowchart LR
 ```
 
 コマンドを推測せず、まずプロジェクトが実際に動かしているものを読みます。マニフェスト（言語とパッケージマネージャ）、タスクランナー（`Makefile`、`justfile`、`Taskfile.yml`、`mise` のタスク、`package.json` の scripts）、CI 設定（GitHub Actions、GitLab CI、CircleCI など）や pre-commit 系のフック、リポジトリの構成（単一パッケージ、ワークスペース、1 ディレクトリ 1 パッケージ）です。それをゲートに写します。ファイル単位の lint・フォーマット検査・型検査とパッケージのテストは `rules` に（ツールがファイルを受け取れるなら `$CLAUDE_GATE_FILES` を渡す）、プロジェクト全体のテストやビルドは `consistency_checks` に置いて `run_checks` から参照し、モノレポには `per_file_dir`、各コマンドに `name`、独立したものは `parallel`、計測した所要時間から `timeout`、全体を見るコマンドには `files: false` を付けます。CI だけで必要なもの（カバレッジのアップロード、デプロイ、サービスやシークレットが要るステップ）は外して報告に列挙します。引き渡す前に、各コマンドを現在のツリーで 1 回ずつ実行し（通常の権限確認を通ります）、スキーマのキー一覧と照合し、`.gitignore` に `.claude/.gate-status/` があることを確かめます。`review` は現在のファイルと CI のずれを編集せずに報告します。フィールドのリファレンス、調査のチェックリスト、ツールチェーン別のレシピ（TypeScript、ワークスペース、Python、Go、Rust、Ruby、JVM、Terraform、シェル、Makefile 駆動）は `skills/gate/` にあります。
+
+### `/feedback-gate:hook-list`
+
+[`/hook-list`](#hook-list) と同じ画面を、`scripts/hook-list.sh` を実行して出します（引数は `--no-open`）。mod の `/hook-list` が使えない組織管理の環境で使います。プロジェクトにどんな hook・gate のルール・feedback ルールが登録されているかを尋ねられたときに、Claude が自分で使うこともあります。
 
 ## インストール
 
@@ -316,11 +338,11 @@ checks フェーズ（Stop / SubagentStop）で 1 件以上のコマンドが実
 - **追加するコンテキスト**: UserPromptSubmit で、ルールファイルと確定したフィードバックルール（`count >= 3`）をコンテキストに加えます。PostToolUse・Stop・SubagentStop では、gate の結果とルール違反を Claude に返します（フィードバックかブロックの理由として）。PostToolUse(Agent) では、終わったサブエージェントの結果を呼び出し元のコンテキストに加えます。
 - **settings hook**: `hooks/hooks.json` はイベントごとに `command` hook を登録しており、`scripts/hook.sh` を経由して、イベントの JSON を stdin で渡した `feedback-gate claude <Event>`（Go 製のバイナリ）を実行します。mod のフックと同じ検査を行い、同じもの（deny / ask、block、追加する context）を返すので、上の各点はこちらにも当てはまります。セッションの mod のマーカーがあるとき、またはバイナリがキャッシュにも無くダウンロードもできないときは、何もせずに終わります。プラグイン設定は環境変数 `CLAUDE_PLUGIN_OPTION_*` から読みます。
 - **コマンド**: セッション開始時に `/correct` を登録し、`command.run` のフックはこのコマンドにだけ応答します。
-- **同梱ファイル**: `hooks/register.js` は `src/` から `scripts/build.ts` で作るもので、minify していません。`hooks/vendor/yaml.js` と `hooks/vendor/i18next.js` は npm パッケージの [`yaml`](https://www.npmjs.com/package/yaml) と [`i18next`](https://www.npmjs.com/package/i18next)（`package.json` / `bun.lock` で固定した版）で、ファイルを小さくするためだけに minify しています。`hooks/vendor/locales.js` は `locales/*.yaml` の文面を文字列として持つだけのファイルです。検査で報告される getter、`Object.defineProperty`、Promise の判定（`typeof x.then === "function"`）は、この 2 つのライブラリ側のコードです（yaml のドキュメントのクラス、i18next の非同期読み込み）。プラグイン自身のコードは `Proxy`、`eval`、`new Function` を使っていません。
+- **同梱ファイル**: `hooks/register.js` は `src/` から `scripts/build.ts` で作るもので、minify していません。メッセージの文面（`locales/<lang>.yaml`）は `hooks/vendor/locales-<lang>.js` に文字列のまま切り出しています（`register.js` の大きさを抑えるため）。`hooks/vendor/yaml.js` と `hooks/vendor/i18next.js` は npm パッケージの [`yaml`](https://www.npmjs.com/package/yaml) と [`i18next`](https://www.npmjs.com/package/i18next)（`package.json` / `bun.lock` で固定した版）で、ファイルを小さくするためだけに minify しています。検査で報告される getter、`Object.defineProperty`、Promise の判定（`typeof x.then === "function"`）は、この 2 つのライブラリ側のコードです（yaml のドキュメントのクラス、i18next の非同期読み込み）。プラグイン自身のコードは `Proxy`、`eval`、`new Function` を使っていません。
 
 ## 開発
 
-[Bun](https://bun.sh) と [Go](https://go.dev)（1.27 以上）が必要です。[mise](https://mise.jdx.dev/) を使うなら、`mise install` で `mise.toml` に書いた道具（bun、node、go、golangci-lint、goreleaser）がすべて入り、`mise run lint|fmt|test|build` が入口になります（下記）。フックのモジュールは Claude Code の中で動き、相対 import と `claude-code` しか解決できないため、`src/` のソース（と `yaml`・`i18next` パッケージ、文字列として取り込む `locales/*.yaml`）を `hooks/register.js` にバンドルします。`yaml` と `i18next` は minify して `hooks/vendor/*.js` に、`locales/*.yaml` の文面は `hooks/vendor/locales.js` に切り出し、バンドルから相対パスで import します。Claude のプラグインディレクトリの「1 ファイル 256 KiB 未満」という制限に余裕を持って収めつつ、プラグイン自身のコードは読める形で残すためです。`hooks/hooks.json` はこのバンドルを指します。ファイルやプロセスへのアクセスはすべてエンジンの `$` API（`$.fs`、`$.process`、`$.env`、`$.session`）を、`src/io.ts` の `Io` インターフェース越しに使います。テストは同じコードを Node の `fs` / `child_process` の上で動かします。
+[Bun](https://bun.sh) と [Go](https://go.dev)（1.27 以上）が必要です。[mise](https://mise.jdx.dev/) を使うなら、`mise install` で `mise.toml` に書いた道具（bun、node、go、golangci-lint、goreleaser）がすべて入り、`mise run lint|fmt|test|build` が入口になります（下記）。フックのモジュールは Claude Code の中で動き、相対 import と `claude-code` しか解決できないため、`src/` のソース（と `yaml`・`i18next` パッケージ、文字列として取り込む `locales/*.yaml`）を `hooks/register.js` にバンドルします。`yaml` と `i18next` は minify して `hooks/vendor/*.js` に切り出し、バンドルから相対パスで import します。Claude のプラグインディレクトリの「1 ファイル 256 KiB 未満」という制限に余裕を持って収めつつ、プラグイン自身のコードは読める形で残すためです。`hooks/hooks.json` はこのバンドルを指します。ファイルやプロセスへのアクセスはすべてエンジンの `$` API（`$.fs`、`$.process`、`$.env`、`$.session`）を、`src/io.ts` の `Io` インターフェース越しに使います。テストは同じコードを Node の `fs` / `child_process` の上で動かします。
 
 コードは、検査が「それを動かすホスト」に依存しないように層を分けています。中核は classic コマンド hook の JSON を入力に取り、`Outcome` を返します。mod（`src/register.ts`）と command hook の CLI はこれを呼びます。command hook の CLI は Go 製のバイナリ `feedback-gate`（`cmd/feedback-gate`。`feedback-gate claude <Event>` / `feedback-gate codex <Event>` / `feedback-gate version` の 3 つのコマンド）で、検査は `internal/hookgate`（`src/` のモジュール 1 つにつき Go のファイル 1 つ）にあり、`locales/` のメッセージファイルは埋め込んでいます。Claude Code と Codex で違うのは `Host`（環境変数からの `options`、ホストの JSON → 中核のイベントと payload の `normalize`、中核の `Outcome` → ホストの出力の `render`）です。1 回で複数ファイルを編集するツール（Codex の `apply_patch`）はファイルごとの payload に正規化し、中核はそのために `preToolUseEdits` / `postToolUseEdits` を用意しています。
 
@@ -339,11 +361,14 @@ bun run test         # bun test（tests/*.spec.ts）
 bun run build        # src/register.ts を hooks/register.js にバンドル（+ hooks/vendor/*.js）
 bun run test:plugin  # ビルドしてから、実エンジンで hooks/register.test.ts を実行
 bun run validate:plugin  # claude plugin validate . --strict
+bun scripts/ui-screenshots.ts out/  # /hook-list の画面を撮る（tests/fixtures/hook-list/ のサンプル）
 ```
 
 TypeScript の統合テスト（`tests/cli.spec.ts`、`tests/codex-cli.spec.ts`）は Go のバイナリを子プロセスとして起動し、stdin / stdout / stderr / 終了コードを確かめます。`tests/hook-script.spec.ts` と `tests/codex-hook-script.spec.ts` は、偽のバイナリと偽のリリースのディレクトリ（`FEEDBACK_GATE_RELEASE_BASE_URL=file://...`）で `scripts/hook.sh` を確かめます。バイナリは、`FEEDBACK_GATE_BIN` があればそれを使い（CI が先に 1 度ビルドします）、無ければテストが `go build` で `node_modules/.cache/feedback-gate/feedback-gate` に作ります。
 
 バンドル（`hooks/register.js` と `hooks/vendor/`）は、プルリクエスト上で CI が生成してコミットします。貢献者がコミットする必要はありません（CI が追加するまでリポジトリには入っていません）。「Build bundle」ワークフローが、プルリクエスト（同一リポジトリのブランチ）ごとにバンドルを作り、ファイルの追加または変更があれば `chore: build bundle` コミットをそのブランチへ push します。ローカルで必要なとき（`bun run test:plugin` など）は `bun run build` で作れますが、コミットしないでください。手で編集もしないでください。`scripts/build.ts` は、バンドルが相対パスと `claude-code` 以外を import していたとき、または出力ファイルのどれかが 200 KiB 以上になったときにビルドを失敗させます。また、出力に含まれる見えない文字を `\uXXXX` のエスケープに書き換えます。`classic.PreToolUse` フックの引数名が `hooks/register.js` のほかの場所に出てくるときも失敗させます（プラグインディレクトリは、`next` に渡るイベントを追えない権限フックを受け付けないため）。CI ワークフローは、作ったバンドルに対して `claude plugin validate . --strict` と `claude plugin test .` を実行します。Claude Code の CLI は `devDependencies` の `@anthropic-ai/claude-code` を使います（`bun.lock` で版を固定し、Dependabot が更新します）。
+
+`/hook-list` の画面（`webui/hook-list.html`）は、「UI screenshots」ワークフローがプルリクエスト（同一リポジトリのブランチ）ごとに `tests/fixtures/hook-list/` のサンプルで撮り（`bun scripts/ui-screenshots.ts <出力先>`。ローカルでも同じ）、プルリクエストのコメントに貼ります（push のたびに同じコメントを更新）。画像は `ui-screenshots` ブランチの `pr-<番号>/` に置き、コミットの SHA を含む URL で参照します。撮る前に、JS のエラー・データの埋め込み漏れ・読み込めない画像・横スクロール・真っ白な画像のどれかがあれば失敗させ、コメントを書く前に、各画像の URL が撮ったものと同じ内容を返すことを確かめます（欠けた画像を貼らないため）。
 
 依存には 7 日間のフリーズ期間を設けています。`bunfig.toml` の `minimumReleaseAge` により、`bun install` は公開から 7 日以上経ったバージョンだけを解決します。Dependabot（`.github/dependabot.yml`）も `cooldown` で、npm と GitHub Actions の更新を公開から 7 日経つまで提案しません。Actions はコミット SHA で固定しています。
 

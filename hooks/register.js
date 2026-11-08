@@ -238,14 +238,13 @@ async function walk(io, dir, segs, i) {
 
 // src/i18n.ts
 import i18next from "./vendor/i18next.js";
-import { en_default, ja_default } from "./vendor/locales.js";
 import { parse } from "./vendor/yaml.js";
-
-// src/i18n.ts
+import enYaml from "./vendor/locales-en.js";
+import jaYaml from "./vendor/locales-ja.js";
 var LANGS = ["ja", "en"];
 var resources = {
-  ja: parse(ja_default),
-  en: parse(en_default)
+  ja: parse(jaYaml),
+  en: parse(enYaml)
 };
 var i18n = i18next.createInstance();
 i18n.init({
@@ -1646,6 +1645,43 @@ async function createIo($, options = {}) {
       return () => timer.cancel();
     }
   };
+}
+
+// src/hook-list.ts
+var TIMEOUT_MS = 120000;
+function optionEnv(options) {
+  const env = {};
+  for (const key of ["language", "agentLaunchGuard", "autoCount", "rulesFile"]) {
+    const v = options[key];
+    if (typeof v === "string" || typeof v === "boolean")
+      env[`CLAUDE_PLUGIN_OPTION_${key}`] = String(v);
+  }
+  return env;
+}
+var PASS_ENV = ["HOME", "CLAUDE_FEEDBACK_DIR", "FEEDBACK_GATE_LANG", "LC_ALL", "LC_MESSAGES", "LANG"];
+function passEnv(io) {
+  const env = {};
+  for (const key of PASS_ENV) {
+    const v = io.env[key];
+    if (v !== undefined && v !== "")
+      env[key] = v;
+  }
+  return env;
+}
+async function hookListCommand(io, args, options = {}) {
+  const argv = ["bash", join(io.pluginRoot, "scripts", "hook-list.sh"), "claude", ...args.split(/\s+/).filter((a) => a !== "")];
+  const r = await io.run(argv, {
+    cwd: io.cwd,
+    env: { ...passEnv(io), ...optionEnv(options), CLAUDE_PROJECT_DIR: io.projectDir || io.cwd, CLAUDE_PLUGIN_ROOT: io.pluginRoot },
+    timeoutMs: TIMEOUT_MS
+  });
+  const out = r.stdout.trim();
+  if (r.exitCode === 0 && out !== "")
+    return { text: out, context: [] };
+  const reason = [r.stderr.trim(), r.error ?? "", r.timedOut ? "timed out" : ""].filter((s) => s !== "").join(`
+`);
+  return { text: `[hook-list] failed (exit ${r.exitCode})${reason === "" ? "" : `:
+${reason}`}`, context: [] };
 }
 
 // src/io.ts
@@ -4659,7 +4695,8 @@ function parseItem(raw) {
   if (typeof d.cmd !== "string" || d.cmd.trim() === "")
     return;
   const t = Number(d.timeout);
-  const on = typeof d.on === "string" ? [d.on] : Array.isArray(d.on) ? d.on.map(String) : undefined;
+  const rawOn = d.on !== undefined && d.on !== null ? d.on : d.true;
+  const on = typeof rawOn === "string" ? [rawOn] : Array.isArray(rawOn) ? rawOn.map(String) : undefined;
   return {
     cmd: d.cmd,
     name: truthy(d.name) ? String(d.name) : slug(d.cmd),
@@ -5148,10 +5185,12 @@ export const register = (on, options) => {
         description: tr(io.lang)("correct.description"),
         argumentHint: "[--window 30d] [--min 2] [apply]"
       });
+      await $.command.register({ name: "hook-list", description: tr(io.lang)("hookList.description"), argumentHint: "[--no-open]" });
     } catch {}
     return next(e);
   });
   on("command.run", { command: "correct" }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? "")));
+  on("command.run", { command: "hook-list" }, async ($, e) => hookListCommand(await createIo($, options), String(e.args ?? ""), options));
   on("classic.SessionStart", async ($, e, next) => {
     await markClassic($, options);
     const { io, sessionId } = await engineContext($, options);

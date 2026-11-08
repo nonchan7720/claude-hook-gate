@@ -2,6 +2,7 @@ import type { Engine, HookEvent, HookResult, PluginOptions, Register } from 'cla
 import { correctCommand } from './correct.ts'
 import { createIo } from './engine-io.ts'
 import { feedbackDir } from './feedback-rules.ts'
+import { hookListCommand } from './hook-list.ts'
 import * as hooks from './hooks.ts'
 import { tr } from './i18n.ts'
 import type { Io } from './io.ts'
@@ -75,6 +76,7 @@ export const register: Register = (on, options) => {
         description: tr(io.lang)('correct.description'),
         argumentHint: '[--window 30d] [--min 2] [apply]',
       })
+      await $.command.register({ name: 'hook-list', description: tr(io.lang)('hookList.description'), argumentHint: '[--no-open]' })
     } catch {
       // コマンド API の無いエンジンでもセッション開始は止めない。
     }
@@ -82,6 +84,9 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'correct' }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? '')))
+
+  // /hook-list: gate.yaml と feedback ルールが、いつ・何を動かすかをブラウザで一覧にする（Go のバイナリを scripts/hook-list.sh で呼ぶだけ）。
+  on('command.run', { command: 'hook-list' }, async ($, e) => hookListCommand(await createIo($, options), String(e.args ?? ''), options))
 
   on('classic.SessionStart', async ($, e, next) => {
     await markClassic($, options)

@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>feedback-gate hooks</title>
+<!--
+  `feedback-gate <claude|codex> hook-list`（Go: internal/hookgate/hook_list.go）が出す画面。Claude Code の /hook-list（src/hook-list.ts）も
+  scripts/hook-list.sh 経由でそれを呼ぶ。Go 版は一覧のデータ（JSON）を作って下の hook-list-data の script 要素に埋め込むだけで、
+  描画はすべてこのファイルの JS が行う。外部のファイルは読まない（file:// で開く）。
+-->
+<style>
+:root {
+  --bg: #f7f7f5; --surface: #ffffff; --surface-2: #f1f1ee; --border: #e2e1dc; --text: #1f1f1c; --muted: #6b6a63;
+  --accent: #3b5bdb; --accent-soft: #e7ecff; --ok: #2b8a3e; --ok-soft: #e6f4ea; --warn: #b26a00; --warn-soft: #fff3df;
+  --bad: #c92a2a; --bad-soft: #ffe9e9; --code-bg: #f3f2ee;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615; --surface: #1f1f1d; --surface-2: #272725; --border: #353532; --text: #ecebe6; --muted: #a09f97;
+    --accent: #8ea4ff; --accent-soft: #252c47; --ok: #69c47f; --ok-soft: #1c3324; --warn: #f0b552; --warn-soft: #3a2d15;
+    --bad: #ff8a8a; --bad-soft: #3d1f1f; --code-bg: #2a2a27;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161615; --surface: #1f1f1d; --surface-2: #272725; --border: #353532; --text: #ecebe6; --muted: #a09f97;
+  --accent: #8ea4ff; --accent-soft: #252c47; --ok: #69c47f; --ok-soft: #1c3324; --warn: #f0b552; --warn-soft: #3a2d15;
+  --bad: #ff8a8a; --bad-soft: #3d1f1f; --code-bg: #2a2a27;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; }
+code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; }
+main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 64px; }
+header h1 { margin: 0 0 4px; font-size: 22px; }
+header .sub { color: var(--muted); word-break: break-all; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px; min-width: 110px; }
+.stat b { display: block; font-size: 20px; }
+.stat span { color: var(--muted); font-size: 12px; }
+nav { position: sticky; top: 0; z-index: 1; background: var(--bg); display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+nav a { color: var(--text); text-decoration: none; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); }
+nav a:hover { border-color: var(--accent); }
+nav input { flex: 1; min-width: 180px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; }
+section { scroll-margin-top: 120px; margin-bottom: 32px; }
+h2 { font-size: 18px; margin: 0 0 8px; }
+h3 { font-size: 15px; margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.phase { margin: 16px 0; }
+.when { color: var(--muted); margin: 4px 0 10px; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin: 8px 0; }
+.card.dim { opacity: .75; }
+.row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 6px 0; }
+.label { color: var(--muted); font-size: 12px; min-width: 76px; }
+.chip { display: inline-block; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); font-size: 12px; white-space: nowrap; }
+.chip.code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: normal; word-break: break-all; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 6px; font-size: 12px; font-weight: 600; background: var(--accent-soft); color: var(--accent); }
+.pill.ok { background: var(--ok-soft); color: var(--ok); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.muted { background: var(--surface-2); color: var(--muted); }
+.cmds { list-style: none; margin: 4px 0 0; padding: 0; }
+.cmds li { margin: 4px 0; display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.cmds .name { font-weight: 600; font-size: 12.5px; }
+.cmds code { background: var(--code-bg); padding: 2px 6px; border-radius: 6px; white-space: pre-wrap; word-break: break-all; }
+.par { border-left: 3px solid var(--accent); padding: 2px 0 2px 10px; margin: 6px 0; }
+.par > .label { display: block; color: var(--accent); }
+.note { color: var(--muted); font-size: 12px; }
+.enforce { border-top: 1px dashed var(--border); margin-top: 8px; padding-top: 8px; }
+dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 6px 0 0 4px; }
+dt { color: var(--muted); font-size: 12px; }
+dd { margin: 0; }
+.val { background: var(--code-bg); padding: 1px 6px; border-radius: 6px; white-space: pre-wrap; word-break: break-all; }
+.path { color: var(--muted); font-size: 12px; word-break: break-all; margin-top: 6px; }
+.empty { color: var(--muted); padding: 10px 0; }
+table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+td { padding: 8px 12px; border-top: 1px solid var(--border); vertical-align: top; }
+tr:first-child td { border-top: 0; }
+.fbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0 12px; }
+.fbar .label { min-width: 0; margin: 0 2px 0 8px; }
+.fbar .label:first-child { margin-left: 0; }
+.fbtn { font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+.fbtn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.rtable { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.rhead, .rsum { display: grid; grid-template-columns: minmax(140px, 1.4fr) 110px 150px minmax(160px, 1.6fr) minmax(140px, 1.2fr); gap: 10px; align-items: center; padding: 8px 12px; }
+.rhead { color: var(--muted); font-size: 12px; background: var(--surface-2); }
+.rrow { border-top: 1px solid var(--border); }
+.rrow > summary { list-style: none; cursor: pointer; }
+.rrow > summary::-webkit-details-marker { display: none; }
+.rrow > summary:hover { background: var(--surface-2); }
+.rrow[open] > summary { background: var(--accent-soft); }
+.rsum .nm::before { content: "▸ "; color: var(--muted); }
+.rrow[open] .rsum .nm::before { content: "▾ "; }
+.rdetail { padding: 4px 14px 12px 28px; }
+.rdetail .card { border: 0; padding: 0; margin: 0; background: none; }
+.cell-note { color: var(--muted); font-size: 12px; }
+.msum { cursor: pointer; margin: 12px 0 6px; font-weight: 600; }
+@media (max-width: 760px) { .rhead { display: none; } .rsum { grid-template-columns: 1fr 1fr; } }
+.hidden { display: none; }
+@media (max-width: 600px) { dl { grid-template-columns: 1fr; } .label { min-width: 0; } }
+</style>
+</head>
+<body>
+<main id="app"></main>
+<script id="hook-list-data" type="application/json">"__HOOK_LIST_DATA__"</script>
+<script>
+(() => {
+  var data = JSON.parse(document.getElementById('hook-list-data').textContent);
+  var L = data.labels || {};
+  function t(key, vars) {
+    var s = L[key] !== undefined ? L[key] : key;
+    return s.replace(/\{\{(\w+)\}\}/g, (_, k) => vars && vars[k] !== undefined ? String(vars[k]) : '');
+  }
+  function el(tag, cls, kids) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    (kids || []).forEach((k) => { if (k !== null && k !== undefined) e.appendChild(typeof k === 'string' ? document.createTextNode(k) : k); });
+    return e;
+  }
+  function chip(text, code) { return el('span', code ? 'chip code' : 'chip', [text]); }
+  function pill(text, kind) { return el('span', `pill${kind ? ` ${kind}` : ''}`, [text]); }
+  function row(label, kids) { return el('div', 'row', [el('span', 'label', [label])].concat(kids)); }
+  function pairs(list) { return (list || []).map((p) => chip(`${p[0]}: ${p[1]}`)); }
+
+  function cmdList(nodes) {
+    var ul = el('ul', 'cmds');
+    (nodes || []).forEach((n) => {
+      var li = el('li');
+      if (n.parallel) {
+        li.appendChild(el('div', 'par', [el('span', 'label', [t('parallel')]), cmdList(n.parallel)]));
+      } else {
+        if (n.name) li.appendChild(el('span', 'name', [n.name]));
+        li.appendChild(el('code', null, [n.cmd]));
+        (n.notes || []).forEach((x) => { li.appendChild(el('span', 'note', [x])); });
+      }
+      ul.appendChild(li);
+    });
+    return ul;
+  }
+
+  function phase(title, count, events, when, cards) {
+    var box = el('div', 'phase', [
+      el('h3', null, [title, pill(String(count), 'muted')].concat(events.map((e) => pill(e)))),
+      el('div', 'when', [when]),
+    ]);
+    if (cards.length === 0) box.appendChild(el('div', 'empty', [t('none')]));
+    cards.forEach((c) => { box.appendChild(c); });
+    return box;
+  }
+
+  function gateSection(g) {
+    var s = el('section', null, [el('h2', null, ['gate.yaml'])]);
+    s.id = 'gate';
+    if (!g?.path) { s.appendChild(el('div', 'card empty', [t('gateMissing')])); return s; }
+    s.appendChild(el('div', 'path', [g.path]));
+    if (g.error) { s.appendChild(el('div', 'card', [pill(t('broken'), 'bad'), ' ', t('gateUnreadable', { reason: g.error })])); return s; }
+    s.appendChild(phase(t('gateRules'), g.rules.length, ['PostToolUse'], t('gateRulesWhen'), g.rules.map((r, i) => {
+      var c = el('div', 'card', [el('h3', null, [`#${i + 1}`])]);
+      c.appendChild(row('match', r.match.map((m) => chip(m, true))));
+      if (r.options.length) c.appendChild(row(t('settings'), pairs(r.options)));
+      c.appendChild(row('run', []));
+      c.appendChild(cmdList(r.run));
+      if (r.runChecks.length) c.appendChild(row('run_checks', r.runChecks.map((n) => chip(n)).concat([el('span', 'note', [t('runChecksNote')])])));
+      return c;
+    })));
+    s.appendChild(phase(t('gateChecks'), g.checks.length, ['Stop', 'SubagentStop'], t('gateChecksWhen'), g.checks.map((ch) => {
+      var head = [ch.name];
+      if (!ch.referenced) head.push(pill(t('unreferenced'), 'warn'));
+      var c = el('div', `card${ch.referenced ? '' : ' dim'}`, [el('h3', 'mono', head)]);
+      if (ch.options.length) c.appendChild(row(t('settings'), pairs(ch.options)));
+      c.appendChild(cmdList(ch.run));
+      return c;
+    })));
+    s.appendChild(phase(t('gateSessionStart'), g.sessionStart.length, ['SessionStart'], t('gateSessionStartWhen'), g.sessionStart.map((x) => el('div', 'card', [cmdList([x])]))));
+    if (g.settings.length) s.appendChild(el('div', 'card', [row(t('gateSettings'), pairs(g.settings))]));
+    return s;
+  }
+
+  var LEVEL_KIND = { provisional: 'muted', confirmed: 'warn', deny: 'bad' };
+  var SEVERITY_KIND = { deny: 'bad', ask: 'warn', block: 'warn', warn: 'muted' };
+
+  function injection(inj) {
+    if (inj.kind === 'none') return t('injectNone');
+    if (inj.kind === 'prompt') return t('injectEveryPrompt');
+    return t('injectFiles', { globs: inj.files.join(', '), exclude: inj.exclude.length ? t('injectExclude', { globs: inj.exclude.join(', ') }) : '' });
+  }
+
+  function ruleCard(r) {
+    var c = el('div', 'card', [el('h3', null, [
+      el('span', 'mono', [r.name]),
+      pill(t(`scope.${r.scope}`), r.scope === 'project' ? '' : 'muted'),
+      pill(`count ${r.count} · ${t(`level.${r.level}`)}`, LEVEL_KIND[r.level]),
+    ])]);
+    if (r.description) c.appendChild(el('div', null, [r.description]));
+    c.appendChild(el('div', 'note', [t(`levelNote.${r.level}`)]));
+    c.appendChild(row(t('inject'), [el('span', null, [injection(r.inject)])]));
+    if (r.enforce.length === 0) c.appendChild(row('enforce', [el('span', 'note', [t('noEnforce')])]));
+    r.enforce.forEach((e) => {
+      var desc = L[`event.${e.event}`] !== undefined ? t(`event.${e.event}`) : '';
+      var box = el('div', 'enforce', [el('div', 'row', [pill(e.event), pill(e.severity, SEVERITY_KIND[e.severity] || 'muted'), el('span', 'note', [desc])])]);
+      var dl = el('dl');
+      e.fields.forEach((f) => { dl.appendChild(el('dt', null, [f[0]])); dl.appendChild(el('dd', null, [f[0] === 'message' ? f[1] : el('code', 'val', [f[1]])])); });
+      if (e.fields.length) box.appendChild(dl);
+      c.appendChild(box);
+    });
+    c.appendChild(el('div', 'path', [r.path]));
+    return c;
+  }
+
+  var FILTERS = { level: {}, scope: {}, event: {} };
+  function feedbackSection(f) {
+    var s = el('section', null, [el('h2', null, [t('feedbackHeader')])]);
+    s.id = 'feedback';
+    function btn(group, value, text) {
+      var b = el('button', 'fbtn', [text]);
+      b.type = 'button';
+      b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', () => {
+        FILTERS[group][value] = !FILTERS[group][value];
+        b.setAttribute('aria-pressed', String(FILTERS[group][value]));
+        applyFilter();
+      });
+      return b;
+    }
+    // 有効なルールが無くても、続く無効・読めないルールの一覧は出す（全部読めないときこそ要る）。
+    if (f.rules.length === 0) {
+      s.appendChild(el('div', 'card empty', [t('none')]));
+    } else {
+      s.appendChild(el('div', 'fbar', [el('span', 'label', [t('filterLevel')]), btn('level', 'provisional', t('level.provisional')), btn('level', 'confirmed', t('level.confirmed')), btn('level', 'deny', t('level.deny')),
+        el('span', 'label', [t('filterScope')]), btn('scope', 'global', t('scope.global')), btn('scope', 'project', t('scope.project')),
+        el('span', 'label', [t('filterEvent')]), btn('event', 'pre_bash', 'pre_bash'), btn('event', 'pre_edit', 'pre_edit'), btn('event', 'post_edit', 'post_edit'), btn('event', 'stop_check', 'stop_check')]))
+      const table = el('div', 'rtable', [el('div', 'rhead', [el('span', null, [t('colName')]), el('span', null, [t('colScope')]), el('span', null, [t('colLevel')]), el('span', null, [t('colInject')]), el('span', null, [t('colEnforce')])])]);
+      f.rules.forEach((r) => {
+        var inj = r.inject.kind === 'files' ? r.inject.files.join(', ') : r.inject.kind === 'prompt' ? t('injectShortPrompt') : t('injectShortNone');
+        var sum = el('summary', 'rsum', [
+          el('span', 'mono nm', [r.name]),
+          el('span', null, [pill(t(`scope.${r.scope}`), r.scope === 'project' ? '' : 'muted')]),
+          el('span', null, [pill(`${r.count} · ${t(`level.${r.level}`)}`, LEVEL_KIND[r.level])]),
+          el('span', 'cell-note mono', [inj]),
+          el('span', null, r.enforce.length ? r.enforce.map((e) => pill(e.event, SEVERITY_KIND[e.severity] || 'muted')) : [el('span', 'cell-note', [t('enforceNone')])]),
+        ]);
+        var row = el('details', 'rrow', [sum, el('div', 'rdetail', [ruleCard(r)])]);
+        row.dataset.level = r.level;
+        row.dataset.scope = r.scope;
+        row.dataset.events = r.enforce.map((e) => e.event).join(' ');
+        table.appendChild(row);
+      });
+      s.appendChild(table);
+    }
+    if (f.inactive.length) {
+      const d = el('details', 'more', [el('summary', 'msum', [t('inactiveHeader'), ' ', pill(String(f.inactive.length), 'muted')])]);
+      f.inactive.forEach((r) => {
+        d.appendChild(el('div', 'card dim', [el('h3', null, [el('span', 'mono', [r.name]), pill(t('inactive'), 'muted')]), el('div', null, [r.reason]), el('div', 'path', [r.path])]));
+      });
+      s.appendChild(d);
+    }
+    if (f.broken.length) {
+      const bd = el('details', 'more', [el('summary', 'msum', [t('brokenHeader'), ' ', pill(String(f.broken.length), 'bad')])]);
+      bd.open = true;
+      f.broken.forEach((b) => { bd.appendChild(el('div', 'card', [el('div', 'mono', [b.path]), el('div', 'note', [b.reason])])); });
+      s.appendChild(bd);
+    }
+    return s;
+  }
+
+  function on(group) { return Object.keys(FILTERS[group]).filter((k) => FILTERS[group][k]); }
+  function applyFilter() {
+    var q = (document.querySelector('nav input').value || '').trim().toLowerCase();
+    var lv = on('level'), sc = on('scope'), ev = on('event');
+    document.querySelectorAll('.rrow').forEach((r) => {
+      var ok = (lv.length === 0 || lv.includes(r.dataset.level)) && (sc.length === 0 || sc.includes(r.dataset.scope)) &&
+        (ev.length === 0 || ev.some((e) => r.dataset.events.split(' ').includes(e))) && (q === '' || r.textContent.toLowerCase().includes(q));
+      r.classList.toggle('hidden', !ok);
+    });
+    document.querySelectorAll('#gate .card').forEach((c) => { c.classList.toggle('hidden', q !== '' && !c.textContent.toLowerCase().includes(q)); });
+  }
+
+  function optionsSection(o) {
+    var s = el('section', null, [el('h2', null, [t('optionsHeader')])]);
+    s.id = 'options';
+    var tb = el('table');
+    function onOff(v) { return pill(t(v ? 'on' : 'off'), v ? 'ok' : 'muted'); }
+    [['agentLaunchGuard', onOff(o.agentLaunchGuard), t('agentLaunchGuard')], ['autoCount', onOff(o.autoCount), t('autoCount')], ['language', pill(o.language, 'muted'), t('language')]].forEach((r) => {
+      tb.appendChild(el('tr', null, [el('td', 'mono', [r[0]]), el('td', null, [r[1]]), el('td', 'note', [r[2]])]));
+    });
+    s.appendChild(tb);
+    return s;
+  }
+
+  var g = data.gate || {}, f = data.feedback;
+  var app = document.getElementById('app');
+  document.documentElement.lang = data.lang || 'en';
+  document.title = `${t('title')} — ${data.project}`;
+  function stat(n, label) { return el('div', 'stat', [el('b', null, [String(n)]), el('span', null, [label])]); }
+  app.appendChild(el('header', null, [el('h1', null, [t('title')]), el('div', 'sub mono', [data.project]), el('div', 'sub', [t('generated', { time: new Date(data.generatedAt).toLocaleString() })])]));
+  app.appendChild(el('div', 'stats', [
+    stat((g.rules || []).length, t('gateRules')), stat((g.checks || []).length, t('gateChecks')), stat((g.sessionStart || []).length, t('gateSessionStart')),
+    stat(f.rules.length, t('active')), stat(f.inactive.length, t('inactive')), stat(f.broken.length, t('broken')),
+  ]));
+  var filter = el('input');
+  filter.type = 'search';
+  filter.placeholder = t('filter');
+  function link(href, text) { var a = el('a', null, [text]); a.href = href; return a; }
+  app.appendChild(el('nav', null, [link('#gate', 'gate.yaml'), link('#feedback', t('feedbackHeader')), link('#options', t('optionsHeader')), filter]));
+  app.appendChild(gateSection(g));
+  app.appendChild(feedbackSection(f));
+  app.appendChild(optionsSection(data.options));
+  filter.addEventListener('input', applyFilter);
+})();
+</script>
+</body>
+</html>

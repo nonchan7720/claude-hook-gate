@@ -18,8 +18,8 @@ const skillDirs = fs
   .sort()
 
 describe('skills/', () => {
-  test('feedback と gate の 2 つを同梱する', () => {
-    expect(skillDirs).toEqual(['feedback', 'gate'])
+  test('feedback・gate・hook-list の 3 つを同梱する', () => {
+    expect(skillDirs).toEqual(['feedback', 'gate', 'hook-list'])
   })
 
   for (const dir of skillDirs) {

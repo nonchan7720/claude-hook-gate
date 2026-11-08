@@ -1,0 +1,226 @@
+var e=`# Messages printed by the hooks (English). Has the same keys as ja.yaml (tests/i18n.spec.ts checks the key sets match).
+# {{name}} is i18next interpolation.
+notify:
+  waiting: "Waiting for you"
+  waitingFallback: "Claude is waiting for your input"
+  done: "Done"
+  doneFallback: "The response has finished"
+
+inject:
+  header: "# Confirmed feedback rules (count >= 3)\\nThese rules were pointed out repeatedly and are confirmed. A hook blocks violations.\\n\\n"
+  ruleTitle: "■ {{name}} (pointed out {{count}} times so far)"
+  fileHeaderRead: "# Feedback rules for {{files}}\\nThese confirmed rules apply to the file you just read. Follow them when you edit it or write files like it. A hook blocks violations.\\n\\n"
+  fileHeaderEdit: "# Feedback rules for {{files}}\\nThese confirmed rules apply to the file you just edited. Check that edit against them and follow them in the edits that follow. A hook blocks violations.\\n\\n"
+  brokenRules: "# Unreadable feedback rules\\nThe following rule files could not be read and are disabled (where only an enforce entry is invalid, only that entry is disabled). Their enforcement does not work until they are fixed. Tell the user:"
+
+rules:
+  unreadable: "cannot read the file: {{error}}"
+  enforceNotList: "enforce is not a list ({{type}}). Write each entry as \`- event: ...\`"
+  enforceItemNotMapping: "enforce[{{index}}] is not a mapping ({{type}})"
+  badRegex: "enforce[{{index}}].{{key}} is not a usable regular expression: {{error}}"
+  evalError: "enforce[{{index}}] failed to evaluate: {{error}}"
+
+guard:
+  evaluating: "[feedback-guard] evaluating: {{rule}}"
+
+newRule:
+  header: "[feedback-gate] Before creating the new rule {{file}}, check the existing rules (★ = similar name / description, {{n}} found):"
+  more: "…and {{n}} more"
+  instruction: "If a rule already covers the same feedback or kind of situation, do not create a new file; update that rule: raise its count by 1 (unless a hook already did in this session), add this case and the excuse to the body, and generalize the wording. If several rules are close, propose merging them. Only when none fits, run the same write again (it is not stopped the second time)."
+
+postEdit:
+  checking: "[feedback-post-edit] checking: {{rule}} ({{file}})"
+
+bashEdit:
+  header: "[feedback] Files rewritten by Bash violate feedback rules (the same checks as Edit / Write)."
+  preEditAfter: "Note: this is a pre_edit rule, but with Bash the content cannot be known before it runs, so it was detected after the command (the file is already written; fix it to follow the rule)."
+
+stopCheck:
+  checking: "[feedback-stop-check] checking: {{rule}} ({{file}})"
+  gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."
+  fixAbove: "[feedback-stop-check] Fix the above (attempt {{attempt}}/{{max}})."
+
+subagentReport:
+  header: "[feedback-gate] Results of the hooks run when subagent {{agent}} stopped (gate checks and feedback stop_check). Use these instead of reading the gate logs or re-running the checks:"
+
+autoCount:
+  bumped: "[feedback-gate] Violation detected: raised the count of {{rule}} from {{from}} to {{to}} ({{path}}). Repeating the same violation escalates enforcement (warn → ask/block → deny)."
+
+codex:
+  askAsDeny: "[feedback-gate] Codex has no ask in PreToolUse, so this rule denied the call. Read the reason above and fix the call; the same rule on the same target is only warned about from the next call in this session."
+
+launch:
+  checklist: "--- Check: what to do / background / current state of the code / what not to do / done criteria"
+  promptTo: "Prompt to send to {{agentType}}:"
+  messageTo: "Message to send to {{recipient}}:"
+  unknownRecipient: "unknown recipient"
+
+correct:
+  description: "Aggregate the feedback rules and the violation log, and propose count bumps and enforce additions"
+  enforceTemplate: |-
+    enforce:
+      - event: pre_bash
+        when: 'regex'
+        unless: 'regex'
+        message: 'instruction shown on violation'
+      - event: pre_edit
+        path: 'glob'
+        when: 'regex'
+        message: 'instruction shown on violation'
+      - event: post_edit
+        path: 'glob'
+        when: 'regex'
+        message: 'instruction shown on violation'
+      - event: stop_check
+        changed: 'glob'
+        check: 'shell cmd'
+        message: 'instruction shown on violation'
+  expired: "expires ({{date}}) has passed"
+  conditions: "the conditions"
+  notMatching: "{{what}} do not match this project, so the rule is inactive"
+  topDetail: ". Most frequent: {{detail}}"
+  bumpToConfirmed: "{{n}} violations in the last {{window}} ({{counts}}). Promote to a confirmed rule{{top}}"
+  bumpToDeny: "ask / block {{strong}} times in the last {{window}} ({{counts}}). Raise to deny{{top}}"
+  noEnforce: "Confirmed rule with count {{count}} but no enforce, so no hook can detect it (and it never appears in the violation log)"
+  stale: "Has enforce but has never appeared in the violation log. Check that the enforce works and that the rule is not out of date"
+  expiredAction: "{{reason}}. Consider deleting or updating it"
+  broken: "unreadable and disabled: {{reason}}. Fix the file"
+  reportHeader: "[correct] last {{window}}: {{rules}} rules / {{violations}} violations"
+  noProposals: "No proposals."
+  applyNone: "apply: no files were rewritten."
+  applyDone: "apply: count was rewritten."
+  applyHint: "\`/correct apply\` writes the count bumps of the bump proposals to the files (enforce is proposal only)."
+  context: |-
+    This is the result of /correct. Present the proposals above to the user.
+    - For an enforce addition, derive a regex / glob from the body of the rule and propose a concrete entry (template: the enforce section of rules/feedback_rules.md).
+    - Always ask the user before rewriting any file (as the rules in rules/feedback_rules.md say).
+    - For stale / expired, ask the user whether to keep, update or delete the rule.
+    - For broken, explain why the file cannot be read (YAML syntax, regex syntax and so on) and propose a fix (rewrite Python-only regex syntax into a form JavaScript accepts).
+  contextApplied: "- apply has already rewritten count in the following files. Tell the user so: {{list}}"
+
+band:
+  running: "[gate] running:"
+  waiting: "waiting"
+  done: "[gate] done: {{counts}} ({{seconds}}s)"
+
+dogwood:
+  notFound: "dogwood binary not found (check DOGWOOD_BIN / PATH / ~/.cargo/bin)"
+  runFailed: "failed to run dogwood: {{error}}"
+  exited: "dogwood replay exited abnormally (exit {{code}}): {{detail}}"
+  badJson: "could not parse the output of dogwood replay as JSON"
+  noVerdict: "dogwood replay returned no verdict"
+  badVerdict: "could not interpret the verdict of dogwood replay: {{verdict}}"
+
+gate:
+  restOmitted: "… (rest omitted)"
+  failuresOmitted: "… ({{n}} more failures omitted; see the [gate] log path of each)"
+  policyNotFound: "=== [gate] The policy file was not found: {{policy}}. Running without policy evaluation. ==="
+  sharedResult: "[gate] The same run was in progress in another agent, so its result was taken over (log of the running side: {{logpath}})"
+  timeout: "[gate] Killed after the timeout ({{seconds}}s). The command may be in an infinite loop or hung."
+  failedOutputHeader: "--- failed commands (the output is in each log file) ---"
+  nestedParallel: "=== [gate] ({{label}}) parallel cannot be nested inside parallel. Treated as a failure. ==="
+  deferredNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Dropping this deferred entry. ==="
+  cannotReadYaml: "cannot read gate.yaml: {{path}}"
+  andMore: " and {{n}} more"
+  skipUnmatched: "[gate] skip: {{files}} (matches no rule)"
+  badPerFileDir: "=== [gate] Invalid per_file_dir value: {{value}} (use true / \\"file\\" / \\"pattern_root\\"). Skipping this rule. ==="
+  skipBadPerFileDir: "[skip: invalid per_file_dir]"
+  rootNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this root. ==="
+  ruleNoCwd: "=== [gate] ({{label}}) cwd does not exist: {{cwd}}. Skipping this rule. ==="
+  checkNoCwd: "=== [gate] (check:{{name}}) cwd does not exist: {{cwd}}. Skipping this check. ==="
+  skipNoCwd: "[skip: no cwd]"
+  noteNoCwd: "(cwd does not exist)"
+  worktreeNotFound: "=== [gate] worktree not found: {{root}}. Excluding it. ==="
+  rulesFailed: "[gate] Verification failed. Stopping (and reporting the work as done) is blocked until it is fixed. The command output is not shown here: open the log file of each failed command (the [gate] log: path above), find the errors and fix them now."
+  rulesPassed: "[gate] rules phase passed:\\n{{body}}"
+  checkNotFound: "=== [gate] \\"{{name}}\\" was not found in consistency_checks. Skipping. ==="
+  checkNotFoundSummary: "(check:{{name}}) not found, skipped"
+  skipCheckUndefined: "[gate] skip: check:{{name}} (not defined in consistency_checks)"
+  nothingToRun: "(nothing to run)"
+  allPassed: "[gate] All checks passed: {{labels}}. Report this result to the user and finish."
+  passedReport: "[gate] All checks passed: {{labels}}"
+  deferredTitle: "deferred verification commands"
+  checksPassed: "[gate] {{title}} passed:\\n{{body}}"
+  checksGaveUpStderr: "consistency checks failed {{max}} times in a row. Giving up the loop; please check manually."
+  checksGaveUp: "[gate] Gave up because consistency checks failed {{max}} times in a row. The target files were returned to CHANGED unverified. Please check them manually. To clear this now, start a new session or run /clear (reset-gate on SessionStart removes the state files)."
+  checksFailed: "[gate] Verification failed (attempt {{attempt}}/{{max}}). The command output is not shown here: open the log file of each failed command (the [gate] log: path) to find the errors, and keep fixing."
+  ymlTypo: "[gate] gate.yaml was not found but {{path}} exists. Check whether the extension is yml instead of yaml."
+  policyUnevaluated: "=== [gate] ({{label}}) Skipped this time because the policy could not be evaluated (intentional throttling; no need to investigate. Queued, so it runs automatically later) [{{reason}}] $ {{cmd}} ==="
+  policySkipped: "=== [gate] ({{label}}) Skipped this time by policy (intentional throttling; no need to investigate. Queued, so it runs automatically later) $ {{cmd}} ==="
+  notePolicySkipped: "(deferred by the policy verdict; queued to run automatically later)"
+  notePolicyUnevaluated: "(deferred because the policy could not be evaluated; queued to run automatically later: {{reason}})"
+  internalError: "[gate] An internal error occurred, so the checks were skipped (work continues). See stderr for details."
+  sessionStartHeader: "[gate] session_start: {{name}}"
+  sessionStartTruncated: "[gate] session_start output was truncated (limit: {{limit}} characters)."
+  sessionStartExit: "exit status {{code}}"
+  sessionStartTimeout: "timed out after {{seconds}}s"
+  sessionStartFailed: "[gate] session_start: {{name}} failed ({{reason}}). Log: {{logpath}}"
+
+hookList:
+  description: "Show the hooks that run in this project (gate.yaml rules and feedback rules), with when and what each runs, in the browser"
+  title: "feedback-gate hooks"
+  generated: "as of {{time}}"
+  opened: "[hook-list] Opened in the browser: {{path}}"
+  openFailed: "[hook-list] Could not open a browser. Open this file in one: {{path}}"
+  written: "[hook-list] Wrote the list. Open it in a browser: {{path}}"
+  filter: "Filter by name, command or glob"
+  none: "(none)"
+  "on": "on"
+  "off": "off"
+  parallel: "in parallel"
+  settings: "settings"
+  gateMissing: "No gate.yaml (put one at .claude/gate.yaml or .agents/gate.yaml to turn the quality gate on)."
+  gateUnreadable: "Not readable as YAML, so the gate does nothing: {{reason}}"
+  gateRules: "rules"
+  gateRulesWhen: "Right after a file is edited (Edit / Write / MultiEdit / Bash). Every rule whose match fits a changed file runs. A failure does not stop the work; it is rerun at stop if still unfixed."
+  runChecksNote: "reserved for the consistency_checks at stop when the rule matches"
+  gateChecks: "consistency_checks"
+  gateChecksWhen: "At stop. Only the checks named in run_checks of a rule that matched in this session run. A failure blocks the stop."
+  unreferenced: "not in any rule's run_checks, so it never runs"
+  gateSessionStart: "session_start"
+  gateSessionStartWhen: "At session start (main session only). The stdout of each command that exits 0 is added to the context."
+  gateSettings: "global settings"
+  feedbackHeader: "feedback rules"
+  active: "active rules"
+  inactive: "inactive"
+  broken: "unreadable"
+  scope:
+    global: "global"
+    project: "project"
+  level:
+    provisional: "provisional"
+    confirmed: "confirmed"
+    deny: "deny"
+  levelNote:
+    provisional: "count 1-2: not injected into the context. enforce warns."
+    confirmed: "count 3-4: injected into the context. enforce asks / blocks."
+    deny: "count 5 or more: injected into the context. enforce denies / blocks."
+  colName: "name"
+  colScope: "scope"
+  colLevel: "count · level"
+  colInject: "injected"
+  colEnforce: "enforce"
+  filterLevel: "Level"
+  filterScope: "Scope"
+  filterEvent: "Event"
+  injectShortPrompt: "every prompt"
+  injectShortNone: "never"
+  enforceNone: "none"
+  inject: "Injected"
+  injectNone: "never (count < 3)"
+  injectEveryPrompt: "on every prompt (UserPromptSubmit)"
+  injectFiles: "when a file matching {{globs}} is read or edited{{exclude}}"
+  injectExclude: " (except {{globs}})"
+  noEnforce: "none (the hooks do not detect it)"
+  event:
+    pre_bash: "checks the command before Bash runs"
+    pre_edit: "checks the text before Edit / Write writes it"
+    post_edit: "checks the whole file after an edit"
+    stop_check: "checks the files changed in the session at stop"
+  inactiveHeader: "Inactive rules"
+  brokenHeader: "Unreadable rules (/correct proposes fixes)"
+  optionsHeader: "Plugin settings"
+  agentLaunchGuard: "show and confirm a prompt before sending it to a subagent"
+  autoCount: "raise count by 1 automatically on a violation"
+  language: "language of the messages"
+`;var i=e;export{i as default};
