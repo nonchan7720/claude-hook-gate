@@ -1,19 +1,24 @@
 package hookgate
 
 // settings hook / Codex plugin の CLI 用: os と os/exec で Io を実装する。
-// 画面に出す手段（Progress / Result / Redraw / Every）は持たない（no-op）。プロンプト上の帯は mod 側の ui.render が
-// 実行中一覧のファイル（<設定ディレクトリ>/.gate-status/running/）を読んで描くので、一覧ファイルの読み書きは従来どおり行う。
+// 画面に出す手段（Progress / Result / Redraw）は持たない。ただし mod（src/register.ts）から呼ばれたとき
+// （OsIoInit.Events。環境変数 FEEDBACK_GATE_EVENTS=stderr）は、それらを 1 行の JSON（EventLinePrefix 付き）として
+// stderr に流し、mod がそれを読んで $.ui.status / $.ui.invalidate に渡す（Every もそのときだけ実際に動かす）。
+// プロンプト上の帯は mod 側の ui.render が実行中一覧のファイル（<設定ディレクトリ>/.gate-status/running/）を読んで描くので、
+// 一覧ファイルの読み書きは従来どおり行う。
 
 import (
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -75,6 +80,8 @@ type OsIoInit struct {
 	AppName string
 	// ConfigDirNames は設定ディレクトリ名の候補。nil なら Claude Code のもの。
 	ConfigDirNames []string
+	// Events があれば、Progress / Result / Redraw をここへ 1 行の JSON で書く（mod 向け。EventLinePrefix を参照）。
+	Events io.Writer
 }
 
 // PickConfigDirSync は候補のうち最初に存在するディレクトリ。無ければ先頭。
@@ -88,6 +95,8 @@ func PickConfigDirSync(names []string, base string) string {
 // osIo は os / os/exec による Io。
 type osIo struct {
 	IoProps
+	events   io.Writer
+	eventsMu sync.Mutex
 }
 
 // MakeOsIo は OS のファイルとプロセスに触れる Io を作る。
@@ -128,7 +137,7 @@ func newOsIo(init OsIoInit) *osIo {
 		ProjectConfig: PickConfigDirSync(names, projectDir),
 		HomeConfig:    PickConfigDirSync(names, homeBase),
 		App:           init.AppName,
-	}}
+	}, events: init.Events}
 }
 
 func (o *osIo) ReadFile(path string) (string, bool) {
@@ -210,13 +219,55 @@ func (o *osIo) RemoveTree(path string) { _ = os.RemoveAll(path) }
 
 func (o *osIo) Now() int64 { return time.Now().UnixMilli() }
 
-func (o *osIo) Progress(string) {}
+// EventLinePrefix は mod へ渡す画面の更新の行の先頭。続く JSON は {"progress": text} / {"result": text} / {"redraw": true}
+// （text が "" ならステータス行を消す）。mod はこの行を stderr から取り除いてから結果を読む。
+const EventLinePrefix = "@@feedback-gate "
 
-func (o *osIo) Result(string) {}
+func (o *osIo) emit(event OMap) {
+	if o.events == nil {
+		return
+	}
+	o.eventsMu.Lock()
+	defer o.eventsMu.Unlock()
+	_, _ = io.WriteString(o.events, EventLinePrefix+JSONStringify(event)+"\n")
+}
 
-func (o *osIo) Redraw() {}
+func (o *osIo) Progress(text string) { o.emit(OMap{{"progress", text}}) }
 
-func (o *osIo) Every(int64, func()) func() { return func() {} }
+func (o *osIo) Result(text string) { o.emit(OMap{{"result", text}}) }
+
+func (o *osIo) Redraw() { o.emit(OMap{{"redraw", true}}) }
+
+// Every は画面の更新を流すとき（mod から呼ばれたとき）だけ、ms ごとに fn を呼ぶ。それ以外は何もしない。
+func (o *osIo) Every(ms int64, fn func()) func() {
+	if o.events == nil || ms <= 0 {
+		return func() {}
+	}
+	ticker := time.NewTicker(time.Duration(ms) * time.Millisecond)
+	done := make(chan struct{})
+	var once sync.Once
+	var stopped atomic.Bool
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				// 止めたあとに select が ticker 側を選んでも、新しく fn を呼ばない（fn の中から止めてもよい）。
+				if !stopped.Load() {
+					fn()
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		once.Do(func() {
+			stopped.Store(true)
+			ticker.Stop()
+			close(done)
+		})
+	}
+}
 
 // childEnv は子プロセスの環境: 現在の環境から CLAUDE_AGENT_ID を除き（サブエージェント経由で起動された場合に親の
 // agent_id が漏れ込むと判定が環境依存になる）、extra を重ねる。

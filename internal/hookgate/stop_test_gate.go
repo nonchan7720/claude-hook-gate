@@ -1,6 +1,6 @@
 package hookgate
 
-// gate のエントリポイント（src/stop-test-gate.ts）。phase は rules | checks（省略時は checks: Stop / SubagentStop からの呼び出しに
+// gate のエントリポイント。phase は rules | checks（省略時は checks: Stop / SubagentStop からの呼び出しに
 // 合わせたデフォルト）。PostToolUse からは "rules" を明示して呼ぶ。
 
 // StopTestGate は gate.yaml が無ければ何もせず（gate.yml の綴り違いだけ警告する）、あれば RunGate を呼ぶ。phase が空なら checks。

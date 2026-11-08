@@ -1,6 +1,6 @@
 package hookgate
 
-// tests/gate-rules.spec.ts の移植（stop-test-gate と record-changes のエントリポイントのテストを含む）。
+// gate の rules フェーズのテスト（stop_test_gate.go と record_changes.go のエントリポイントのテストを含む）。
 
 import (
 	"encoding/json"

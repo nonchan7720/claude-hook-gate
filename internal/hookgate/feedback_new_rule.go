@@ -1,7 +1,6 @@
 package hookgate
 
 // 新しい feedback ルールファイルを作る前に、既存のルールを確認させる（PreToolUse。feedback_guard.go から呼ぶ）。
-// src/feedback-new-rule.ts の移植。
 //
 // Write（と Bash の heredoc）で feedback のディレクトリ（グローバル ~/.claude/feedback/ とプロジェクトの .claude/feedback/）の
 // 直下にまだ無い *.md を書こうとしたとき、既存のルールが 1 つでもあれば、セッション・ファイルごとに最初の 1 回だけ止めて

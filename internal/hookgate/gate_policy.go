@@ -1,6 +1,6 @@
 package hookgate
 
-// gate の dogwood ポリシー評価（src/gate.ts の PolicyContext と、Gate の resolveDogwood / policyPaths / dogwoodVerdict）。
+// gate の dogwood ポリシー評価（PolicyContext と、Gate の resolveDogwood / policyPaths / dogwoodVerdict）。
 
 import (
 	"encoding/json"

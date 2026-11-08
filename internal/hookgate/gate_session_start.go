@@ -1,6 +1,6 @@
 package hookgate
 
-// gate.yaml の session_start フェーズ（src/gate-session-start.ts）。SessionStart で走らせるコマンドの stdout を additionalContext として返す。
+// gate.yaml の session_start フェーズ。SessionStart で走らせるコマンドの stdout を additionalContext として返す。
 // ポリシー（dogwood）・後回し・実行共有は使わない: セッションごとの出力をその場で context に入れるのが目的なので、
 // 「あとで走らせる」「他のエージェントと共有する」の意味がない。同時実行枠（max_parallel）だけは守る。
 // 失敗してもセッションは止めない（stderr に 1 回だけ知らせ、exit は 0）。メインのセッションだけが対象（agent_id があれば何もしない）。

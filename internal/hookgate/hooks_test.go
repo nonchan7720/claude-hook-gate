@@ -1,6 +1,6 @@
 package hookgate
 
-// hooks.go（イベントごとの中核）と host.go（RunCore / CliMain）の直接のテスト。TS 版は tests/cli.spec.ts などの統合テストで確かめていた部分。
+// hooks.go（イベントごとの中核）と host.go（RunCore / CliMain）の直接のテスト。tests/cli.spec.ts などの統合テストでも確かめている。
 
 import (
 	"bytes"

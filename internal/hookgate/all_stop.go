@@ -1,6 +1,6 @@
 package hookgate
 
-// Stop hook: gate の checks フェーズ → feedback ルールの stop_check → 完了通知、の順に実行する（src/all-stop.ts）。
+// Stop hook: gate の checks フェーズ → feedback ルールの stop_check → 完了通知、の順に実行する。
 
 // AllStop は Stop hook の本体。
 func AllStop(io Io, payload Dict) ScriptResult {

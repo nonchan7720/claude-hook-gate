@@ -1,7 +1,5 @@
 package hookgate
 
-// tests/gate-policy.spec.ts の移植。
-
 import (
 	"fmt"
 	"os"

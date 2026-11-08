@@ -1,7 +1,5 @@
 package hookgate
 
-// tests/feedback-guard.spec.ts の移植。
-
 import (
 	"encoding/json"
 	"os"

@@ -1,7 +1,5 @@
 package hookgate
 
-// tests/agent-launch-guard.spec.ts の移植。
-
 import (
 	"testing"
 

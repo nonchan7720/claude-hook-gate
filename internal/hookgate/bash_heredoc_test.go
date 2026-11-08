@@ -1,7 +1,5 @@
 package hookgate
 
-// tests/bash-heredoc.spec.ts の移植。
-
 import (
 	"strings"
 	"testing"

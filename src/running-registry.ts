@@ -1,6 +1,7 @@
 // 自セッション（メインとそのサブエージェント）の「実行中のコマンド」一覧。ステータス行（$.ui.status）は
-// 1 行しか描けないので、実行中はプロンプトの上の帯（ui.render の AbovePrompt）に複数行で出す。各 Gate は
-// 自分の一覧を .gate-status/running/<owner>.json に公開し、帯は同じセッションの分をまとめて描く。
+// 1 行しか描けないので、実行中はプロンプトの上の帯（ui.render の AbovePrompt）に複数行で出す。Go 版の gate
+// （internal/hookgate/running_registry.go）が自分の一覧を .gate-status/running/<owner>.json に公開し、ここ（mod の帯）は
+// 同じセッションの分をまとめて読んで描く。
 // 同じプロジェクトを開いた別セッションの分は混ぜない。hook がどのプロセスで動くかに依存しないよう、
 // 共有はファイルで行う。
 import type { RenderElement } from 'claude-code'
@@ -28,13 +29,6 @@ const STALE_MS = MAX_RUN_MS + 60_000 // これより古い開始時刻だけの�
 export const gateStatusDir = (io: Io): string => join(io.projectConfigDir, '.gate-status')
 
 const runningDir = (io: Io): string => join(gateStatusDir(io), 'running')
-const ownerFile = (io: Io, owner: string): string => join(runningDir(io), `${owner}.json`)
-
-/** この owner の実行中一覧を丸ごと書き換える。 */
-export const publishRunning = (io: Io, owner: string, entries: readonly RunningEntry[]): Promise<void> =>
-  io.writeFile(ownerFile(io, owner), JSON.stringify(entries))
-
-export const withdrawRunning = (io: Io, owner: string): Promise<void> => io.removeFiles([ownerFile(io, owner)])
 
 /** 各 owner のファイルの中身から、渡された全 owner の一覧を開始時刻順（owner 内の順序は保つ）に並べて返す。古すぎる owner と壊れたファイルは無視する。 */
 export function mergeRunning(texts: readonly string[], now: number): RunningEntry[] {
@@ -119,31 +113,4 @@ export function runningBand(entries: readonly RunningEntry[], now: number, lang:
     props: { flexDirection: 'column' },
     children: runningLines(entries, now, lang).map((line) => ({ type: 'Text', children: [line] })),
   }
-}
-
-/**
- * セッション内の全員の実行が終わったときの 1 行サマリ（ステータス行用）。チェック名は出さず件数だけにして、長さを一定に保つ。
- * 所要秒は最初の開始から最後の完了まで（並列なので各項目の合計ではない）。未完了があるか、何も無ければ undefined。
- */
-export function finishedSummary(entries: readonly RunningEntry[], lang: Lang): string | undefined {
-  if (entries.length === 0 || entries.some((e) => !e.result)) return undefined
-  const passed = entries.filter((e) => e.result === 'ok').length
-  const failed = entries.length - passed
-  const counts = [passed > 0 ? `✓ ${passed}` : '', failed > 0 ? `✗ ${failed}` : ''].filter((s) => s !== '').join(' / ')
-  const first = Math.min(...entries.map((e) => e.started))
-  const last = Math.max(...entries.map((e) => e.ended ?? e.started))
-  return tr(lang)('band.done', { counts, seconds: ((last - first) / 1000).toFixed(1) })
-}
-
-// 完了サマリは gate が終わると一覧（running/）から消えるので、次の gate コマンドが走り始めるまで残すために
-// セッションごとのファイルへ置く。feedback の表示など他の hook がステータス行を使ったあとに戻すのに使う。
-const summaryFile = (io: Io, sessionId: string): string => join(gateStatusDir(io), `summary.${sessionId}.txt`)
-
-export const saveSummary = (io: Io, sessionId: string, text: string): Promise<void> => io.writeFile(summaryFile(io, sessionId), text)
-
-export const clearSummary = (io: Io, sessionId: string): Promise<void> => io.removeFiles([summaryFile(io, sessionId)])
-
-export async function loadSummary(io: Io, sessionId: string): Promise<string | undefined> {
-  const text = await io.readFile(summaryFile(io, sessionId))
-  return text === undefined || text === '' ? undefined : text
 }

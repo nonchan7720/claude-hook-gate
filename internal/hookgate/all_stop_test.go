@@ -1,6 +1,6 @@
 package hookgate
 
-// src/all-stop.ts のテスト。TS 版に専用の spec は無い（hooks / register 越しに触れるだけ）ので、gate.yaml と feedback ルールを持つ
+// all_stop.go のテスト。旧 TS 版に専用の spec は無かった（hooks / register 越しに触れるだけ）ので、gate.yaml と feedback ルールを持つ
 // プロジェクトで、gate の checks フェーズ → feedback の stop_check → 完了通知の順序と、止めたときの打ち切りを確かめる。
 // 順序は、偽の terminal-notifier と gate の検証コマンドが共通の記録ファイルへ書く行で見る
 // （検証コマンドは違反ログが無いうちに走り、通知は違反ログが出来た後に走るはず）。

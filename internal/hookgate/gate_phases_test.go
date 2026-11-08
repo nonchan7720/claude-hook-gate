@@ -1,7 +1,5 @@
 package hookgate
 
-// tests/gate-phases.spec.ts の移植。
-
 import (
 	"encoding/json"
 	"os"

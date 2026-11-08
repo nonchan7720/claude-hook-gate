@@ -1,7 +1,5 @@
 package hookgate
 
-// tests/feedback-file-inject.spec.ts の移植。
-
 import (
 	"encoding/json"
 	"os"

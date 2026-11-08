@@ -1,5 +1,36 @@
 import { describe, expect, test } from 'bun:test'
-import { merge, type Outcome, outcomeToClassic, toOutcome } from '../src/outcome.ts'
+import type { ScriptResult } from '../src/io.ts'
+import { merge, type Outcome, toOutcome } from '../src/outcome.ts'
+import type { Dict } from '../src/pyutil.ts'
+
+// Go 版の OutcomeToClassic（internal/hookgate/outcome.go）と同じ変換。Go の出力を toOutcome で戻せることの検証に使う。
+// toOutcome の逆変換で、exit 2 の block / deny は JSON の判定（decision: block / permissionDecision: deny）で同じ効果になる
+// （exit 2 は stderr を理由にするだけで、stdout の JSON は無視される規約なので、情報は reason に移す）。
+// stderr は warn など正常終了時の出力で、そのまま stderr へ出す。
+const outcomeToClassic = (event: string, outcome: Outcome, stderr = ''): ScriptResult => {
+  const json: Dict = {}
+  const specific: Dict = {}
+  const context = (outcome.additionalContext ?? []).filter((c) => c.trim() !== '').join('\n\n')
+  if (event === 'PreToolUse') {
+    // 返す判定は deny / ask だけ（allow は返さず、ユーザーの判断に委ねる）。deny が先。
+    const decision = outcome.deny !== undefined ? 'deny' : outcome.ask !== undefined ? 'ask' : undefined
+    if (decision !== undefined) {
+      specific.permissionDecision = decision
+      specific.permissionDecisionReason = outcome.deny ?? outcome.ask ?? ''
+    }
+  } else if (outcome.block !== undefined) {
+    json.decision = 'block'
+    json.reason = outcome.block
+  }
+  if (context !== '' && event !== 'Stop' && event !== 'SubagentStop' && event !== 'Notification') specific.additionalContext = context
+  if (Object.keys(specific).length > 0) json.hookSpecificOutput = { hookEventName: event, ...specific }
+  if (outcome.systemMessage) json.systemMessage = outcome.systemMessage
+  if (outcome.preventContinuation) {
+    json.continue = false
+    if (outcome.stopReason !== undefined) json.stopReason = outcome.stopReason
+  }
+  return { exitCode: 0, stdout: Object.keys(json).length > 0 ? `${JSON.stringify(json)}\n` : '', stderr }
+}
 
 const ran = (exitCode: number, stdout = '', stderr = '') => ({ exitCode, stdout, stderr })
 
@@ -94,8 +125,8 @@ describe('outcomeToClassic', () => {
 })
 
 describe('systemMessage', () => {
-  test('comes only from the step side channel, never from stdout JSON', () => {
-    expect(toOutcome('PostToolUse', ran(0, '{"systemMessage":"x"}'))).toEqual({})
+  test('comes from stdout JSON (the Go output) or the step side channel', () => {
+    expect(toOutcome('PostToolUse', ran(0, '{"systemMessage":"x"}'))).toEqual({ systemMessage: 'x' })
     expect(toOutcome('SessionStart', { ...ran(0), systemMessage: 'note' })).toEqual({ systemMessage: 'note' })
     expect(toOutcome('SessionStart', { ...ran(1), systemMessage: 'note' })).toEqual({})
   })

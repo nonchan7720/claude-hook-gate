@@ -1,7 +1,6 @@
 package hookgate
 
-// イベントごとの処理（中核）。mod（src/register.ts、classic.* から）と command hook の CLI（cmd/feedback-gate、
-// ホストごとの変換は host*.go）の両方がここを呼び、ここが各イベントの実装（feedback_guard.go、stop_test_gate.go など）を呼ぶ。
+// イベントごとの処理（中核）。command hook の CLI（cmd/feedback-gate、ホストごとの変換は host*.go）がここを呼び、ここが各イベントの実装（feedback_guard.go、stop_test_gate.go など）を呼ぶ。
 // 引数の payload は classic コマンド hook が stdin で受け取る JSON の形。各段は classic のスクリプトと同じ
 // { ExitCode, Stdout, Stderr } を返し、それを classic の規約どおり Outcome にまとめて返す。
 

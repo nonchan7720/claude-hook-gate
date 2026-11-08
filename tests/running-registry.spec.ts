@@ -1,18 +1,16 @@
 import { describe, expect, test } from 'bun:test'
-import {
-  clearSummary,
-  finishedSummary,
-  listRunning,
-  loadSummary,
-  mergeRunning,
-  publishRunning,
-  type RunningEntry,
-  runningBand,
-  runningLines,
-  saveSummary,
-  withdrawRunning,
-} from '../src/running-registry.ts'
+import * as fs from 'node:fs'
+import * as path from 'node:path'
+import type { Io } from '../src/io.ts'
+import { gateStatusDir, listRunning, mergeRunning, type RunningEntry, runningBand, runningLines } from '../src/running-registry.ts'
 import { makeIo, withTmp } from './helpers/node-io.ts'
+
+// 一覧のファイルは Go 版の gate（internal/hookgate/running_registry.go の PublishRunning）が書く。ここでは同じ形で置く。
+const publishRunning = async (io: Io, owner: string, entries: readonly RunningEntry[]): Promise<void> => {
+  const dir = path.join(gateStatusDir(io), 'running')
+  fs.mkdirSync(dir, { recursive: true })
+  fs.writeFileSync(path.join(dir, `${owner}.json`), JSON.stringify(entries))
+}
 
 const T0 = 1_000_000
 
@@ -26,15 +24,6 @@ describe('running registry', () => {
         { name: 'second', cmd: 'x', started: T0 + 1000, result: 'ok' },
       ])
       expect((await listRunning(io, 's')).map((e) => e.name)).toEqual(['first', 'second', 'late'])
-    }))
-
-  test('withdrawing one owner keeps the others', () =>
-    withTmp(async (proj) => {
-      const io = makeIo({ projectDir: proj, now: () => T0 })
-      await publishRunning(io, 's.a', [{ name: 'a', cmd: 'x', started: T0 }])
-      await publishRunning(io, 's.b', [{ name: 'b', cmd: 'x', started: T0 }])
-      await withdrawRunning(io, 's.a')
-      expect((await listRunning(io, 's')).map((e) => e.name)).toEqual(['b'])
     }))
 
   test('entries left behind by a dead process are ignored once they are old enough', () =>
@@ -55,17 +44,6 @@ describe('running registry', () => {
       await publishRunning(io, 'sess2--agent.x5', [{ name: 'prefix-sub', cmd: 'x', started: T0 + 1 }])
       expect((await listRunning(io, 'sess')).map((e) => e.name)).toEqual(['main', 'sub'])
       expect((await listRunning(io, 'sess2')).map((e) => e.name)).toEqual(['prefix', 'prefix-sub'])
-    }))
-
-  test('the finished summary is kept per session', () =>
-    withTmp(async (proj) => {
-      const io = makeIo({ projectDir: proj })
-      await saveSummary(io, 'sess-a', 'A')
-      await saveSummary(io, 'sess-b', 'B')
-      expect(await loadSummary(io, 'sess-a')).toBe('A')
-      await clearSummary(io, 'sess-a')
-      expect(await loadSummary(io, 'sess-a')).toBeUndefined()
-      expect(await loadSummary(io, 'sess-b')).toBe('B')
     }))
 
   test('mergeRunning skips broken files', () => {
@@ -114,17 +92,12 @@ describe('runningLines', () => {
 })
 
 describe('language', () => {
-  test('heading, waiting marker and summary are English when lang is en', () => {
+  test('heading and waiting marker are English when lang is en', () => {
     const entries = [
       { name: 'a', cmd: 'sleep 1', started: T0 },
       { name: 'd', cmd: 'z', started: T0 + 1000, waiting: true },
     ]
     expect(runningLines(entries, T0 + 3000, 'en')).toEqual(['[gate] running:', '  a $ sleep 1 (3s)', '  d $ z waiting (2s)'])
-    const done = [
-      { name: 'a', cmd: 'x', started: T0, result: 'ok' as const, ended: T0 + 500 },
-      { name: 'b', cmd: 'x', started: T0, result: 'fail' as const, ended: T0 + 1200 },
-    ]
-    expect(finishedSummary(done, 'en')).toBe('[gate] done: ✓ 1 / ✗ 1 (1.2s)')
   })
 })
 
@@ -143,49 +116,5 @@ describe('runningBand', () => {
   test('is absent when nothing is listed or everything has finished', () => {
     expect(runningBand([], T0, 'ja')).toBeUndefined()
     expect(runningBand([done], T0, 'ja')).toBeUndefined()
-  })
-})
-
-describe('finishedSummary', () => {
-  test('shows only the counts of passed and failed checks plus the elapsed seconds', () => {
-    const entries: RunningEntry[] = [
-      { name: 'a', cmd: 'x', started: T0, result: 'ok', ended: T0 + 700 },
-      { name: 'b', cmd: 'x', started: T0, result: 'ok', ended: T0 + 200 },
-      { name: 'c', cmd: 'x', started: T0, result: 'ok', ended: T0 + 300 },
-      { name: 'd', cmd: 'x', started: T0, result: 'ok', ended: T0 + 400 },
-      { name: 'e', cmd: 'x', started: T0, result: 'ok', ended: T0 + 500 },
-      { name: 'f', cmd: 'x', started: T0, result: 'fail', ended: T0 + 81_000 },
-    ]
-    expect(finishedSummary(entries, 'ja')).toBe('[gate] 完了: ✓ 5 / ✗ 1 (81.0s)')
-  })
-
-  test('omits the failure count when nothing failed', () => {
-    const entries: RunningEntry[] = [
-      { name: 'a', cmd: 'x', started: T0, result: 'ok', ended: T0 + 700 },
-      { name: 'b', cmd: 'x', started: T0, result: 'ok', ended: T0 + 81_000 },
-    ]
-    expect(finishedSummary(entries, 'ja')).toBe('[gate] 完了: ✓ 2 (81.0s)')
-  })
-
-  test('omits the success count when nothing passed', () => {
-    const entries: RunningEntry[] = [
-      { name: 'a', cmd: 'x', started: T0, result: 'fail', ended: T0 + 12_300 },
-      { name: 'b', cmd: 'x', started: T0, result: 'fail', ended: T0 + 100 },
-    ]
-    expect(finishedSummary(entries, 'ja')).toBe('[gate] 完了: ✗ 2 (12.3s)')
-  })
-
-  test('the seconds span the first start to the last end, not the sum of the checks', () => {
-    const entries: RunningEntry[] = [
-      { name: 'a', cmd: 'x', started: T0, result: 'ok', ended: T0 + 10_000 },
-      { name: 'b', cmd: 'x', started: T0 + 2000, result: 'ok', ended: T0 + 12_000 },
-      { name: 'c', cmd: 'x', started: T0 + 5000, result: 'ok', ended: T0 + 8000 },
-    ]
-    expect(finishedSummary(entries, 'ja')).toBe('[gate] 完了: ✓ 3 (12.0s)')
-  })
-
-  test('is absent while something is unfinished or when nothing ran', () => {
-    expect(finishedSummary([], 'ja')).toBeUndefined()
-    expect(finishedSummary([{ name: 'a', cmd: 'x', started: T0 }], 'ja')).toBeUndefined()
   })
 })

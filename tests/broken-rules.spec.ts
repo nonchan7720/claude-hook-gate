@@ -1,26 +1,11 @@
 // 壊れた feedback ルール（YAML として読めない・不正な正規表現・enforce がリストでない／要素が辞書でない）が、
-// 他の正常なルールまで無効にしないこと、そしてその不備が .errors.jsonl・注入・/correct で見えること。
+// 他の正常なルールまで読めなくしないこと、そしてその不備が .errors.jsonl と /correct で見えること。
+// hook の判定（壊れたルールの横でも他のルールが deny する、注入に出るなど）は Go 版のテスト（internal/hookgate/broken_rules_test.go）。
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { correctCommand } from '../src/correct.ts'
-import { feedbackGuard } from '../src/feedback-guard.ts'
-import { feedbackInject } from '../src/feedback-inject.ts'
-import { feedbackPostEdit } from '../src/feedback-post-edit.ts'
-import {
-  errorsLogPath,
-  evalPostEdit,
-  evalPreBash,
-  evalPreEdit,
-  evalStopCheck,
-  listRules,
-  normalizeEnforce,
-  type Rule,
-  scanRules,
-} from '../src/feedback-rules.ts'
-import { feedbackStopCheck } from '../src/feedback-stop-check.ts'
-import type { Lang } from '../src/i18n.ts'
-import type { Io } from '../src/io.ts'
+import { errorsLogPath, listRules, normalizeEnforce, scanRules } from '../src/feedback-rules.ts'
 import { type Dict, pyRegExp } from '../src/pyutil.ts'
 import { makeIo, rmTree, tmpDir } from './helpers/node-io.ts'
 
@@ -47,7 +32,7 @@ const BROKEN: Record<string, [string, string]> = {
   'enforce is a string': ['aa_str.md', ruleText('aa_str', 6, 'enforce: pre_bash\n')],
 }
 
-describe('broken rules do not disable the other rules', () => {
+describe('broken rules do not hide the other rules', () => {
   let dir: string
   let proj: string
   beforeEach(() => {
@@ -59,8 +44,7 @@ describe('broken rules do not disable the other rules', () => {
     rmTree(dir)
     rmTree(proj)
   })
-  const io = (lang?: Lang) => makeIo({ projectDir: proj, env: { CLAUDE_FEEDBACK_DIR: dir }, lang })
-  const guard = (command: string) => feedbackGuard(io(), { tool_name: 'Bash', tool_input: { command } })
+  const io = () => makeIo({ projectDir: proj, env: { CLAUDE_FEEDBACK_DIR: dir } })
   const errors = (): Dict[] => {
     const p = path.join(dir, '.errors.jsonl')
     if (!fs.existsSync(p)) return []
@@ -72,29 +56,21 @@ describe('broken rules do not disable the other rules', () => {
   }
 
   for (const [label, [file, content]] of Object.entries(BROKEN)) {
-    test(`${label}: the deny rule still denies, the violation is logged and the broken file is recorded`, async () => {
+    test(`${label}: the other rule is still read and the broken file is recorded`, async () => {
       fs.writeFileSync(path.join(dir, file), content)
-      const r = await guard('cd /proj/sub && golangci-lint run')
-      expect(r.exitCode).toBe(0)
-      expect(r.stderr).not.toContain('internal error')
-      const out = JSON.parse(r.stdout) as { hookSpecificOutput: Dict }
-      expect(out.hookSpecificOutput.permissionDecision).toBe('deny')
-      expect(out.hookSpecificOutput.permissionDecisionReason).toContain('delegate_no_cd_in_bash')
-      expect(fs.readFileSync(path.join(dir, '.violations.jsonl'), 'utf8')).toContain('delegate_no_cd_in_bash')
+      const rules = await listRules(io())
+      expect(rules.map((r) => r.name)).toContain('delegate_no_cd_in_bash')
       const logged = errors()
       expect(logged).toHaveLength(1)
       expect(logged[0]?.source).toBe('rules')
       expect(logged[0]?.file).toBe(path.join(dir, file))
       expect(String(logged[0]?.error)).not.toBe('')
-      // 無関係なコマンドは通す
-      expect((await guard('ls')).stdout).toBe('')
     })
   }
 
   test('the same broken rule is recorded only once in .errors.jsonl', async () => {
     fs.writeFileSync(path.join(dir, 'zz_yaml.md'), BROKEN['YAML syntax error']?.[1] ?? '')
-    await guard('ls')
-    await guard('ls')
+    await listRules(io())
     await listRules(io())
     expect(errors()).toHaveLength(1)
     expect(errorsLogPath(io())).toBe(path.join(dir, '.errors.jsonl'))
@@ -113,31 +89,6 @@ describe('broken rules do not disable the other rules', () => {
     expect(broken[0]?.reason).toStartWith('ファイルを読めません: ')
     expect(broken[1]?.reason).toBe('enforce[0] が辞書ではありません（null）')
     expect(broken[2]?.reason).toStartWith('enforce[1].when の正規表現が使えません: ')
-    const v = await evalPreBash(io(), rules, 'rm -rf x')
-    expect(v.map((x) => x.rule)).toEqual(['mixed'])
-  })
-
-  test('UserPromptSubmit injects the broken rules (ja / en), even without confirmed rules', async () => {
-    fs.rmSync(path.join(dir, 'cd.md'))
-    fs.writeFileSync(path.join(dir, 'zz_yaml.md'), BROKEN['YAML syntax error']?.[1] ?? '')
-    const ja = await feedbackInject(io('ja'))
-    expect(ja.stdout).toContain('次のルールファイルが読めず無効になっています')
-    expect(ja.stdout).toContain(`- ${path.join(dir, 'zz_yaml.md')}: ファイルを読めません: `)
-    expect(ja.stdout).not.toContain('確定フィードバックルール')
-    const en = await feedbackInject(io('en'))
-    expect(en.stdout).toContain('The following rule files could not be read and are disabled')
-    expect(en.stdout).toContain(`- ${path.join(dir, 'zz_yaml.md')}: cannot read the file: `)
-  })
-
-  test('UserPromptSubmit puts the broken rules before the confirmed rules, and says nothing when nothing is broken', async () => {
-    const clean = await feedbackInject(io())
-    expect(clean.stdout).not.toContain('読めず無効')
-    fs.writeFileSync(path.join(dir, 'aa_null.md'), BROKEN['enforce: [null]']?.[1] ?? '')
-    const r = await feedbackInject(io())
-    const brokenAt = r.stdout.indexOf('読めず無効')
-    expect(brokenAt).toBeGreaterThanOrEqual(0)
-    expect(brokenAt).toBeLessThan(r.stdout.indexOf('■ delegate_no_cd_in_bash'))
-    expect(r.stdout).toContain(`- ${path.join(dir, 'aa_null.md')}: enforce[0] が辞書ではありません（null）`)
   })
 
   test('/correct reports the broken rules as proposals', async () => {
@@ -147,73 +98,6 @@ describe('broken rules do not disable the other rules', () => {
     expect(r.text).toContain('読めず無効になっている: enforce がリストではありません（mapping）')
     expect(r.text).toContain(path.join(dir, 'aa_dict.md'))
     expect(r.context).toHaveLength(1)
-  })
-
-  test('post_edit and stop_check rules keep working next to a broken file', async () => {
-    fs.writeFileSync(path.join(dir, 'zz_yaml.md'), BROKEN['YAML syntax error']?.[1] ?? '')
-    fs.writeFileSync(path.join(dir, 'aa_null.md'), BROKEN['enforce: [null]']?.[1] ?? '')
-    fs.writeFileSync(
-      path.join(dir, 'no_log.md'),
-      ruleText('no_log', 6, "enforce:\n  - event: post_edit\n    path: '**/*.ts'\n    when: 'console\\.log'\n    message: no log\n"),
-    )
-    fs.writeFileSync(
-      path.join(dir, 'readme.md'),
-      ruleText('readme', 6, "enforce:\n  - event: stop_check\n    changed: '**/README.md'\n    require_sibling: 'README_ja.md'\n    message: both\n"),
-    )
-    const ts = path.join(proj, 'a.ts')
-    fs.writeFileSync(ts, 'console.log(1)\n')
-    const pe = await feedbackPostEdit(io(), { tool_name: 'Edit', tool_input: { file_path: ts } })
-    expect(pe.stdout).toContain('"decision":"block"')
-    fs.writeFileSync(path.join(proj, 'README.md'), '')
-    fs.mkdirSync(path.join(proj, '.claude', '.gate-status'), { recursive: true })
-    fs.writeFileSync(path.join(proj, '.claude', '.gate-status', 'changed_files.s1.txt'), 'README.md\n')
-    const sc = await feedbackStopCheck(io(), { session_id: 's1' })
-    expect(sc.exitCode).toBe(2)
-    expect(sc.stderr).toContain('readme')
-  })
-})
-
-describe('enforce entries that throw while evaluating are skipped one by one', () => {
-  // listRules を通さずに作った Rule（検証されていない enforce）でも、評価関数が例外で止まらないこと。
-  const raw = (name: string, enforce: unknown): Rule =>
-    ({ name, count: 6, description: '', enforce, path: `/fb/${name}.md`, projects: [], whenExists: [], files: [], excludeFiles: [] }) as Rule
-  let dir: string
-  beforeEach(() => {
-    dir = tmpDir()
-  })
-  afterEach(() => rmTree(dir))
-  const io = (): Io => makeIo({ projectDir: dir, env: { CLAUDE_FEEDBACK_DIR: dir } })
-
-  test('evalPreBash / evalPreEdit / evalPostEdit / evalStopCheck', async () => {
-    const bad = raw('bad', [
-      null,
-      'pre_bash',
-      { event: 'pre_bash', when: 'x(?i)y' },
-      { event: 'pre_edit', path: '**', when: 'a*+' },
-      { event: 'post_edit', path: '**', when: '(?#c)' },
-      { event: 'stop_check', changed: [null], check: 'exit 1' },
-    ])
-    const notList = raw('not_list', { event: 'pre_bash', when: 'rm' })
-    const good = raw('good', [
-      { event: 'pre_bash', when: 'rm' },
-      { event: 'pre_edit', path: '**', when: 'rm' },
-      { event: 'post_edit', path: '**', when: 'rm' },
-      { event: 'stop_check', changed: '**', check: 'exit 1' },
-    ])
-    const rules = [bad, notList, good]
-    const file = path.join(dir, 'a.txt')
-    fs.writeFileSync(file, 'rm\n')
-    expect((await evalPreBash(io(), rules, 'rm x')).map((v) => v.rule)).toEqual(['good'])
-    expect((await evalPreEdit(io(), rules, file, 'rm')).map((v) => v.rule)).toEqual(['good'])
-    expect((await evalPostEdit(io(), rules, file)).map((v) => v.rule)).toEqual(['good'])
-    expect((await evalStopCheck(io(), rules, dir, ['a.txt'])).map((v) => v.rule)).toEqual(['good'])
-    const log = fs.readFileSync(path.join(dir, '.errors.jsonl'), 'utf8')
-    expect(log).toContain('"source":"enforce"')
-    expect(log).toContain('"file":"/fb/bad.md"')
-    expect(log).toContain('enforce[2] の評価に失敗しました')
-    expect(log).toContain('enforce[3] の評価に失敗しました')
-    expect(log).toContain('enforce[4] の評価に失敗しました')
-    expect(log).toContain('enforce[5] の評価に失敗しました')
   })
 })
 

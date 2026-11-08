@@ -4,7 +4,8 @@
 # ユーザーの mod に対して飛ばす。settings hook は飛ばされず、stdin の JSON と戻り値（exit 2 / permissionDecision /
 # decision: block / additionalContext）が classic と同一なので、ここから feedback-gate（Go 製のバイナリ）の `claude <Event>` を呼んで同じ処理をさせる。
 #
-# mod の classic.* が走る環境では二重に動かさない: mod は classic.* のどれかが走ると
+# mod（src/register.ts）も判定はこのスクリプト経由で同じバイナリに任せる（FEEDBACK_GATE_FROM_MOD=1 を付けて呼ぶ）。
+# mod の classic.* が走る環境では、settings hook としては二重に動かさない: mod は classic.* のどれかが走ると
 # <feedbackDir>/.classic_seen/<session_id> を書く（feedbackDir は CLAUDE_FEEDBACK_DIR か ~/{.claude,.agents}/feedback）。
 # そのマーカーがあれば何もせず exit 0。
 # バイナリは FEEDBACK_GATE_BIN、無ければキャッシュ、無ければリリースから取ってくる（scripts/install-binary.sh）。
@@ -22,7 +23,8 @@ if command -v jq >/dev/null 2>&1; then
 else
   SESSION_ID="$(printf '%s' "$PAYLOAD" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1 | tr -cd 'A-Za-z0-9_-')"
 fi
-if [ -n "$SESSION_ID" ]; then
+# mod 自身がここを呼ぶとき（src/go-bridge.ts。FEEDBACK_GATE_FROM_MOD=1）は、マーカーがあっても実行する。
+if [ -n "$SESSION_ID" ] && [ "${FEEDBACK_GATE_FROM_MOD:-}" != "1" ]; then
   if [ -n "${CLAUDE_FEEDBACK_DIR:-}" ]; then
     [ -e "$CLAUDE_FEEDBACK_DIR/.classic_seen/$SESSION_ID" ] && exit 0
   else
@@ -43,4 +45,7 @@ export CLAUDE_PLUGIN_ROOT="$ROOT"
 BIN="$(feedback_gate_binary "$ROOT")" || exit 0
 [ -n "$BIN" ] || exit 0
 
-printf '%s' "$PAYLOAD" | exec "$BIN" claude "$EVENT"
+# パイプ（printf | exec）にすると Go はサブシェルの中で動き、このスクリプトへの SIGTERM（Claude Code の中断・ESC）が
+# Go に届かない。process substitution で stdin を渡し（here-string だと末尾に改行が付く）、このプロセス自体を Go に
+# 置き換える（Go は SIGTERM で gate のコマンドを道連れにする）。
+exec "$BIN" claude "$EVENT" < <(printf '%s' "$PAYLOAD")

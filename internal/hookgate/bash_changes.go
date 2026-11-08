@@ -1,6 +1,6 @@
 package hookgate
 
-// Bash 経由で書き換えられたファイルを、変更ファイルのメモ（changed_files.<stateId>.txt）へ記録する（src/bash-changes.ts）。
+// Bash 経由で書き換えられたファイルを、変更ファイルのメモ（changed_files.<stateId>.txt）へ記録する。
 // PreToolUse(Bash) で開始時刻を控え（BashStarted）、PostToolUse(Bash) で git が見ている変更・未追跡ファイルのうち
 // mtime がコマンド開始以降のものだけを拾う（RecordBashChanges）。git の履歴・作業ツリー操作（rebase / checkout など）で
 // 動いたファイルは「変更」ではないので、そのコマンドは最初から記録対象外にする。
@@ -39,7 +39,7 @@ import (
 var SkipCommandRe = regexp.MustCompile(
 	`\bgit(?:\s+(?:-[Cc]\s+(?:"[^"]*"|'[^']*'|\S+)|--?[\w-]+(?:=\S+)?))*\s+(rebase|checkout|switch|merge|pull|stash|reset|cherry-pick|revert|restore|clean|am|apply|worktree)\b`)
 
-// 読むだけのコマンド（ファイルを書き換えられないもの）は変更検出の対象外にする（src/bash-changes.ts の isReadOnlyCommand）。
+// 読むだけのコマンド（ファイルを書き換えられないもの）は変更検出の対象外にする。
 // 同じ作業ツリーで別のセッションが編集中だと、このコマンドの間に書かれたファイルを「このコマンドの変更」として拾ってしまい、
 // 調査しかしていないセッションの gate が他人の変更で走る（そして同じコマンドの直列化で相手の実行を待つ）ため。判定は保守的:
 // コマンドを `|` / `&&` / `||` / `;` / 改行 / `&` / `$(` / バッククォート / `(` / `{` で区切り、各区切りの先頭の語（環境変数の代入と

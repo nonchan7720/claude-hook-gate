@@ -1,6 +1,6 @@
 package hookgate
 
-// tests/config-dir.spec.ts のうち host-codex（CodexConfigDirs）に触れる部分と、gate.yml の綴り間違い（stop_test_gate.go）の移植。
+// 設定ディレクトリのうち host-codex（CodexConfigDirs）に触れる部分と、gate.yml の綴り間違い（stop_test_gate.go）のテスト。
 // config_dir_test.go / config_dir_feedback_test.go は同じ場面を codexDirsForTest（CodexConfigDirs と同じ値の写し）で検証している。
 // ここではそれが本物の CodexConfigDirs と一致することと、本物の定数での各場面、gate.yml の case を確かめる。
 

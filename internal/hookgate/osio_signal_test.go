@@ -3,7 +3,7 @@
 package hookgate
 
 // osIo.Run がコマンドの終了で返ること（孫がパイプを握っていても）と、hook のプロセスがシグナルで止められたとき子の
-// プロセスグループを道連れにすることの確認。Node 版の tests/node-io.spec.ts に対応する。
+// プロセスグループを道連れにすることの確認。
 
 import (
 	"context"

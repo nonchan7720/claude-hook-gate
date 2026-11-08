@@ -69,16 +69,21 @@ func RunCore(io Io, call CoreCall, sessionID string, options PluginOptions) Hook
 }
 
 // RunHostHook は 1 イベントを処理して stdout / stderr / 終了コードにする（環境変数は env から読む）。
-func RunHostHook(host Host, event string, payload Dict, env map[string]string) ScriptResult {
+// events を渡すと、画面の更新（Progress / Result / Redraw）をそこへ流す（mod から呼ばれたとき。OsIoInit.Events）。
+func RunHostHook(host Host, event string, payload Dict, env map[string]string, events ...io.Writer) ScriptResult {
 	options := host.Options(env)
-	osIo := MakeOsIo(OsIoInit{
+	init := OsIoInit{
 		Environ:        env,
 		PayloadCwd:     strOf(payload["cwd"]),
 		Language:       options.Language,
 		AutoCount:      BoolPtr(options.AutoCountEnabled()),
 		AppName:        host.AppName(),
 		ConfigDirNames: host.ConfigDirNames(),
-	})
+	}
+	if len(events) > 0 {
+		init.Events = events[0]
+	}
+	osIo := MakeOsIo(init)
 	sessionID := strOf(payload["session_id"])
 	if sessionID == "" {
 		sessionID = "unknown"
@@ -89,12 +94,12 @@ func RunHostHook(host Host, event string, payload Dict, env map[string]string) S
 }
 
 // runHostHookSafe は RunHostHook の内部エラー（panic）を呼び出し側に出さない。
-func runHostHookSafe(host Host, event string, payload Dict, env map[string]string) (ScriptResult, bool) {
+func runHostHookSafe(host Host, event string, payload Dict, env map[string]string, events ...io.Writer) (ScriptResult, bool) {
 	var out ScriptResult
 	ok := false
 	func() {
 		defer func() { _ = recover() }()
-		out = RunHostHook(host, event, payload, env)
+		out = RunHostHook(host, event, payload, env, events...)
 		ok = true
 	}()
 	return out, ok
@@ -126,7 +131,13 @@ func CliMain(host Host, args []string, stdin io.Reader, stdout, stderr io.Writer
 		}
 		// 壊れた JSON で作業を止めない。
 	}
-	out, ok := runHostHookSafe(host, event, payload, EnvironMap())
+	environ := EnvironMap()
+	// mod（src/register.ts）から呼ばれたときは、処理中の表示を stderr へ逐次流す（mod が $.ui.status に渡す）。
+	var events []io.Writer
+	if environ["FEEDBACK_GATE_EVENTS"] == "stderr" {
+		events = append(events, stderr)
+	}
+	out, ok := runHostHookSafe(host, event, payload, environ, events...)
 	if !ok {
 		// hook の内部エラーで作業を止めない。
 		return 0

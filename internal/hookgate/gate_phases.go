@@ -1,6 +1,6 @@
 package hookgate
 
-// gate の rules フェーズ / checks フェーズと、エントリポイント RunGate（src/gate.ts の runRules 以降）。
+// gate の rules フェーズ / checks フェーズと、エントリポイント RunGate。
 
 import (
 	"bytes"

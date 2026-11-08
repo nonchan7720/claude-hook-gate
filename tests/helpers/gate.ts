@@ -1,25 +1,6 @@
 // gate 系テストの共通ヘルパー（Python 版 test_stop_gate.py のヘルパーに対応）。
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { Gate, runGate } from '../../src/gate.ts'
-import type { Lang } from '../../src/i18n.ts'
-import type { ScriptResult } from '../../src/io.ts'
-import { MISSING_DOGWOOD_BIN, makeIo } from './node-io.ts'
-
-export type GateOpts = { stopHookActive?: boolean; agentId?: string; phase?: string; dogwoodBin?: string; lang?: Lang }
-
-const ioFor = (proj: string, opts: GateOpts) => makeIo({ projectDir: proj, env: { DOGWOOD_BIN: opts.dogwoodBin ?? MISSING_DOGWOOD_BIN }, lang: opts.lang })
-
-/** gate を1回実行する（phase 省略時は checks）。 */
-export const gate = (proj: string, session = 'sess1', opts: GateOpts = {}): Promise<ScriptResult> =>
-  runGate(ioFor(proj, opts), { sessionId: session, agentId: opts.agentId, phase: opts.phase, stopHookActive: opts.stopHookActive })
-
-/** 状態ファイルの操作に使う Gate インスタンス（main() は呼ばない）。 */
-export const newGate = (proj: string, session = 'sess1', opts: GateOpts = {}): Gate =>
-  new Gate(ioFor(proj, opts), { sessionId: session, agentId: opts.agentId, phase: opts.phase, stopHookActive: opts.stopHookActive })
-
-export const rules = (proj: string, session = 'sess1', opts: GateOpts = {}) => gate(proj, session, { ...opts, phase: 'rules' })
-export const checks = (proj: string, session = 'sess1', opts: GateOpts = {}) => gate(proj, session, { ...opts, phase: 'checks' })
 
 export const touch = (...parts: string[]): string => {
   const p = path.join(...parts)

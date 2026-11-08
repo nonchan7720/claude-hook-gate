@@ -38,6 +38,16 @@ declare module 'claude-code' {
     isStderrTruncated?: boolean
   }
 
+  export type ProcessSpawnInit = {
+    argv: readonly string[]
+    cwd?: string
+    env?: Record<string, string>
+    /** stdin に書いて閉じる文字列。 */
+    input?: string
+  }
+
+  export type ProcessSpawnChunk = { stream: 'stdout' | 'stderr'; text: string }
+
   export type Timer = { cancel(): void }
 
   /** エンジンインターフェース（`$`）のうち、このプラグインが使う名詞とメソッド。 */
@@ -62,7 +72,14 @@ declare module 'claude-code' {
       exists(path: string): Promise<boolean>
       stat(path: string): Promise<FsStat>
     }
-    process: { run(argv: readonly string[], init?: ProcessRunInit): Promise<ProcessRunResult> }
+    process: {
+      run(argv: readonly string[], init?: ProcessRunInit): Promise<ProcessRunResult>
+      /**
+       * 出力を届いた順に返す（stdout / stderr の塊）。タイムアウトは無い。hook が中断される（ESC）と、エンジンが
+       * プロセスの木に SIGTERM を送り、猶予のあと強制終了する。
+       */
+      spawn(init: ProcessSpawnInit): AsyncIterable<ProcessSpawnChunk>
+    }
     /** スラッシュコマンドの登録。 */
     command: { register(command: { name: string; description: string; argumentHint?: string }): Promise<unknown> }
   }

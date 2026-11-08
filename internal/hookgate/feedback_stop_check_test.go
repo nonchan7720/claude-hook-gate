@@ -1,7 +1,5 @@
 package hookgate
 
-// tests/feedback-stop-check.spec.ts の移植。
-
 import (
 	"os"
 	"path/filepath"
