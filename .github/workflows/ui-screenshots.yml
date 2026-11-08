@@ -32,8 +32,9 @@ jobs:
     env:
       PR: ${{ github.event.pull_request.number }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-      SHOTS: ${{ runner.temp }}/shots
     steps:
+      # runner コンテキストはジョブの env では使えないので、撮った画像の置き場所はステップで決める。
+      - run: echo "SHOTS=$RUNNER_TEMP/shots" >> "$GITHUB_ENV"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
         with:
