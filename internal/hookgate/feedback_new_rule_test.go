@@ -18,9 +18,9 @@ func nrtRule(name, description string, count int) string {
 }
 
 func TestFeedbackNewRule(t *testing.T) {
-	setup := func(t *testing.T) (fb, proj string) {
+	setup := func(t *testing.T) (string, string) {
 		t.Helper()
-		fb, proj = t.TempDir(), t.TempDir()
+		fb, proj := t.TempDir(), t.TempDir()
 		fbtWrite(filepath.Join(fb, "test_mocking.md"), nrtRule("test_mocking", "Do not mock the database in integration tests", 3))
 		fbtWrite(filepath.Join(fb, "commit_style.md"), nrtRule("commit_style", "Write commit messages in English", 1))
 		return fb, proj
