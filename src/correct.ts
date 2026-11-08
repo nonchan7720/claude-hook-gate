@@ -183,7 +183,7 @@ const countsText = (rec: Record<string, number>): string =>
     .map(([k, n]) => `${k} ${n}`)
     .join(', ')
 
-function inactiveReason(rule: Rule, now: number, lang: Lang): string {
+export function inactiveReason(rule: Rule, now: number, lang: Lang): string {
   const t = tr(lang)
   if (rule.expires !== undefined && now > rule.expires) return t('correct.expired', { date: new Date(rule.expires).toISOString().slice(0, 10) })
   const parts: string[] = []
@@ -329,7 +329,7 @@ export function buildContext(proposals: Proposal[], applied: Applied[], lang: La
 }
 
 /** グローバル / プロジェクトの feedback ディレクトリを無加工で読み、isRuleActive が false のものを返す。 */
-async function listInactive(io: Io, active: Rule[]): Promise<Rule[]> {
+export async function listInactive(io: Io, active: Rule[]): Promise<Rule[]> {
   const dirs = [...new Set([...feedbackDirs(io), ...projectFeedbackDirs(io)])]
   const activeNames = new Set(active.map((r) => r.name))
   const seen = new Set<string>()

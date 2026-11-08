@@ -84,7 +84,7 @@ describe('/correct', () => {
   test('session.start registers the command', () =>
     withMod(async (m) => {
       await m.call('session.start', {})
-      expect(commandLog.map((c) => c.name)).toEqual(['correct'])
+      expect(commandLog.map((c) => c.name)).toEqual(['correct', 'hook-list'])
       expect(commandLog[0]?.description).toContain('feedback ルール')
     }))
 
@@ -134,6 +134,25 @@ describe('/correct', () => {
       { language: 'ja' },
       { LANG: 'en_US.UTF-8' },
     ))
+})
+
+describe('/hook-list', () => {
+  test('command.run lists the gate rules and the feedback rules', () =>
+    withMod(async (m, proj, feedback) => {
+      writeGateYaml(proj, { rules: [{ match: '**/*.py', run: ['ruff check'] }] })
+      writeRule(feedback, 'confirmed', 3)
+      const r = (await m.call('command.run', { command: 'hook-list', args: '' })) as Out
+      expect(String(r.text).startsWith(`[hook-list] ${proj}`)).toBe(true)
+      expect(String(r.text)).toContain('  1. match: **/*.py')
+      expect(String(r.text)).toContain('  - confirmed [グローバル] count 3')
+    }))
+
+  test('the gate argument shows only gate.yaml', () =>
+    withMod(async (m) => {
+      const r = (await m.call('command.run', { command: 'hook-list', args: 'gate' })) as Out
+      expect(String(r.text)).toContain('gate.yaml がありません')
+      expect(String(r.text)).not.toContain('feedback ルール')
+    }))
 })
 
 describe('UserPromptSubmit', () => {

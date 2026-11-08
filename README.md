@@ -154,6 +154,20 @@ Unknown arguments are ignored. There are five kinds of proposals, listed in this
 
 With the automatic increase (`autoCount`) on, `count` goes up by 1 per session in which the rule is violated. A `bump` proposal instead jumps to 3 or 5 based on the violations in the window; it always starts from the current `count`, and `apply` only rewrites a file whose `count` still matches the proposal, so the two never add up twice.
 
+### `/hook-list`
+
+Lists what feedback-gate runs in this project and when. It writes nothing. `src/register.ts` registers it on `session.start`; the logic is in `src/hook-list.ts`.
+
+```
+/hook-list [gate|feedback]
+```
+
+Without an argument it shows everything; `gate` / `feedback` show only that section.
+
+- **gate.yaml**: the path of the `{.claude,.agents}/gate.yaml` found, then `rules` (PostToolUse right after an edit: `match`, the `run` commands, `parallel`, `run_checks`, `dir` / `per_file_dir` / `timeout` / `policy`), `consistency_checks` (Stop / SubagentStop; a check no rule names in `run_checks` is marked as never running) and `session_start` (SessionStart; `on` / `background`), each with a line on when it runs. A missing or unparsable file is reported as such.
+- **feedback rules**: for each active rule of the merged global + project view, where it lives (global / project), its `count` and level (provisional / confirmed / deny), how it is injected (every prompt / when a file matching `files` is read or edited / never), each `enforce` entry (event and effective severity, `path` / `changed` / `when` / `unless` / the `check` command, ...) and the file path. Then the inactive rules (expired, `projects` / `when_exists` not matching) and the unreadable ones, with the reason.
+- **Plugin settings**: the current `agentLaunchGuard`, `autoCount` and `language` (only without an argument).
+
 ## Skills
 
 Two skills are bundled under `skills/`. Claude Code loads them with the plugin; invoke them as `/feedback-gate:<name>` or let Claude pick them up from their descriptions. Each is a `SKILL.md` with the procedure plus reference files it reads when needed; the hooks do not depend on them.
@@ -316,7 +330,7 @@ What the plugin reads, runs, writes and decides, for reviewers and for anyone in
 - **Context it adds**: on UserPromptSubmit it adds the rules file and your confirmed feedback rules (`count >= 3`) to the context. PostToolUse, Stop and SubagentStop give Claude the gate results and rule violations (as feedback or a block reason); PostToolUse(Agent) adds a finished subagent's results to the caller's context.
 - **Settings hooks**: `hooks/hooks.json` registers a `command` hook for each event, which runs `scripts/hook.sh` and then `feedback-gate claude <Event>` (the Go binary) with the event's JSON on stdin. It runs the same checks as the mod hooks and returns the same things (deny / ask, block, added context), so the points above apply to it too. It exits without doing anything when the mod's marker for the session exists, or when the binary is neither cached nor downloadable. It reads the plugin settings from the `CLAUDE_PLUGIN_OPTION_*` environment variables.
 - **Commands**: it registers `/correct` at session start, and its `command.run` hook answers only that command.
-- **Bundled files**: `hooks/register.js` is built from `src/` by `scripts/build.ts` and is not minified. `hooks/vendor/yaml.js` and `hooks/vendor/i18next.js` are the npm packages [`yaml`](https://www.npmjs.com/package/yaml) and [`i18next`](https://www.npmjs.com/package/i18next) at the versions pinned in `package.json` / `bun.lock`, minified only to keep each file small. The getters, `Object.defineProperty` and promise checks (`typeof x.then === "function"`) that a scan reports are in these two libraries (yaml's document classes, i18next's async loading). The plugin's own code uses no `Proxy`, `eval` or `new Function`.
+- **Bundled files**: `hooks/register.js` is built from `src/` by `scripts/build.ts` and is not minified. The message texts (`locales/<lang>.yaml`) are split out as plain strings into `hooks/vendor/locales-<lang>.js` to keep `register.js` small. `hooks/vendor/yaml.js` and `hooks/vendor/i18next.js` are the npm packages [`yaml`](https://www.npmjs.com/package/yaml) and [`i18next`](https://www.npmjs.com/package/i18next) at the versions pinned in `package.json` / `bun.lock`, minified only to keep each file small. The getters, `Object.defineProperty` and promise checks (`typeof x.then === "function"`) that a scan reports are in these two libraries (yaml's document classes, i18next's async loading). The plugin's own code uses no `Proxy`, `eval` or `new Function`.
 
 ## Development
 

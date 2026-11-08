@@ -154,6 +154,20 @@ flowchart LR
 
 自動引き上げ（`autoCount`）が有効なら、違反したセッションごとに `count` が 1 ずつ上がります。`bump` 提案は窓内の違反回数を根拠に 3 や 5 へ一気に引き上げるもので、`apply` は提案時の `count` がファイルと一致するときだけ書き換えるため、自動引き上げと二重に上がることはありません（提案は常に現在の `count` から出ます）。
 
+### `/hook-list`
+
+このプロジェクトで feedback-gate が「いつ・何を」動かすかを一覧で確認するコマンドです。ファイルは何も書き換えません。`src/register.ts` が `session.start` で登録し、ロジックは `src/hook-list.ts` にあります。
+
+```
+/hook-list [gate|feedback]
+```
+
+引数なしで全部、`gate` / `feedback` でその節だけを出します。
+
+- **gate.yaml**: 見つかった `{.claude,.agents}/gate.yaml` のパスと、`rules`（ファイル編集直後の PostToolUse。`match`・`run` のコマンド・`parallel`・`run_checks`・`dir` / `per_file_dir` / `timeout` / `policy`）、`consistency_checks`（Stop / SubagentStop。どの rule の `run_checks` にも無いものは「実行されない」と明示）、`session_start`（SessionStart。`on` / `background`）を、それぞれが動くタイミングの説明付きで並べます。無い・YAML として読めない場合はその旨を出します。
+- **feedback ルール**: グローバルとプロジェクトをマージした有効なルールごとに、置き場所（グローバル / プロジェクト）、`count` と段階（暫定・確定・deny）、注入のされ方（毎プロンプト / `files` に一致するファイルを読んだ・編集したとき / しない）、`enforce` の各要素（イベントと実効の severity、`path` / `changed` / `when` / `unless` / `check` のコマンドなど）、ファイルのパスを出します。続けて無効なルール（`expires` 切れ・`projects` / `when_exists` 不一致）と読めないルールを理由付きで出します。
+- **プラグイン設定**: `agentLaunchGuard`・`autoCount`・`language` の現在値（引数なしのときだけ）。
+
 ## スキル
 
 `skills/` に 2 つのスキルを同梱しています。プラグインと一緒に Claude Code が読み込み、`/feedback-gate:<name>` で呼び出せます（説明文から Claude が自分で使うこともあります）。それぞれ手順を書いた `SKILL.md` と、必要なときに読む参照ファイルからなり、フックの動作はスキルに依存しません。
@@ -316,7 +330,7 @@ checks フェーズ（Stop / SubagentStop）で 1 件以上のコマンドが実
 - **追加するコンテキスト**: UserPromptSubmit で、ルールファイルと確定したフィードバックルール（`count >= 3`）をコンテキストに加えます。PostToolUse・Stop・SubagentStop では、gate の結果とルール違反を Claude に返します（フィードバックかブロックの理由として）。PostToolUse(Agent) では、終わったサブエージェントの結果を呼び出し元のコンテキストに加えます。
 - **settings hook**: `hooks/hooks.json` はイベントごとに `command` hook を登録しており、`scripts/hook.sh` を経由して、イベントの JSON を stdin で渡した `feedback-gate claude <Event>`（Go 製のバイナリ）を実行します。mod のフックと同じ検査を行い、同じもの（deny / ask、block、追加する context）を返すので、上の各点はこちらにも当てはまります。セッションの mod のマーカーがあるとき、またはバイナリがキャッシュにも無くダウンロードもできないときは、何もせずに終わります。プラグイン設定は環境変数 `CLAUDE_PLUGIN_OPTION_*` から読みます。
 - **コマンド**: セッション開始時に `/correct` を登録し、`command.run` のフックはこのコマンドにだけ応答します。
-- **同梱ファイル**: `hooks/register.js` は `src/` から `scripts/build.ts` で作るもので、minify していません。`hooks/vendor/yaml.js` と `hooks/vendor/i18next.js` は npm パッケージの [`yaml`](https://www.npmjs.com/package/yaml) と [`i18next`](https://www.npmjs.com/package/i18next)（`package.json` / `bun.lock` で固定した版）で、ファイルを小さくするためだけに minify しています。検査で報告される getter、`Object.defineProperty`、Promise の判定（`typeof x.then === "function"`）は、この 2 つのライブラリ側のコードです（yaml のドキュメントのクラス、i18next の非同期読み込み）。プラグイン自身のコードは `Proxy`、`eval`、`new Function` を使っていません。
+- **同梱ファイル**: `hooks/register.js` は `src/` から `scripts/build.ts` で作るもので、minify していません。メッセージの文面（`locales/<lang>.yaml`）は `hooks/vendor/locales-<lang>.js` に文字列のまま切り出しています（`register.js` の大きさを抑えるため）。`hooks/vendor/yaml.js` と `hooks/vendor/i18next.js` は npm パッケージの [`yaml`](https://www.npmjs.com/package/yaml) と [`i18next`](https://www.npmjs.com/package/i18next)（`package.json` / `bun.lock` で固定した版）で、ファイルを小さくするためだけに minify しています。検査で報告される getter、`Object.defineProperty`、Promise の判定（`typeof x.then === "function"`）は、この 2 つのライブラリ側のコードです（yaml のドキュメントのクラス、i18next の非同期読み込み）。プラグイン自身のコードは `Proxy`、`eval`、`new Function` を使っていません。
 
 ## 開発
 
