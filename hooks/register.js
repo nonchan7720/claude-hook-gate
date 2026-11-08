@@ -4638,7 +4638,8 @@ function parseItem(raw) {
   if (typeof d.cmd !== "string" || d.cmd.trim() === "")
     return;
   const t = Number(d.timeout);
-  const on = typeof d.on === "string" ? [d.on] : Array.isArray(d.on) ? d.on.map(String) : undefined;
+  const rawOn = d.on !== undefined && d.on !== null ? d.on : d.true;
+  const on = typeof rawOn === "string" ? [rawOn] : Array.isArray(rawOn) ? rawOn.map(String) : undefined;
   return {
     cmd: d.cmd,
     name: truthy(d.name) ? String(d.name) : slug(d.cmd),
