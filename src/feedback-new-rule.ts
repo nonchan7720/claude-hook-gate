@@ -2,7 +2,7 @@
 //
 // Write（と Bash の heredoc）で feedback のディレクトリ（グローバル ~/.claude/feedback/ とプロジェクトの .claude/feedback/）の
 // 直下にまだ無い *.md を書こうとしたとき、既存のルールが 1 つでもあれば、セッション・ファイルごとに最初の 1 回だけ止めて
-// 既存ルールの一覧（name / description が似ているものを先に、★ 付きで）を返す。同じ指摘のルールがあれば新しいファイルを作らず、
+// 既存ルールの全件の一覧（ディレクトリごと。name / description が似ているものを先に、★ 付きで）を返す。同じ指摘のルールがあれば新しいファイルを作らず、
 // そのルールの count を上げて本文を更新させるため（同じ内容のルールが別名で増えるのを防ぐ）。
 // 該当するものが無ければ、同じ書き込みをもう一度すれば通す（2 回目は止めない）。
 //
@@ -23,8 +23,6 @@ import type { Io } from './io.ts'
 import { basename, dirname, expandUser, join, normpath, splitext } from './path.ts'
 import { isDict, truthy } from './pyutil.ts'
 
-/** 一覧に出す既存ルールの上限（多すぎると context を食うので、似ているものから順にこれだけ）。 */
-export const NEW_RULE_LIST_MAX = 30
 /** これ以上の similarityScore を「似ている」とする。 */
 export const SIMILAR_MIN_SCORE = 2
 
@@ -64,6 +62,13 @@ function draftText(content: string): string {
 
 const stemOf = (path: string): string => splitext(basename(path))[0]
 
+/** 一覧の 1 行（ディレクトリの見出しの下）。name がファイル名と違うときだけ name も出す。 */
+function listLine(rule: Rule, similar: boolean): string {
+  const fileName = basename(rule.path)
+  const nameNote = rule.name === stemOf(rule.path) ? '' : `name: ${rule.name}, `
+  return `  ${similar ? '★' : '-'} ${fileName} (${nameNote}count: ${rule.count})${rule.description ? `: ${rule.description}` : ''}`
+}
+
 export const newRuleStatePath = (io: Io, sessionId: string): string => sessionStatePath(io, '.new_rule_state', sessionId)
 
 /**
@@ -95,17 +100,20 @@ export async function newRuleNotice(io: Io, filePath: string, content: string, s
   await saveNameSet(io, statePath, 'confirmed', confirmed.add(file))
 
   const draft = similarityTokens(`${stemOf(file)} ${draftText(content)}`)
-  const scored = rules
-    .map((rule, index) => ({ rule, index, score: similarityScore(draft, similarityTokens(`${stemOf(rule.path)} ${rule.name} ${rule.description}`)) }))
-    .sort((a, b) => b.score - a.score || a.index - b.index)
+  const scored = rules.map((rule, index) => ({
+    rule,
+    index,
+    score: similarityScore(draft, similarityTokens(`${stemOf(rule.path)} ${rule.name} ${rule.description}`)),
+  }))
   const t = tr(io.lang)
   const similar = scored.filter((s) => s.score >= SIMILAR_MIN_SCORE).length
-  const lines = scored
-    .slice(0, NEW_RULE_LIST_MAX)
-    .map(
-      ({ rule, score }) =>
-        `${score >= SIMILAR_MIN_SCORE ? '★' : '-'} ${rule.name} (count: ${rule.count}, ${rule.path})${rule.description ? `: ${rule.description}` : ''}`,
-    )
-  if (scored.length > NEW_RULE_LIST_MAX) lines.push(t('newRule.more', { n: scored.length - NEW_RULE_LIST_MAX }))
+  // 全件をディレクトリごとにまとめて出す（パスは見出しにして 1 行を短くする）。各ディレクトリの中は似ているものが先。
+  const lines: string[] = []
+  for (const d of dirs) {
+    const inDir = scored.filter((s) => dirname(s.rule.path) === d).sort((a, b) => b.score - a.score || a.index - b.index)
+    if (inDir.length === 0) continue
+    lines.push(`${d}/`)
+    for (const { rule, score } of inDir) lines.push(listLine(rule, score >= SIMILAR_MIN_SCORE))
+  }
   return [t('newRule.header', { file, n: similar }), ...lines, t('newRule.instruction')].join('\n')
 }

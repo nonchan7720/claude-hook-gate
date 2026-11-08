@@ -5,7 +5,7 @@ package hookgate
 //
 // Write（と Bash の heredoc）で feedback のディレクトリ（グローバル ~/.claude/feedback/ とプロジェクトの .claude/feedback/）の
 // 直下にまだ無い *.md を書こうとしたとき、既存のルールが 1 つでもあれば、セッション・ファイルごとに最初の 1 回だけ止めて
-// 既存ルールの一覧（name / description が似ているものを先に、★ 付きで）を返す。同じ指摘のルールがあれば新しいファイルを作らず、
+// 既存ルールの全件の一覧（ディレクトリごと。name / description が似ているものを先に、★ 付きで）を返す。同じ指摘のルールがあれば新しいファイルを作らず、
 // そのルールの count を上げて本文を更新させるため（同じ内容のルールが別名で増えるのを防ぐ）。
 // 該当するものが無ければ、同じ書き込みをもう一度すれば通す（2 回目は止めない）。
 //
@@ -17,9 +17,6 @@ import (
 	"strconv"
 	"strings"
 )
-
-// NewRuleListMax は一覧に出す既存ルールの上限（多すぎると context を食うので、似ているものから順にこれだけ）。
-const NewRuleListMax = 30
 
 // SimilarMinScore はこれ以上の SimilarityScore を「似ている」とする。
 const SimilarMinScore = 2
@@ -147,12 +144,17 @@ func nrSaveConfirmed(io Io, sessionID string, confirmed map[string]bool) {
 	_ = io.WriteFile(NewRuleStatePath(io, sessionID), JSONStringify(OMap{{"confirmed", fbSortedKeys(confirmed)}}))
 }
 
+// nrListLine は一覧の 1 行（ディレクトリの見出しの下）。name がファイル名と違うときだけ name も出す。
 func nrListLine(rule Rule, similar bool) string {
 	mark := "-"
 	if similar {
 		mark = "★"
 	}
-	line := mark + " " + rule.Name + " (count: " + strconv.Itoa(rule.Count) + ", " + rule.Path + ")"
+	nameNote := ""
+	if rule.Name != nrStemOf(rule.Path) {
+		nameNote = "name: " + rule.Name + ", "
+	}
+	line := "  " + mark + " " + Basename(rule.Path) + " (" + nameNote + "count: " + strconv.Itoa(rule.Count) + ")"
 	if rule.Description != "" {
 		line += ": " + rule.Description
 	}
@@ -196,8 +198,6 @@ func NewRuleNotice(io Io, filePath, content string, sessionID any) (string, bool
 	for i, r := range rules {
 		scored[i] = scoredRule{r, SimilarityScore(draft, SimilarityTokens(nrStemOf(r.Path)+" "+r.Name+" "+r.Description))}
 	}
-	sort.SliceStable(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
-	shown := scored[:min(NewRuleListMax, len(scored))]
 	t := Tr(io.Lang())
 	similar := 0
 	for _, s := range scored {
@@ -206,11 +206,22 @@ func NewRuleNotice(io Io, filePath, content string, sessionID any) (string, bool
 		}
 	}
 	lines := []string{t("newRule.header", map[string]any{"file": file, "n": similar})}
-	for _, s := range shown {
-		lines = append(lines, nrListLine(s.rule, s.score >= SimilarMinScore))
-	}
-	if len(scored) > len(shown) {
-		lines = append(lines, t("newRule.more", map[string]any{"n": len(scored) - len(shown)}))
+	// 全件をディレクトリごとにまとめて出す（パスは見出しにして 1 行を短くする）。各ディレクトリの中は似ているものが先。
+	for _, d := range dirs {
+		inDir := []scoredRule{}
+		for _, s := range scored {
+			if Dirname(s.rule.Path) == d {
+				inDir = append(inDir, s)
+			}
+		}
+		if len(inDir) == 0 {
+			continue
+		}
+		sort.SliceStable(inDir, func(i, j int) bool { return inDir[i].score > inDir[j].score })
+		lines = append(lines, d+"/")
+		for _, s := range inDir {
+			lines = append(lines, nrListLine(s.rule, s.score >= SimilarMinScore))
+		}
 	}
 	lines = append(lines, t("newRule.instruction"))
 	return strings.Join(lines, "\n"), true

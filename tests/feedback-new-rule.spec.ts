@@ -39,12 +39,24 @@ describe('feedback-new-rule', () => {
     expect(hs.permissionDecision).toBe('deny')
     const reason = String(hs.permissionDecisionReason)
     expect(reason).toContain('mock_tests.md')
-    expect(reason).toContain('★ test_mocking (count: 3')
-    expect(reason).toContain('- commit_style (count: 1')
+    expect(reason).toContain(`${fb}/\n`)
+    expect(reason).toContain('  ★ test_mocking.md (count: 3')
+    expect(reason).toContain('  - commit_style.md (count: 1')
     expect(reason.indexOf('test_mocking')).toBeLessThan(reason.indexOf('commit_style'))
     expect(reason).toContain('count を 1 上げ')
     expect(reason).toContain('似ているもの 1 件')
     expect(reason).not.toContain('newRule.')
+  })
+
+  test('every existing rule is listed, grouped by directory, with the name only when it differs from the file name', async () => {
+    for (let i = 0; i < 40; i++) fs.writeFileSync(path.join(fb, `rule_${String(i).padStart(2, '0')}.md`), rule(`topic_${i}`, `topic ${i}`))
+    const dir = path.join(proj, '.claude', 'feedback')
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(path.join(dir, 'local.md'), rule('local', 'project rule', 2))
+    const reason = String(decision((await run(write(path.join(fb, 'zzz_new.md'), rule('zzz_new', 'unrelated')))).stdout).permissionDecisionReason)
+    for (let i = 0; i < 40; i++) expect(reason).toContain(`rule_${String(i).padStart(2, '0')}.md (name: topic_${i}, count: 1): topic ${i}`)
+    expect(reason).toContain(`${dir}/\n  - local.md (count: 2): project rule`)
+    expect(reason.indexOf(`${fb}/`)).toBeLessThan(reason.indexOf(`${dir}/`))
   })
 
   test('the same write passes the second time in the session', async () => {
