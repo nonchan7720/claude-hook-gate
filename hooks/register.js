@@ -3956,7 +3956,11 @@ async function newRuleNotice(io, filePath, content, sessionId) {
       continue;
     lines.push(`${d}/`);
     for (const { rule, score } of inDir)
-      lines.push(listLine(rule, score >= SIMILAR_MIN_SCORE));
+      if (score > 0)
+        lines.push(listLine(rule, score >= SIMILAR_MIN_SCORE));
+    const unrelated = inDir.filter((s) => s.score === 0).map((s) => stemOf(s.rule.path));
+    if (unrelated.length > 0)
+      lines.push(`  ${t("newRule.unrelated", { n: unrelated.length })}${unrelated.join(", ")}`);
   }
   return [t("newRule.header", { file, n: similar }), ...lines, t("newRule.instruction")].join(`
 `);
