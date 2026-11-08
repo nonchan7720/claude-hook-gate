@@ -44,7 +44,8 @@ new file.
 
 The hook backs this up: the first Write (or heredoc) of a rule file that does not exist yet
 is denied once per session and file, with the list of all existing rules (grouped by directory, similar ones
-first, marked ★; the mark only compares words, so read the whole list). Pick the rule to update from that list; write the new file again only when none
+first, marked ★; rules with no word in common are listed by file name only, and the
+mark only compares words, so open any of them that might still be the same rule). Pick the rule to update from that list; write the new file again only when none
 fits.
 
 `CLAUDE_FEEDBACK_DIR`, when set, replaces `~/.claude/feedback`. Never touch the state

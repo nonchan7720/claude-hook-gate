@@ -219,8 +219,17 @@ func NewRuleNotice(io Io, filePath, content string, sessionID any) (string, bool
 		}
 		sort.SliceStable(inDir, func(i, j int) bool { return inDir[i].score > inDir[j].score })
 		lines = append(lines, d+"/")
+		// 語が 1 つも重ならない（明らかに似ていない）ものはファイル名だけを 1 行にまとめる（context を食わないように）。
+		unrelated := []string{}
 		for _, s := range inDir {
-			lines = append(lines, nrListLine(s.rule, s.score >= SimilarMinScore))
+			if s.score > 0 {
+				lines = append(lines, nrListLine(s.rule, s.score >= SimilarMinScore))
+			} else {
+				unrelated = append(unrelated, nrStemOf(s.rule.Path))
+			}
+		}
+		if len(unrelated) > 0 {
+			lines = append(lines, "  "+t("newRule.unrelated", map[string]any{"n": len(unrelated)})+strings.Join(unrelated, ", "))
 		}
 	}
 	lines = append(lines, t("newRule.instruction"))

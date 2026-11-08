@@ -25,6 +25,7 @@ guard:
 
 newRule:
   header: "[feedback-gate] Before creating the new rule {{file}}, check the existing rules (★ = similar name / description, {{n}} found):"
+  unrelated: "{{n}} with no word in common (file names only; open them if needed): "
   instruction: "If a rule already covers the same feedback or kind of situation, do not create a new file; update that rule: raise its count by 1 (unless a hook already did in this session), add this case and the excuse to the body, and generalize the wording. If several rules are close, propose merging them. Only when none fits, run the same write again (it is not stopped the second time)."
 
 postEdit:

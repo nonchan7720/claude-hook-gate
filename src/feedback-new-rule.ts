@@ -113,7 +113,10 @@ export async function newRuleNotice(io: Io, filePath: string, content: string, s
     const inDir = scored.filter((s) => dirname(s.rule.path) === d).sort((a, b) => b.score - a.score || a.index - b.index)
     if (inDir.length === 0) continue
     lines.push(`${d}/`)
-    for (const { rule, score } of inDir) lines.push(listLine(rule, score >= SIMILAR_MIN_SCORE))
+    // 語が 1 つも重ならない（明らかに似ていない）ものはファイル名だけを 1 行にまとめる（context を食わないように）。
+    for (const { rule, score } of inDir) if (score > 0) lines.push(listLine(rule, score >= SIMILAR_MIN_SCORE))
+    const unrelated = inDir.filter((s) => s.score === 0).map((s) => stemOf(s.rule.path))
+    if (unrelated.length > 0) lines.push(`  ${t('newRule.unrelated', { n: unrelated.length })}${unrelated.join(', ')}`)
   }
   return [t('newRule.header', { file, n: similar }), ...lines, t('newRule.instruction')].join('\n')
 }

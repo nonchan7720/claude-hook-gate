@@ -41,21 +41,29 @@ describe('feedback-new-rule', () => {
     expect(reason).toContain('mock_tests.md')
     expect(reason).toContain(`${fb}/\n`)
     expect(reason).toContain('  ★ test_mocking.md (count: 3')
-    expect(reason).toContain('  - commit_style.md (count: 1')
+    expect(reason).toContain('  語が重ならないもの 1 件（ファイル名だけ。必要なら開いて確認）: commit_style')
+    expect(reason).not.toContain('Write commit messages in English')
     expect(reason.indexOf('test_mocking')).toBeLessThan(reason.indexOf('commit_style'))
     expect(reason).toContain('count を 1 上げ')
     expect(reason).toContain('似ているもの 1 件')
     expect(reason).not.toContain('newRule.')
   })
 
-  test('every existing rule is listed, grouped by directory, with the name only when it differs from the file name', async () => {
-    for (let i = 0; i < 40; i++) fs.writeFileSync(path.join(fb, `rule_${String(i).padStart(2, '0')}.md`), rule(`topic_${i}`, `topic ${i}`))
+  test('every existing rule is listed by directory; rules with no word in common are reduced to their file names', async () => {
+    const pad = (i: number) => String(i).padStart(2, '0')
+    for (let i = 0; i < 40; i++) {
+      const related = i % 2 === 0
+      fs.writeFileSync(path.join(fb, `rule_${pad(i)}.md`), related ? rule(`topic_${i}`, `topic ${i}`) : rule(`misc_${i}`, `misc ${i}`))
+    }
     const dir = path.join(proj, '.claude', 'feedback')
     fs.mkdirSync(dir, { recursive: true })
     fs.writeFileSync(path.join(dir, 'local.md'), rule('local', 'project rule', 2))
-    const reason = String(decision((await run(write(path.join(fb, 'zzz_new.md'), rule('zzz_new', 'unrelated')))).stdout).permissionDecisionReason)
-    for (let i = 0; i < 40; i++) expect(reason).toContain(`rule_${String(i).padStart(2, '0')}.md (name: topic_${i}, count: 1): topic ${i}`)
-    expect(reason).toContain(`${dir}/\n  - local.md (count: 2): project rule`)
+    const reason = String(decision((await run(write(path.join(fb, 'zzz_new.md'), rule('zzz_new', 'topic')))).stdout).permissionDecisionReason)
+    for (let i = 0; i < 40; i += 2) expect(reason).toContain(`  ★ rule_${pad(i)}.md (name: topic_${i}, count: 1): topic ${i}`)
+    const odd = Array.from({ length: 20 }, (_, k) => `rule_${pad(2 * k + 1)}`)
+    expect(reason).toContain(`  語が重ならないもの 22 件（ファイル名だけ。必要なら開いて確認）: ${['commit_style', ...odd, 'test_mocking'].join(', ')}`)
+    expect(reason).not.toContain('misc 1')
+    expect(reason).toContain(`${dir}/\n  語が重ならないもの 1 件（ファイル名だけ。必要なら開いて確認）: local`)
     expect(reason.indexOf(`${fb}/`)).toBeLessThan(reason.indexOf(`${dir}/`))
   })
 

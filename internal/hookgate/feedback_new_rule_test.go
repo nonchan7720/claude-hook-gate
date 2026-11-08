@@ -53,26 +53,36 @@ func TestFeedbackNewRule(t *testing.T) {
 		assert.Contains(t, reason, "mock_tests.md")
 		assert.Contains(t, reason, fb+"/\n")
 		assert.Contains(t, reason, "  ★ test_mocking.md (count: 3")
-		assert.Contains(t, reason, "  - commit_style.md (count: 1")
+		assert.Contains(t, reason, "  語が重ならないもの 1 件（ファイル名だけ。必要なら開いて確認）: commit_style")
+		assert.NotContains(t, reason, "Write commit messages in English")
 		assert.Less(t, strings.Index(reason, "test_mocking"), strings.Index(reason, "commit_style"))
 		assert.Contains(t, reason, "count を 1 上げ")
 		assert.Contains(t, reason, "似ているもの 1 件")
 		assert.NotContains(t, reason, "newRule.")
 	})
 
-	t.Run("every existing rule is listed, grouped by directory, with the name only when it differs from the file name", func(t *testing.T) {
+	t.Run("every existing rule is listed by directory; rules with no word in common are reduced to their file names", func(t *testing.T) {
 		fb, proj := setup(t)
+		odd := []string{}
 		for i := 0; i < 40; i++ {
-			fbtWrite(filepath.Join(fb, fmt.Sprintf("rule_%02d.md", i)), nrtRule(fmt.Sprintf("topic_%d", i), fmt.Sprintf("topic %d", i), 1))
+			if i%2 == 0 {
+				fbtWrite(filepath.Join(fb, fmt.Sprintf("rule_%02d.md", i)), nrtRule(fmt.Sprintf("topic_%d", i), fmt.Sprintf("topic %d", i), 1))
+			} else {
+				fbtWrite(filepath.Join(fb, fmt.Sprintf("rule_%02d.md", i)), nrtRule(fmt.Sprintf("misc_%d", i), fmt.Sprintf("misc %d", i), 1))
+				odd = append(odd, fmt.Sprintf("rule_%02d", i))
+			}
 		}
 		dir := filepath.Join(proj, ".claude", "feedback")
 		require.NoError(t, os.MkdirAll(dir, 0o755))
 		fbtWrite(filepath.Join(dir, "local.md"), nrtRule("local", "project rule", 2))
-		reason := Str(decision(t, run(fb, proj, write(filepath.Join(fb, "zzz_new.md"), nrtRule("zzz_new", "unrelated", 1))).Stdout)["permissionDecisionReason"])
-		for i := 0; i < 40; i++ {
-			assert.Contains(t, reason, fmt.Sprintf("rule_%02d.md (name: topic_%d, count: 1): topic %d", i, i, i))
+		reason := Str(decision(t, run(fb, proj, write(filepath.Join(fb, "zzz_new.md"), nrtRule("zzz_new", "topic", 1))).Stdout)["permissionDecisionReason"])
+		for i := 0; i < 40; i += 2 {
+			assert.Contains(t, reason, fmt.Sprintf("  ★ rule_%02d.md (name: topic_%d, count: 1): topic %d", i, i, i))
 		}
-		assert.Contains(t, reason, dir+"/\n  - local.md (count: 2): project rule")
+		names := append(append([]string{"commit_style"}, odd...), "test_mocking")
+		assert.Contains(t, reason, "  語が重ならないもの 22 件（ファイル名だけ。必要なら開いて確認）: "+strings.Join(names, ", "))
+		assert.NotContains(t, reason, "misc 1")
+		assert.Contains(t, reason, dir+"/\n  語が重ならないもの 1 件（ファイル名だけ。必要なら開いて確認）: local")
 		assert.Less(t, strings.Index(reason, fb+"/"), strings.Index(reason, dir+"/"))
 	})
 
