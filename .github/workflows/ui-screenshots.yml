@@ -5,12 +5,15 @@ name: UI screenshots
 # コメントは PR ごとに 1 つを上書きする。
 # 欠けた画像を貼らないよう、撮る前の検査（JS エラー・データの埋め込み漏れ・画像の読み込み失敗・横スクロール・真っ白）は
 # scripts/ui-screenshots.ts が行い、ここではコメントを書く前に、各画像の URL が撮ったものと同じバイト列を返すことを確かめる。
+#
+# 対象のパスに cmd/feedback-gate/ を入れないのは、release-please のリリース PR がそこのバージョンの行を書き換えるため。
+# リリース PR は bot が作るので実行が承認待ちのまま残り、PR が unstable になる（ジョブの if では止められない。承認待ちはジョブより前）。
+# 画面の中身は webui/ と hook_list.go と locales/ で決まる。
 on:
   pull_request:
     paths:
       - webui/**
       - internal/hookgate/hook_list.go
-      - cmd/feedback-gate/**
       - locales/**
       - scripts/ui-screenshots.ts
       - tests/fixtures/hook-list/**
