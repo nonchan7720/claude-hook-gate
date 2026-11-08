@@ -47,7 +47,12 @@ func parseSessionStartItem(raw any) (sessionStartItem, bool) {
 	if t, ok := numberOf(d["timeout"]); ok && t > 0 && !math.IsInf(t, 0) {
 		item.timeout = math.Min(t, SessionStartMaxTimeout)
 	}
-	switch on := d["on"].(type) {
+	// gate.yaml は YAML 1.1 で読むので、引用しないキー on は真偽値 true になる（読んだ辞書ではキー "true"）。どちらの書き方でも効くようにする。
+	rawOn, ok := d["on"]
+	if !ok {
+		rawOn = d["true"]
+	}
+	switch on := rawOn.(type) {
 	case string:
 		item.on, item.hasOn = []string{on}, true
 	case []any:

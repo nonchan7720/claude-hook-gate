@@ -136,6 +136,18 @@ describe('session_start phase', () => {
       expect((await start(proj, { source: undefined })).stdout).toBe('[gate] session_start: d\nD\n')
     }))
 
+  test('on: works unquoted, although YAML 1.1 reads the key on as true', () =>
+    withTmp(async (proj) => {
+      fs.mkdirSync(path.join(proj, '.claude'), { recursive: true })
+      fs.writeFileSync(
+        path.join(proj, '.claude', 'gate.yaml'),
+        'session_start:\n  - name: a\n    cmd: echo A\n    on: [startup, clear]\n  - name: b\n    cmd: echo B\n    on: resume\n',
+      )
+      expect((await start(proj, { source: 'startup' })).stdout).toBe('[gate] session_start: a\nA\n')
+      expect((await start(proj, { source: 'resume' })).stdout).toBe('[gate] session_start: b\nB\n')
+      expect((await start(proj, { source: 'compact' })).stdout).toBe('')
+    }))
+
   test('skipped when the payload has agent_id', () =>
     withTmp(async (proj) => {
       writeGateYaml(proj, { session_start: [{ name: 'a', cmd: 'echo A' }] })
