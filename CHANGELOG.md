@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.19.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.18.0...v0.19.0) (2026-11-08)
+
+
+### Features
+
+* **feedback:** check existing rules before creating a new feedback rule file ([#93](https://github.com/nonchan7720/claude-hook-gate/issues/93)) ([e87a4a5](https://github.com/nonchan7720/claude-hook-gate/commit/e87a4a5c4960cbbaf3826d670496217b39baab23))
+
+
+### Continuous Integration
+
+* **ui-screenshots:** do not run on release-please PRs ([#97](https://github.com/nonchan7720/claude-hook-gate/issues/97)) ([724ec18](https://github.com/nonchan7720/claude-hook-gate/commit/724ec18ee86b6cf6066909c8cdf1b8e213157593))
+
 ## [0.18.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.17.0...v0.18.0) (2026-11-08)
 
 
