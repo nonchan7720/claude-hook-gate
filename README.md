@@ -170,7 +170,7 @@ The page shows:
 - **feedback rules**: for each active rule of the merged global + project view, where it lives, its `count` and level (provisional / confirmed / deny), how it is injected (every prompt / when a file matching `files` is read or edited / never), each `enforce` entry (event and effective severity, `path` / `changed` / `when` / `unless` / the `check` command, ...) and the file path. Then the inactive rules (expired, `projects` / `when_exists` not matching) and the unreadable ones, with the reason.
 - **Plugin settings**: the current `agentLaunchGuard`, `autoCount` and `language`.
 
-It has a filter box (name, command, glob) and follows the light / dark setting.
+The feedback rules are a table with one row per rule; opening a row shows the details above. Buttons filter by level, scope and event, and a text box by name, command or glob, so dozens of rules stay easy to scan. Inactive rules are collapsed to a count; unreadable ones are shown open. The page follows the light / dark setting.
 
 ## Skills
 

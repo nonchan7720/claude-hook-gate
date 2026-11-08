@@ -44,7 +44,7 @@ nav { position: sticky; top: 0; z-index: 1; background: var(--bg); display: flex
 nav a { color: var(--text); text-decoration: none; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); }
 nav a:hover { border-color: var(--accent); }
 nav input { flex: 1; min-width: 180px; padding: 6px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; }
-section { margin-bottom: 32px; }
+section { scroll-margin-top: 120px; margin-bottom: 32px; }
 h2 { font-size: 18px; margin: 0 0 8px; }
 h3 { font-size: 15px; margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .phase { margin: 16px 0; }
@@ -77,6 +77,26 @@ dd { margin: 0; }
 table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
 td { padding: 8px 12px; border-top: 1px solid var(--border); vertical-align: top; }
 tr:first-child td { border-top: 0; }
+.fbar { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0 12px; }
+.fbar .label { min-width: 0; margin: 0 2px 0 8px; }
+.fbar .label:first-child { margin-left: 0; }
+.fbtn { font: inherit; font-size: 12px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border); background: var(--surface); color: var(--text); cursor: pointer; }
+.fbtn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.rtable { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.rhead, .rsum { display: grid; grid-template-columns: minmax(140px, 1.4fr) 110px 150px minmax(160px, 1.6fr) minmax(140px, 1.2fr); gap: 10px; align-items: center; padding: 8px 12px; }
+.rhead { color: var(--muted); font-size: 12px; background: var(--surface-2); }
+.rrow { border-top: 1px solid var(--border); }
+.rrow > summary { list-style: none; cursor: pointer; }
+.rrow > summary::-webkit-details-marker { display: none; }
+.rrow > summary:hover { background: var(--surface-2); }
+.rrow[open] > summary { background: var(--accent-soft); }
+.rsum .nm::before { content: "▸ "; color: var(--muted); }
+.rrow[open] .rsum .nm::before { content: "▾ "; }
+.rdetail { padding: 4px 14px 12px 28px; }
+.rdetail .card { border: 0; padding: 0; margin: 0; background: none; }
+.cell-note { color: var(--muted); font-size: 12px; }
+.msum { cursor: pointer; margin: 12px 0 6px; font-weight: 600; }
+@media (max-width: 760px) { .rhead { display: none; } .rsum { grid-template-columns: 1fr 1fr; } }
 .hidden { display: none; }
 @media (max-width: 600px) { dl { grid-template-columns: 1fr; } .label { min-width: 0; } }
 </style>
@@ -188,22 +208,68 @@ tr:first-child td { border-top: 0; }
     return c;
   }
 
+  var FILTERS = { level: {}, scope: {}, event: {} };
   function feedbackSection(f) {
     var s = el('section', null, [el('h2', null, [t('feedbackHeader')])]);
     s.id = 'feedback';
-    if (f.rules.length === 0) s.appendChild(el('div', 'card empty', [t('none')]));
-    f.rules.forEach((r) => { s.appendChild(ruleCard(r)); });
-    if (f.inactive.length) {
-      s.appendChild(el('h3', null, [t('inactiveHeader'), pill(String(f.inactive.length), 'muted')]));
-      f.inactive.forEach((r) => {
-        s.appendChild(el('div', 'card dim', [el('h3', null, [el('span', 'mono', [r.name]), pill(t('inactive'), 'muted')]), el('div', null, [r.reason]), el('div', 'path', [r.path])]));
+    if (f.rules.length === 0) { s.appendChild(el('div', 'card empty', [t('none')])); return s; }
+    function btn(group, value, text) {
+      var b = el('button', 'fbtn', [text]);
+      b.type = 'button';
+      b.setAttribute('aria-pressed', 'false');
+      b.addEventListener('click', () => {
+        FILTERS[group][value] = !FILTERS[group][value];
+        b.setAttribute('aria-pressed', String(FILTERS[group][value]));
+        applyFilter();
       });
+      return b;
+    }
+    s.appendChild(el('div', 'fbar', [el('span', 'label', [t('filterLevel')]), btn('level', 'provisional', t('level.provisional')), btn('level', 'confirmed', t('level.confirmed')), btn('level', 'deny', t('level.deny')),
+      el('span', 'label', [t('filterScope')]), btn('scope', 'global', t('scope.global')), btn('scope', 'project', t('scope.project')),
+      el('span', 'label', [t('filterEvent')]), btn('event', 'pre_bash', 'pre_bash'), btn('event', 'pre_edit', 'pre_edit'), btn('event', 'post_edit', 'post_edit'), btn('event', 'stop_check', 'stop_check')]))
+    var table = el('div', 'rtable', [el('div', 'rhead', [el('span', null, [t('colName')]), el('span', null, [t('colScope')]), el('span', null, [t('colLevel')]), el('span', null, [t('colInject')]), el('span', null, [t('colEnforce')])])]);
+    f.rules.forEach((r) => {
+      var inj = r.inject.kind === 'files' ? r.inject.files.join(', ') : r.inject.kind === 'prompt' ? t('injectShortPrompt') : t('injectShortNone');
+      var sum = el('summary', 'rsum', [
+        el('span', 'mono nm', [r.name]),
+        el('span', null, [pill(t(`scope.${r.scope}`), r.scope === 'project' ? '' : 'muted')]),
+        el('span', null, [pill(`${r.count} · ${t(`level.${r.level}`)}`, LEVEL_KIND[r.level])]),
+        el('span', 'cell-note mono', [inj]),
+        el('span', null, r.enforce.length ? r.enforce.map((e) => pill(e.event, SEVERITY_KIND[e.severity] || 'muted')) : [el('span', 'cell-note', [t('enforceNone')])]),
+      ]);
+      var row = el('details', 'rrow', [sum, el('div', 'rdetail', [ruleCard(r)])]);
+      row.dataset.level = r.level;
+      row.dataset.scope = r.scope;
+      row.dataset.events = r.enforce.map((e) => e.event).join(' ');
+      table.appendChild(row);
+    });
+    s.appendChild(table);
+    if (f.inactive.length) {
+      const d = el('details', 'more', [el('summary', 'msum', [t('inactiveHeader'), ' ', pill(String(f.inactive.length), 'muted')])]);
+      f.inactive.forEach((r) => {
+        d.appendChild(el('div', 'card dim', [el('h3', null, [el('span', 'mono', [r.name]), pill(t('inactive'), 'muted')]), el('div', null, [r.reason]), el('div', 'path', [r.path])]));
+      });
+      s.appendChild(d);
     }
     if (f.broken.length) {
-      s.appendChild(el('h3', null, [t('brokenHeader'), pill(String(f.broken.length), 'bad')]));
-      f.broken.forEach((b) => { s.appendChild(el('div', 'card', [el('div', 'mono', [b.path]), el('div', 'note', [b.reason])])); });
+      const bd = el('details', 'more', [el('summary', 'msum', [t('brokenHeader'), ' ', pill(String(f.broken.length), 'bad')])]);
+      bd.open = true;
+      f.broken.forEach((b) => { bd.appendChild(el('div', 'card', [el('div', 'mono', [b.path]), el('div', 'note', [b.reason])])); });
+      s.appendChild(bd);
     }
     return s;
+  }
+
+  function on(group) { return Object.keys(FILTERS[group]).filter((k) => FILTERS[group][k]); }
+  function applyFilter() {
+    var q = (document.querySelector('nav input').value || '').trim().toLowerCase();
+    var lv = on('level'), sc = on('scope'), ev = on('event');
+    document.querySelectorAll('.rrow').forEach((r) => {
+      var ok = (lv.length === 0 || lv.includes(r.dataset.level)) && (sc.length === 0 || sc.includes(r.dataset.scope)) &&
+        (ev.length === 0 || ev.some((e) => r.dataset.events.split(' ').includes(e))) && (q === '' || r.textContent.toLowerCase().includes(q));
+      r.classList.toggle('hidden', !ok);
+    });
+    document.querySelectorAll('#gate .card').forEach((c) => { c.classList.toggle('hidden', q !== '' && !c.textContent.toLowerCase().includes(q)); });
   }
 
   function optionsSection(o) {
@@ -236,12 +302,7 @@ tr:first-child td { border-top: 0; }
   app.appendChild(gateSection(g));
   app.appendChild(feedbackSection(f));
   app.appendChild(optionsSection(data.options));
-  filter.addEventListener('input', () => {
-    var q = filter.value.trim().toLowerCase();
-    Array.prototype.forEach.call(document.querySelectorAll('.card'), (c) => {
-      c.classList.toggle('hidden', q !== '' && c.textContent.toLowerCase().indexOf(q) < 0);
-    });
-  });
+  filter.addEventListener('input', applyFilter);
 })();
 </script>
 </body>
