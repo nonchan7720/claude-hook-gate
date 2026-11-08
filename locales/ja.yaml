@@ -23,6 +23,11 @@ rules:
 guard:
   evaluating: "[feedback-guard] 評価中: {{rule}}"
 
+newRule:
+  header: "[feedback-gate] 新しいルール {{file}} を作る前に既存のルールを確認してください（★ = name / description が似ているもの {{n}} 件）:"
+  unrelated: "語が重ならないもの {{n}} 件（ファイル名だけ。必要なら開いて確認）: "
+  instruction: "同じ指摘・同じ種類の状況を扱うルールがあれば、新しいファイルは作らずそのルールを更新すること: count を 1 上げ（このセッションで hook が上げ済みなら上げない）、本文に今回のケースと言い訳を足して一般化する。近いルールが複数あればまとめる提案をする。どれにも当てはまらないときだけ、同じ書き込みをもう一度実行する（2 回目は止めない）。"
+
 postEdit:
   checking: "[feedback-post-edit] 検査中: {{rule}} ({{file}})"
 

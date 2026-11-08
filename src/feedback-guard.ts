@@ -7,6 +7,8 @@
 //   同じコマンドで書く別のファイルが absent_sibling / absent_glob の候補なら（テストと実装を 1 つのコマンドで書く）、
 //   実行後の検査と同じく違反にしない。
 // - Edit / Write / MultiEdit: file_path と変更後の内容を pre_edit の enforce と照合する
+// - Write / heredoc で feedback のディレクトリに新しいルールファイルを作るときは、最初の 1 回だけ止めて既存ルールの一覧を返す
+//   （feedback-new-rule.ts。同じ内容のルールを別ファイルで作らず、既存ルールの count と本文を更新させるため）
 //
 // severity が deny/ask（block は防御的に deny 扱い）の違反があれば stdout に hookSpecificOutput を出して
 // 該当ツール呼び出しを止める。warn のみなら stderr に書いて exit 0（ツールは実行させる）。違反が無ければ
@@ -14,6 +16,7 @@
 //
 // hook 自身のバグで作業を止めないよう、例外は必ず握りつぶして exit 0 にする（stderr に1行だけ出し、~/.claude/feedback/.errors.jsonl に残す）。
 import { heredocWrites } from './bash-heredoc.ts'
+import { newRuleNotice } from './feedback-new-rule.ts'
 import {
   autoBumpCounts,
   countBumpNotes,
@@ -21,15 +24,17 @@ import {
   evalPreBash,
   evalPreEdit,
   extractPreEditContent,
-  feedbackDir,
   listRules,
+  loadNameSet,
   logError,
   logViolation,
+  saveNameSet,
+  sessionStatePath,
   type Violation,
 } from './feedback-rules.ts'
 import { compileGlobs } from './glob.ts'
 import { type Io, ok, type ScriptResult } from './io.ts'
-import { basename, dirname, join, relpath } from './path.ts'
+import { basename, dirname, relpath } from './path.ts'
 import { type Dict, isDict, jqStr, truthy } from './pyutil.ts'
 import { splitRoot } from './roots.ts'
 
@@ -71,27 +76,12 @@ export function coveredBySameCommand(v: Violation, file: string, others: string[
   return false
 }
 
-export const askStatePath = (io: Io, sessionId: string): string => join(feedbackDir(io), '.ask_state', `${sessionId.replace(/[^A-Za-z0-9_-]/g, '')}.json`)
+export const askStatePath = (io: Io, sessionId: string): string => sessionStatePath(io, '.ask_state', sessionId)
 
-export async function loadAskedKeys(io: Io, sessionId: string): Promise<Set<string>> {
-  try {
-    const text = await io.readFile(askStatePath(io, sessionId))
-    if (text === undefined) return new Set()
-    const data: unknown = JSON.parse(text)
-    if (isDict(data) && Array.isArray(data.asked)) return new Set(data.asked.map(String))
-  } catch {
-    // 壊れた状態ファイルは空扱い
-  }
-  return new Set()
-}
+export const loadAskedKeys = (io: Io, sessionId: string): Promise<Set<string>> => loadNameSet(io, askStatePath(io, sessionId), 'asked')
 
-export async function saveAskedKeys(io: Io, sessionId: string, askedKeys: Set<string>): Promise<void> {
-  try {
-    await io.writeFile(askStatePath(io, sessionId), JSON.stringify({ asked: [...askedKeys].sort() }))
-  } catch {
-    // 状態の保存失敗で hook を止めない
-  }
-}
+export const saveAskedKeys = (io: Io, sessionId: string, askedKeys: Set<string>): Promise<void> =>
+  saveNameSet(io, askStatePath(io, sessionId), 'asked', askedKeys)
 
 export function askKey(v: Violation, toolInput: Dict): string {
   const target = v.event === 'pre_edit' ? (truthy(toolInput.file_path) ? String(toolInput.file_path) : '') : ''
@@ -120,6 +110,7 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
   const rules = await listRules(io)
   const projectDir = io.projectDir || io.cwd
   let violations: Violation[]
+  const notices: string[] = []
   if (toolName === 'Bash') {
     const command = truthy(toolInput.command) ? String(toolInput.command) : ''
     violations = await evalPreBash(io, rules, command)
@@ -132,33 +123,43 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
       for (const v of pre) v.file = w.file
       await downgradeRepeatedAsks(io, pre, payload.session_id, { file_path: w.file })
       violations.push(...pre)
+      const notice = await newRuleNotice(io, w.file, w.content, payload.session_id)
+      if (notice !== undefined) notices.push(notice)
     }
   } else if (toolName === 'Edit' || toolName === 'Write' || toolName === 'MultiEdit') {
     const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : ''
     if (!filePath) return ok()
     violations = await evalPreEdit(io, rules, filePath, extractPreEditContent(toolName, toolInput))
     await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput)
+    if (toolName === 'Write') {
+      const notice = await newRuleNotice(io, filePath, truthy(toolInput.content) ? String(toolInput.content) : '', payload.session_id)
+      if (notice !== undefined) notices.push(notice)
+    }
   } else {
     return ok()
   }
 
-  if (violations.length === 0) return ok()
+  if (violations.length === 0 && notices.length === 0) return ok()
 
   for (const v of violations) await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail)
   // 今回の判定は上げる前の count で行い、次回以降の強制力を上げる。
-  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id))
+  const notes = violations.length > 0 ? countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id)) : []
 
   const blocking = violations.filter((v) => v.severity !== 'warn')
   const warnings = violations.filter((v) => v.severity === 'warn')
 
   let stdout = ''
-  if (blocking.length > 0) {
-    const top = blocking.reduce((a, b) => ((SEVERITY_ORDER[b.severity] ?? 0) > (SEVERITY_ORDER[a.severity] ?? 0) ? b : a))
+  if (blocking.length > 0 || notices.length > 0) {
+    // 新しいルールファイルの確認は deny（ユーザーに聞くのではなく、Claude に既存ルールを見直させる）。
+    const top = blocking.reduce<string | undefined>(
+      (a, b) => (a === undefined || (SEVERITY_ORDER[b.severity] ?? 0) > (SEVERITY_ORDER[a] ?? 0) ? b.severity : a),
+      undefined,
+    )
     stdout = `${JSON.stringify({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',
-        permissionDecision: decisionFor(top.severity),
-        permissionDecisionReason: [buildReason(blocking, projectDir), ...notes].join('\n'),
+        permissionDecision: notices.length > 0 ? 'deny' : decisionFor(top ?? 'deny'),
+        permissionDecisionReason: [...notices, ...(blocking.length > 0 ? [buildReason(blocking, projectDir)] : []), ...notes].join('\n'),
       },
     })}\n`
   }

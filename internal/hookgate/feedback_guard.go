@@ -9,6 +9,8 @@ package hookgate
 //   同じコマンドで書く別のファイルが absent_sibling / absent_glob の候補なら（テストと実装を 1 つのコマンドで書く）、
 //   実行後の検査と同じく違反にしない。
 // - Edit / Write / MultiEdit: file_path と変更後の内容を pre_edit の enforce と照合する
+// - Write / heredoc で feedback のディレクトリに新しいルールファイルを作るときは、最初の 1 回だけ止めて既存ルールの一覧を返す
+//   （feedback_new_rule.go。同じ内容のルールを別ファイルで作らず、既存ルールの count と本文を更新させるため）
 //
 // severity が deny/ask（block は防御的に deny 扱い）の違反があれば stdout に hookSpecificOutput を出して
 // 該当ツール呼び出しを止める。warn のみなら stderr に書いて exit 0（ツールは実行させる）。違反が無ければ
@@ -166,6 +168,7 @@ func feedbackGuardMain(io Io, payload Dict) (ScriptResult, error) {
 	}
 	projectDir := fbFirstNonEmpty(io.ProjectDir(), io.Cwd())
 	var violations []Violation
+	notices := []string{}
 	switch toolName {
 	case "Bash":
 		command := ""
@@ -190,6 +193,9 @@ func feedbackGuardMain(io Io, payload Dict) (ScriptResult, error) {
 			}
 			DowngradeRepeatedAsks(io, pre, payload["session_id"], Dict{"file_path": w.File})
 			violations = append(violations, pre...)
+			if notice, ok := NewRuleNotice(io, w.File, w.Content, payload["session_id"]); ok {
+				notices = append(notices, notice)
+			}
 		}
 	case "Edit", "Write", "MultiEdit":
 		filePath := ""
@@ -201,11 +207,20 @@ func feedbackGuardMain(io Io, payload Dict) (ScriptResult, error) {
 		}
 		violations = EvalPreEdit(io, rules, filePath, ExtractPreEditContent(toolName, toolInput))
 		DowngradeRepeatedAsks(io, violations, payload["session_id"], toolInput)
+		if toolName == "Write" {
+			content := ""
+			if Truthy(toolInput["content"]) {
+				content = Str(toolInput["content"])
+			}
+			if notice, ok := NewRuleNotice(io, filePath, content, payload["session_id"]); ok {
+				notices = append(notices, notice)
+			}
+		}
 	default:
 		return Ok("", ""), nil
 	}
 
-	if len(violations) == 0 {
+	if len(violations) == 0 && len(notices) == 0 {
 		return Ok("", ""), nil
 	}
 
@@ -213,7 +228,10 @@ func feedbackGuardMain(io Io, payload Dict) (ScriptResult, error) {
 		LogViolation(io, v.Rule, v.Count, v.Severity, v.Event, v.Detail)
 	}
 	// 今回の判定は上げる前の count で行い、次回以降の強制力を上げる。
-	notes := CountBumpNotes(io.Lang(), AutoBumpCounts(io, rules, violations, payload["session_id"]))
+	notes := []string{}
+	if len(violations) > 0 {
+		notes = CountBumpNotes(io.Lang(), AutoBumpCounts(io, rules, violations, payload["session_id"]))
+	}
 
 	blocking, warnings := []Violation{}, []Violation{}
 	for _, v := range violations {
@@ -225,17 +243,26 @@ func feedbackGuardMain(io Io, payload Dict) (ScriptResult, error) {
 	}
 
 	stdout := ""
-	if len(blocking) > 0 {
-		top := blocking[0]
-		for _, b := range blocking[1:] {
-			if fbSeverityOrder[b.Severity] > fbSeverityOrder[top.Severity] {
-				top = b
+	if len(blocking) > 0 || len(notices) > 0 {
+		// 新しいルールファイルの確認は deny（ユーザーに聞くのではなく、Claude に既存ルールを見直させる）。
+		decision := "deny"
+		parts := append([]string{}, notices...)
+		if len(blocking) > 0 {
+			top := blocking[0]
+			for _, b := range blocking[1:] {
+				if fbSeverityOrder[b.Severity] > fbSeverityOrder[top.Severity] {
+					top = b
+				}
 			}
+			if len(notices) == 0 {
+				decision = DecisionFor(top.Severity)
+			}
+			parts = append(parts, BuildReason(blocking, projectDir))
 		}
-		reason := strings.Join(append([]string{BuildReason(blocking, projectDir)}, notes...), "\n")
+		reason := strings.Join(append(parts, notes...), "\n")
 		stdout = JSONStringify(OMap{{"hookSpecificOutput", OMap{
 			{"hookEventName", "PreToolUse"},
-			{"permissionDecision", DecisionFor(top.Severity)},
+			{"permissionDecision", decision},
 			{"permissionDecisionReason", reason},
 		}}}) + "\n"
 	}

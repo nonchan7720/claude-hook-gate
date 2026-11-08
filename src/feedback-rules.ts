@@ -536,25 +536,37 @@ export function injectStateId(sessionId: unknown, agentId?: unknown): string {
 /** このターンに注入済みの files 付きルール名を持つ状態ファイル（~/.claude/feedback/.inject_state/<id>.json）。 */
 export const injectStatePath = (io: Io, stateId: string): string => join(feedbackDir(io), '.inject_state', `${stateId}.json`)
 
-export async function loadInjected(io: Io, stateId: string): Promise<Set<string>> {
+// ---- {key: [...]} 形式の状態ファイル ----
+/** {key: [...]} 形式の状態ファイルから文字列の集合を読む。無い・壊れた状態ファイルは空扱い。 */
+export async function loadNameSet(io: Io, path: string, key: string): Promise<Set<string>> {
   try {
-    const text = await io.readFile(injectStatePath(io, stateId))
-    if (text === undefined) return new Set()
-    const data: unknown = JSON.parse(text)
-    if (isDict(data) && Array.isArray(data.injected)) return new Set(data.injected.map(String))
+    const text = await io.readFile(path)
+    const data: unknown = text === undefined ? undefined : JSON.parse(text)
+    const list = isDict(data) ? data[key] : undefined
+    if (Array.isArray(list)) return new Set(list.map(String))
   } catch {
     // 壊れた状態ファイルは空扱い
   }
   return new Set()
 }
 
-export async function saveInjected(io: Io, stateId: string, injected: Set<string>): Promise<void> {
+/** 文字列の集合を {key: [...]}（名前順）で保存する。保存に失敗しても hook を止めない。 */
+export async function saveNameSet(io: Io, path: string, key: string, names: Set<string>): Promise<void> {
   try {
-    await io.writeFile(injectStatePath(io, stateId), JSON.stringify({ injected: [...injected].sort() }))
+    await io.writeFile(path, JSON.stringify({ [key]: [...names].sort() }))
   } catch {
     // 状態の保存失敗で hook を止めない
   }
 }
+
+/** セッション別の状態ファイル（<feedbackDir>/<dir>/<session>.json。パスに使えない文字は落とす）。 */
+export const sessionStatePath = (io: Io, dir: string, sessionId: string): string =>
+  join(feedbackDir(io), dir, `${sessionId.replace(/[^A-Za-z0-9_-]/g, '')}.json`)
+
+export const loadInjected = (io: Io, stateId: string): Promise<Set<string>> => loadNameSet(io, injectStatePath(io, stateId), 'injected')
+
+export const saveInjected = (io: Io, stateId: string, injected: Set<string>): Promise<void> =>
+  saveNameSet(io, injectStatePath(io, stateId), 'injected', injected)
 
 /**
  * セッションの注入状態を消す（UserPromptSubmit ごと、SessionStart の startup / clear / compact）。
@@ -571,19 +583,7 @@ export async function clearInjected(io: Io, sessionId: unknown): Promise<void> {
 }
 
 /** セッション内で count を自動で上げ済みのルール名を持つ状態ファイル（~/.claude/feedback/.count_state/<session>.json）。 */
-export const countStatePath = (io: Io, sessionId: string): string => join(feedbackDir(io), '.count_state', `${sessionId.replace(/[^A-Za-z0-9_-]/g, '')}.json`)
-
-async function loadBumpedRules(io: Io, sessionId: string): Promise<Set<string>> {
-  try {
-    const text = await io.readFile(countStatePath(io, sessionId))
-    if (text === undefined) return new Set()
-    const data: unknown = JSON.parse(text)
-    if (isDict(data) && Array.isArray(data.bumped)) return new Set(data.bumped.map(String))
-  } catch {
-    // 壊れた状態ファイルは空扱い
-  }
-  return new Set()
-}
+export const countStatePath = (io: Io, sessionId: string): string => sessionStatePath(io, '.count_state', sessionId)
 
 /**
  * 違反したルールのファイルの count を 1 つ上げる（frontmatter の `count:` 行だけを書き換える）。
@@ -598,7 +598,7 @@ export async function autoBumpCounts(io: Io, rules: Rule[], violations: Violatio
   if (io.autoCount === false || !truthy(sessionId) || violations.length === 0) return bumps
   try {
     const sid = String(sessionId)
-    const done = await loadBumpedRules(io, sid)
+    const done = await loadNameSet(io, countStatePath(io, sid), 'bumped')
     const names = [...new Set(violations.map((v) => v.rule))].filter((n) => !done.has(n))
     if (names.length === 0) return bumps
     for (const name of names) {

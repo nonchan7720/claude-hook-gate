@@ -824,22 +824,24 @@ function injectStateId(sessionId, agentId) {
   return aid !== "" ? `${sid}--${aid}` : sid;
 }
 var injectStatePath = (io, stateId) => join(feedbackDir(io), ".inject_state", `${stateId}.json`);
-async function loadInjected(io, stateId) {
+async function loadNameSet(io, path, key) {
   try {
-    const text = await io.readFile(injectStatePath(io, stateId));
-    if (text === undefined)
-      return new Set;
-    const data = JSON.parse(text);
-    if (isDict(data) && Array.isArray(data.injected))
-      return new Set(data.injected.map(String));
+    const text = await io.readFile(path);
+    const data = text === undefined ? undefined : JSON.parse(text);
+    const list = isDict(data) ? data[key] : undefined;
+    if (Array.isArray(list))
+      return new Set(list.map(String));
   } catch {}
   return new Set;
 }
-async function saveInjected(io, stateId, injected) {
+async function saveNameSet(io, path, key, names) {
   try {
-    await io.writeFile(injectStatePath(io, stateId), JSON.stringify({ injected: [...injected].sort() }));
+    await io.writeFile(path, JSON.stringify({ [key]: [...names].sort() }));
   } catch {}
 }
+var sessionStatePath = (io, dir, sessionId) => join(feedbackDir(io), dir, `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
+var loadInjected = (io, stateId) => loadNameSet(io, injectStatePath(io, stateId), "injected");
+var saveInjected = (io, stateId, injected) => saveNameSet(io, injectStatePath(io, stateId), "injected", injected);
 async function clearInjected(io, sessionId) {
   const sid = injectStateId(sessionId);
   if (sid === "")
@@ -848,25 +850,14 @@ async function clearInjected(io, sessionId) {
   const doomed = (await io.list(dir)).filter((e) => e.name === `${sid}.json` || e.name.startsWith(`${sid}--`) && e.name.endsWith(".json")).map((e) => join(dir, e.name));
   await io.removeFiles(doomed);
 }
-var countStatePath = (io, sessionId) => join(feedbackDir(io), ".count_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
-async function loadBumpedRules(io, sessionId) {
-  try {
-    const text = await io.readFile(countStatePath(io, sessionId));
-    if (text === undefined)
-      return new Set;
-    const data = JSON.parse(text);
-    if (isDict(data) && Array.isArray(data.bumped))
-      return new Set(data.bumped.map(String));
-  } catch {}
-  return new Set;
-}
+var countStatePath = (io, sessionId) => sessionStatePath(io, ".count_state", sessionId);
 async function autoBumpCounts(io, rules, violations, sessionId) {
   const bumps = [];
   if (io.autoCount === false || !truthy(sessionId) || violations.length === 0)
     return bumps;
   try {
     const sid = String(sessionId);
-    const done = await loadBumpedRules(io, sid);
+    const done = await loadNameSet(io, countStatePath(io, sid), "bumped");
     const names = [...new Set(violations.map((v) => v.rule))].filter((n) => !done.has(n));
     if (names.length === 0)
       return bumps;
@@ -3886,6 +3877,95 @@ function heredocWrites(command, cwd, home) {
   return out;
 }
 
+// src/feedback-new-rule.ts
+var SIMILAR_MIN_SCORE = 2;
+var STOPWORDS = new Set(["the", "and", "for", "with", "when", "not", "use", "feedback", "rule", "rules"]);
+var ASCII = /^[a-z0-9]+$/;
+function similarityTokens(text) {
+  const out = new Set;
+  for (const word of text.toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+    if (ASCII.test(word)) {
+      if (word.length >= 3 && !STOPWORDS.has(word))
+        out.add(word.slice(0, 4));
+      continue;
+    }
+    const chars = [...word];
+    if (chars.length === 1)
+      out.add(word);
+    for (let i = 0;i + 1 < chars.length; i++)
+      out.add(`${chars[i]}${chars[i + 1]}`);
+  }
+  return out;
+}
+var similarityScore = (a, b) => [...a].reduce((n, t) => n + (b.has(t) ? ASCII.test(t) ? 2 : 1 : 0), 0);
+function draftText(content) {
+  try {
+    const data = loadYamlText(FRONTMATTER_RE.exec(content)?.[1] ?? "");
+    return isDict(data) ? [data.name, data.description].filter(truthy).map(String).join(" ") : "";
+  } catch {
+    return "";
+  }
+}
+var stemOf = (path) => splitext(basename(path))[0];
+function listLine(rule, similar) {
+  const fileName = basename(rule.path);
+  const nameNote = rule.name === stemOf(rule.path) ? "" : `name: ${rule.name}, `;
+  return `  ${similar ? "★" : "-"} ${fileName} (${nameNote}count: ${rule.count})${rule.description ? `: ${rule.description}` : ""}`;
+}
+var newRuleStatePath = (io, sessionId) => sessionStatePath(io, ".new_rule_state", sessionId);
+async function newRuleNotice(io, filePath, content, sessionId) {
+  if (!truthy(sessionId) || !filePath)
+    return;
+  const home = io.env.HOME;
+  const file = normpath(expandUser(filePath, home));
+  const name = basename(file);
+  if (!name.endsWith(".md") || name.startsWith("."))
+    return;
+  const dirs = [...new Set([...feedbackDirs(io), ...projectFeedbackDirs(io)].map((d) => normpath(expandUser(d, home))))];
+  if (!dirs.includes(dirname(file)) || await io.exists(file))
+    return;
+  const rules = [];
+  for (const d of dirs) {
+    for (const n of (await io.list(d)).map((e) => e.name).sort()) {
+      if (!n.endsWith(".md") || n.startsWith("."))
+        continue;
+      const rule = await loadRule(io, join(d, n)).catch(() => null);
+      if (rule)
+        rules.push(rule);
+    }
+  }
+  if (rules.length === 0)
+    return;
+  const statePath = newRuleStatePath(io, String(sessionId));
+  const confirmed = await loadNameSet(io, statePath, "confirmed");
+  if (confirmed.has(file))
+    return;
+  await saveNameSet(io, statePath, "confirmed", confirmed.add(file));
+  const draft = similarityTokens(`${stemOf(file)} ${draftText(content)}`);
+  const scored = rules.map((rule, index) => ({
+    rule,
+    index,
+    score: similarityScore(draft, similarityTokens(`${stemOf(rule.path)} ${rule.name} ${rule.description}`))
+  }));
+  const t = tr(io.lang);
+  const similar = scored.filter((s) => s.score >= SIMILAR_MIN_SCORE).length;
+  const lines = [];
+  for (const d of dirs) {
+    const inDir = scored.filter((s) => dirname(s.rule.path) === d).sort((a, b) => b.score - a.score || a.index - b.index);
+    if (inDir.length === 0)
+      continue;
+    lines.push(`${d}/`);
+    for (const { rule, score } of inDir)
+      if (score > 0)
+        lines.push(listLine(rule, score >= SIMILAR_MIN_SCORE));
+    const unrelated = inDir.filter((s) => s.score === 0).map((s) => stemOf(s.rule.path));
+    if (unrelated.length > 0)
+      lines.push(`  ${t("newRule.unrelated", { n: unrelated.length })}${unrelated.join(", ")}`);
+  }
+  return [t("newRule.header", { file, n: similar }), ...lines, t("newRule.instruction")].join(`
+`);
+}
+
 // src/feedback-guard.ts
 var SEVERITY_ORDER = { warn: 0, ask: 1, block: 2, deny: 3 };
 var decisionFor = (severity) => severity === "deny" || severity === "block" ? "deny" : "ask";
@@ -3915,23 +3995,9 @@ function coveredBySameCommand(v, file, others, projectDir) {
   }
   return false;
 }
-var askStatePath = (io, sessionId) => join(feedbackDir(io), ".ask_state", `${sessionId.replace(/[^A-Za-z0-9_-]/g, "")}.json`);
-async function loadAskedKeys(io, sessionId) {
-  try {
-    const text = await io.readFile(askStatePath(io, sessionId));
-    if (text === undefined)
-      return new Set;
-    const data = JSON.parse(text);
-    if (isDict(data) && Array.isArray(data.asked))
-      return new Set(data.asked.map(String));
-  } catch {}
-  return new Set;
-}
-async function saveAskedKeys(io, sessionId, askedKeys) {
-  try {
-    await io.writeFile(askStatePath(io, sessionId), JSON.stringify({ asked: [...askedKeys].sort() }));
-  } catch {}
-}
+var askStatePath = (io, sessionId) => sessionStatePath(io, ".ask_state", sessionId);
+var loadAskedKeys = (io, sessionId) => loadNameSet(io, askStatePath(io, sessionId), "asked");
+var saveAskedKeys = (io, sessionId, askedKeys) => saveNameSet(io, askStatePath(io, sessionId), "asked", askedKeys);
 function askKey(v, toolInput) {
   const target = v.event === "pre_edit" ? truthy(toolInput.file_path) ? String(toolInput.file_path) : "" : "";
   return `${v.rule}|${v.event}|${target}`;
@@ -3960,6 +4026,7 @@ async function main2(io, payload) {
   const rules = await listRules(io);
   const projectDir = io.projectDir || io.cwd;
   let violations;
+  const notices = [];
   if (toolName === "Bash") {
     const command = truthy(toolInput.command) ? String(toolInput.command) : "";
     violations = await evalPreBash(io, rules, command);
@@ -3972,6 +4039,9 @@ async function main2(io, payload) {
         v.file = w.file;
       await downgradeRepeatedAsks(io, pre, payload.session_id, { file_path: w.file });
       violations.push(...pre);
+      const notice = await newRuleNotice(io, w.file, w.content, payload.session_id);
+      if (notice !== undefined)
+        notices.push(notice);
     }
   } else if (toolName === "Edit" || toolName === "Write" || toolName === "MultiEdit") {
     const filePath = truthy(toolInput.file_path) ? String(toolInput.file_path) : "";
@@ -3979,24 +4049,29 @@ async function main2(io, payload) {
       return ok();
     violations = await evalPreEdit(io, rules, filePath, extractPreEditContent(toolName, toolInput));
     await downgradeRepeatedAsks(io, violations, payload.session_id, toolInput);
+    if (toolName === "Write") {
+      const notice = await newRuleNotice(io, filePath, truthy(toolInput.content) ? String(toolInput.content) : "", payload.session_id);
+      if (notice !== undefined)
+        notices.push(notice);
+    }
   } else {
     return ok();
   }
-  if (violations.length === 0)
+  if (violations.length === 0 && notices.length === 0)
     return ok();
   for (const v of violations)
     await logViolation(io, v.rule, v.count, v.severity, v.event, v.detail);
-  const notes = countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id));
+  const notes = violations.length > 0 ? countBumpNotes(io.lang, await autoBumpCounts(io, rules, violations, payload.session_id)) : [];
   const blocking = violations.filter((v) => v.severity !== "warn");
   const warnings = violations.filter((v) => v.severity === "warn");
   let stdout = "";
-  if (blocking.length > 0) {
-    const top = blocking.reduce((a, b) => (SEVERITY_ORDER[b.severity] ?? 0) > (SEVERITY_ORDER[a.severity] ?? 0) ? b : a);
+  if (blocking.length > 0 || notices.length > 0) {
+    const top = blocking.reduce((a, b) => a === undefined || (SEVERITY_ORDER[b.severity] ?? 0) > (SEVERITY_ORDER[a] ?? 0) ? b.severity : a, undefined);
     stdout = `${JSON.stringify({
       hookSpecificOutput: {
         hookEventName: "PreToolUse",
-        permissionDecision: decisionFor(top.severity),
-        permissionDecisionReason: [buildReason(blocking, projectDir), ...notes].join(`
+        permissionDecision: notices.length > 0 ? "deny" : decisionFor(top ?? "deny"),
+        permissionDecisionReason: [...notices, ...blocking.length > 0 ? [buildReason(blocking, projectDir)] : [], ...notes].join(`
 `)
       }
     })}

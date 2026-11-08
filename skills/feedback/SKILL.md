@@ -23,7 +23,7 @@ Talk to the user in their language; write the rule body and `message` texts in t
 language they use with you. Keep every file short: rule files are instructions Claude
 follows on every prompt, so each extra line costs context.
 
-## Always first: list what exists
+## Always first: look for an existing rule
 
 Before creating anything, read the frontmatter (`name`, `description`, `count`, scope
 keys) of every file in both directories, so you update a rule instead of writing a
@@ -31,11 +31,26 @@ second one about the same thing:
 
 ```
 ls ~/.claude/feedback/*.md .claude/feedback/*.md 2>/dev/null   # from the project root
+grep -H -m3 -E '^(name|description|count):' ~/.claude/feedback/*.md .claude/feedback/*.md 2>/dev/null
 ```
+
+Read the body of every rule whose name or description is close to the feedback. **Updating
+is the default; creating is the exception.** The feedback is the same rule when it is about
+the same class of situation, even if the wording, the file or the command differs (a second
+"don't mock the DB" and "use the real DB in integration tests" are one rule). Then go to
+`update` (raise `count`, fold the new case into the body). Create a new file only when no
+existing rule covers it; if you are unsure, propose the update to the user rather than a
+new file.
+
+The hook backs this up: the first Write (or heredoc) of a rule file that does not exist yet
+is denied once per session and file, with the list of all existing rules (grouped by directory, similar ones
+first, marked ★; rules with no word in common are listed by file name only, and the
+mark only compares words, so open any of them that might still be the same rule). Pick the rule to update from that list; write the new file again only when none
+fits.
 
 `CLAUDE_FEEDBACK_DIR`, when set, replaces `~/.claude/feedback`. Never touch the state
 files next to the rules (`.violations.jsonl`, `.errors.jsonl`, `.count_state/`,
-`.ask_state/`, `.inject_state/`, `.bash_started/`): they belong to the hooks. The only thing you read
+`.ask_state/`, `.new_rule_state/`, `.inject_state/`, `.bash_started/`): they belong to the hooks. The only thing you read
 from them is the violation log, in `review` mode.
 
 ## create
@@ -95,7 +110,15 @@ Use the template in reference.md; see examples.md for finished files.
 - **Same feedback again.** Raise `count` by 1 in the file that is actually used (the
   project file when both exist). Do not add 1 when a hook already bumped it in this
   session (the warn / ask / block reason says `count went from N to N+1`). Say what the
-  new count means (3 = confirmed and injected; 5 = deny).
+  new count means (3 = confirmed and injected; 5 = deny). Update the content in the
+  same edit: add the new case and its excuse under the first paragraph, widen the first
+  paragraph when the new case shows the rule was stated too narrowly, and add or fix
+  `enforce` when the new case is detectable. A count bump with an unchanged body is the
+  exception, for feedback that repeats the rule word for word.
+- **Two rules about the same thing.** When the list shows rules that overlap, propose
+  merging them: keep one (the clearer `name`), set its `count` to the larger of the two
+  plus 1 for the current feedback, fold the other's cases into its body, and delete the
+  other file once the user agrees.
 - **The rule fired wrongly.** Do not delete the rule. Narrow it: add `unless` for the
   accepted form, `exclude_path` for files it should not cover, or make `when` more
   specific. Tell the user the hook also logged that violation and may have raised the
