@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.18.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.17.0...v0.18.0) (2026-11-08)
+
+
+### Features
+
+* show the registered hooks (gate.yaml and feedback rules) as a page in the browser ([#91](https://github.com/nonchan7720/claude-hook-gate/issues/91)) ([5620ce1](https://github.com/nonchan7720/claude-hook-gate/commit/5620ce18c0e0085eec74bcdd6ff3de3b4a64ef32))
+
+
+### Bug Fixes
+
+* **gate:** make an unquoted `on:` work in session_start ([#92](https://github.com/nonchan7720/claude-hook-gate/issues/92)) ([fb9a61c](https://github.com/nonchan7720/claude-hook-gate/commit/fb9a61c6d0f66ad08044b7fdf868dabbf3de15a2))
+
 ## [0.17.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.16.0...v0.17.0) (2026-11-05)
 
 
