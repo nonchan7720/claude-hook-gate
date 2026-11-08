@@ -53,7 +53,7 @@ the whole message short; the table is the content.
 
 - Only what the user picked. `count` changes, `enforce` edits, scope keys and body
   rewrites are edits to the rule file. Deleting a file is `rm`; merging is edit + `rm`.
-- Do not touch `.violations.jsonl`, `.errors.jsonl` or the `.count_state` / `.ask_state`
+- Do not touch `.violations.jsonl`, `.errors.jsonl` or the `.count_state` / `.ask_state` / `.new_rule_state`
   directories; the log stays as history.
 - Keep `name` stable unless merging; the violation log and `/correct` key on it.
 - Re-read every edited file (valid frontmatter, bare `count:` line, regexes tested).

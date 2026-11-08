@@ -17,6 +17,7 @@ Read every file in those directories, and always follow the rules with `count >=
 ### When you receive feedback
 
 Every time you receive the same pointer, correction or preference, create or update the file in `.claude/feedback/` or `~/.claude/feedback/` and increment its `count`. **Always do this before replying.**
+**Before creating a file, check whether one exists**: read the `name` / `description` of every file in both directories and the body of any that is close. If a rule covers the same kind of situation (even with different wording, files or commands), do not create a new file: raise that rule's `count` by 1 and update its body with the new case (prefer updating; create a new file only when no rule fits).
 First, ask the user whether to save this feedback. Save it when the user chooses to.
 When recording it, turn the concrete remark into an abstract rule instead of writing it down verbatim.
 When recording it, also write down the excuse, and the pointer against that excuse.

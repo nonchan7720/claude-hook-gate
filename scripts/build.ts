@@ -56,6 +56,23 @@ const useVendor = (text: string, vendorPath = './vendor'): string => {
   return text
 }
 code = useVendor(code)
+// メッセージの文面（locales/*.yaml を文字列として取り込んだもの）を hooks/vendor/locales.js に切り出す。
+// 文面は機能を足すたびに増え、register.js の上限を圧迫するため（自前のコードは読める形のまま残す）。
+{
+  const section = /\/\/ locales\/\w+\.yaml\nvar (\w+_default) = (`[\s\S]*?`);\n\n/g
+  const names: string[] = []
+  let vendored = ''
+  code = code.replace(section, (_, name: string, literal: string) => {
+    names.push(name)
+    vendored += `export const ${name} = ${literal};\n`
+    return ''
+  })
+  if (names.length === 0) throw new Error('locale strings not found in bundle')
+  const anchor = 'import i18next from "./vendor/i18next.js";\n'
+  if (!code.includes(anchor)) throw new Error('i18next import not found in bundle')
+  code = code.replace(anchor, `${anchor}import { ${names.join(', ')} } from "./vendor/locales.js";\n`)
+  outputs[path.join(vendorDir, 'locales.js')] = vendored
+}
 code = code.replace(/^var register = /m, 'export const register = ').replace(/\nexport \{\n {2}register\n\};\n?$/, '\n')
 if (!/^export const register = /m.test(code)) throw new Error('register export not found in bundle')
 // ディレクトリの検査は、権限を判定するフック（classic.PreToolUse）の引数と同じ名前が、そのフックの外を含めて
