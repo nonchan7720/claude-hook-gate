@@ -1657,235 +1657,40 @@ async function createIo($, options = {}) {
 }
 
 // src/hook-list.ts
-function parseHookListArgs(args) {
-  const tokens = new Set(args.split(/\s+/).filter((t) => t !== ""));
-  const gate = tokens.has("gate");
-  const feedback = tokens.has("feedback");
-  return gate || feedback ? { gate, feedback } : { gate: true, feedback: true };
-}
-var INDENT2 = "    ";
-var list = (v) => Array.isArray(v) ? v.map(String) : truthy(v) ? [String(v)] : [];
-var quote = (v) => `\`${String(v).replace(/\s*\n\s*/g, " ⏎ ")}\``;
-function runLines(items, t, depth = 0) {
-  const pad = `${INDENT2}  ${"  ".repeat(depth)}`;
-  const out = [];
-  for (const item of Array.isArray(items) ? items : []) {
-    if (isDict(item) && Array.isArray(item.parallel)) {
-      out.push(`${pad}${t("hookList.parallel")}`);
-      out.push(...runLines(item.parallel, t, depth + 1));
-      continue;
-    }
-    const d = isDict(item) ? item : { cmd: item };
-    if (!truthy(d.cmd))
-      continue;
-    const notes = [];
-    if (truthy(d.timeout))
-      notes.push(`timeout ${d.timeout}s`);
-    if (d.share === false)
-      notes.push("share: false");
-    if (d.files === false)
-      notes.push("files: false");
-    const head = truthy(d.name) ? `${d.name}: ` : "";
-    out.push(`${pad}- ${head}${quote(d.cmd)}${notes.length > 0 ? ` (${notes.join(", ")})` : ""}`);
+var TIMEOUT_MS = 120000;
+function optionEnv(options) {
+  const env = {};
+  for (const key of ["language", "agentLaunchGuard", "autoCount", "rulesFile"]) {
+    const v = options[key];
+    if (typeof v === "string" || typeof v === "boolean")
+      env[`CLAUDE_PLUGIN_OPTION_${key}`] = String(v);
   }
-  return out;
+  return env;
 }
-function optionLine(d) {
-  const notes = [];
-  if (truthy(d.dir))
-    notes.push(`dir: ${d.dir}`);
-  if (truthy(d.per_file_dir))
-    notes.push(`per_file_dir: ${d.per_file_dir}`);
-  if (truthy(d.timeout))
-    notes.push(`timeout: ${d.timeout}s`);
-  if (d.policy === false)
-    notes.push("policy: false");
-  else if (truthy(d.policy))
-    notes.push(`policy: ${d.policy}`);
-  return notes.length > 0 ? [`${INDENT2}${notes.join(" / ")}`] : [];
-}
-function describeGate(cfg, path, lang, error) {
-  const t = tr(lang);
-  const lines = [t("hookList.gateHeader")];
-  if (path === undefined)
-    return [...lines, `  ${t("hookList.gateMissing")}`];
-  lines.push(`  ${path}`);
-  if (error !== undefined)
-    return [...lines, `  ${t("hookList.gateUnreadable", { reason: error })}`];
-  const c = isDict(cfg) ? cfg : {};
-  const rules = Array.isArray(c.rules) ? c.rules : [];
-  const checks = Array.isArray(c.consistency_checks) ? c.consistency_checks : [];
-  const starts = Array.isArray(c.session_start) ? c.session_start : [];
-  lines.push("", `  ${t("hookList.gateRules", { n: rules.length })}`, `  ${t("hookList.gateRulesWhen")}`);
-  if (rules.length === 0)
-    lines.push(`${INDENT2}${t("hookList.none")}`);
-  rules.forEach((raw, i) => {
-    const r = isDict(raw) ? raw : {};
-    lines.push(`  ${i + 1}. match: ${list(r.match).join(", ") || "-"}`);
-    lines.push(...optionLine(r));
-    lines.push(`${INDENT2}run:`, ...runLines(r.run, t));
-    const refs = list(r.run_checks);
-    if (refs.length > 0)
-      lines.push(`${INDENT2}run_checks: ${refs.join(", ")} ${t("hookList.runChecksNote")}`);
-  });
-  lines.push("", `  ${t("hookList.gateChecks", { n: checks.length })}`, `  ${t("hookList.gateChecksWhen")}`);
-  if (checks.length === 0)
-    lines.push(`${INDENT2}${t("hookList.none")}`);
-  const referenced = new Set(rules.flatMap((r) => isDict(r) ? list(r.run_checks) : []));
-  for (const raw of checks) {
-    const ch = isDict(raw) ? raw : {};
-    const name = truthy(ch.name) ? String(ch.name) : "?";
-    lines.push(`  - ${name}${referenced.has(name) ? "" : ` ${t("hookList.unreferenced")}`}`);
-    lines.push(...optionLine(ch));
-    lines.push(`${INDENT2}run:`, ...runLines(ch.run, t));
+var PASS_ENV = ["HOME", "CLAUDE_FEEDBACK_DIR", "FEEDBACK_GATE_LANG", "LC_ALL", "LC_MESSAGES", "LANG"];
+function passEnv(io) {
+  const env = {};
+  for (const key of PASS_ENV) {
+    const v = io.env[key];
+    if (v !== undefined && v !== "")
+      env[key] = v;
   }
-  lines.push("", `  ${t("hookList.gateSessionStart", { n: starts.length })}`, `  ${t("hookList.gateSessionStartWhen")}`);
-  if (starts.length === 0)
-    lines.push(`${INDENT2}${t("hookList.none")}`);
-  for (const raw of starts) {
-    const s = isDict(raw) ? raw : { cmd: raw };
-    const notes = [];
-    const on = list(s.on);
-    if (on.length > 0)
-      notes.push(`on: ${on.join(", ")}`);
-    if (s.background === true)
-      notes.push("background");
-    if (truthy(s.timeout))
-      notes.push(`timeout ${s.timeout}s`);
-    const head = truthy(s.name) ? `${s.name}: ` : "";
-    lines.push(`  - ${head}${quote(s.cmd ?? "")}${notes.length > 0 ? ` (${notes.join(", ")})` : ""}`);
-  }
-  const top = [];
-  if (c.max_parallel !== undefined)
-    top.push(`max_parallel: ${c.max_parallel}`);
-  if (c.report_success !== undefined)
-    top.push(`report_success: ${c.report_success}`);
-  if (c.policy !== undefined)
-    top.push(`policy: ${c.policy}`);
-  if (top.length > 0)
-    lines.push("", `  ${top.join(" / ")}`);
-  return lines;
-}
-var levelOf = (count, t) => t(count >= 5 ? "hookList.levelDeny" : count >= 3 ? "hookList.levelConfirmed" : "hookList.levelProvisional");
-function injectionOf(rule, t) {
-  if (rule.count < 3)
-    return t("hookList.injectNone");
-  if (rule.files.length === 0)
-    return t("hookList.injectEveryPrompt");
-  const exclude = rule.excludeFiles.length > 0 ? t("hookList.injectExclude", { globs: rule.excludeFiles.join(", ") }) : "";
-  return t("hookList.injectFiles", { globs: rule.files.join(", "), exclude });
-}
-function enforceLines(e, rule, t) {
-  const event = String(e.event ?? "");
-  const key = `hookList.event.${event}`;
-  const when = t(key) === key ? "" : t(key);
-  const severity = resolveSeverity(rule.count, e.severity, event);
-  const pad = `${INDENT2}    `;
-  const out = [`${INDENT2}  - ${event} [${severity}]${when === "" ? "" : ` ${when}`}`];
-  const path = list(e.path);
-  if (path.length > 0)
-    out.push(`${pad}path: ${path.join(", ")}`);
-  const excludePath = list(e.exclude_path);
-  if (excludePath.length > 0)
-    out.push(`${pad}exclude_path: ${excludePath.join(", ")}`);
-  if (truthy(e.changed))
-    out.push(`${pad}changed: ${list(e.changed).join(", ")}`);
-  for (const key of ["when", "unless"])
-    if (truthy(e[key]))
-      out.push(`${pad}${key}: ${quote(e[key])}`);
-  if (truthy(e.check))
-    out.push(`${pad}check: ${quote(e.check)}`);
-  for (const key of ["absent_sibling", "absent_glob", "require_sibling"]) {
-    if (truthy(e[key]))
-      out.push(`${pad}${key}: ${list(e[key]).join(", ")}`);
-  }
-  if (truthy(e.message))
-    out.push(`${pad}message: ${String(e.message).replace(/\s*\n\s*/g, " ")}`);
-  return out;
-}
-var scopeOf = (rule, projectDirs) => projectDirs.some((d) => rule.path.startsWith(`${d}/`)) ? "project" : "global";
-function describeFeedback(rules, inactive, broken, opts) {
-  const t = tr(opts.lang);
-  const lines = [t("hookList.feedbackHeader", { active: rules.length, inactive: inactive.length, broken: broken.length })];
-  if (rules.length === 0)
-    lines.push(`  ${t("hookList.none")}`);
-  for (const rule of rules) {
-    const scope = t(`hookList.scope.${scopeOf(rule, opts.projectDirs)}`);
-    lines.push(`  - ${rule.name} [${scope}] count ${rule.count} (${levelOf(rule.count, t)})`);
-    if (rule.description !== "")
-      lines.push(`${INDENT2}${rule.description}`);
-    lines.push(`${INDENT2}${t("hookList.inject")}: ${injectionOf(rule, t)}`);
-    if (rule.enforce.length === 0)
-      lines.push(`${INDENT2}enforce: ${t("hookList.noEnforce")}`);
-    else {
-      lines.push(`${INDENT2}enforce:`);
-      for (const e of rule.enforce)
-        lines.push(...enforceLines(e, rule, t));
-    }
-    lines.push(`${INDENT2}${rule.path}`);
-  }
-  if (inactive.length > 0) {
-    lines.push("", `  ${t("hookList.inactiveHeader")}`);
-    for (const rule of inactive)
-      lines.push(`  - ${rule.name}: ${inactiveReason(rule, opts.now, opts.lang)}`, `${INDENT2}${rule.path}`);
-  }
-  if (broken.length > 0) {
-    lines.push("", `  ${t("hookList.brokenHeader")}`);
-    for (const b of broken)
-      lines.push(`  - ${b.path}`, `${INDENT2}${b.reason}`);
-  }
-  return lines;
-}
-function describeOptions(options, io) {
-  const t = tr(io.lang);
-  const onOff = (v) => t(v ? "hookList.on" : "hookList.off");
-  return [
-    t("hookList.optionsHeader"),
-    `  agentLaunchGuard: ${onOff(options.agentLaunchGuard === true)} — ${t("hookList.agentLaunchGuard")}`,
-    `  autoCount: ${onOff(io.autoCount !== false)} — ${t("hookList.autoCount")}`,
-    `  language: ${io.lang}`
-  ];
-}
-async function readGate(io) {
-  const path = await findGateYaml(io);
-  if (path === undefined)
-    return {};
-  const text = await io.readFile(path);
-  if (text === undefined)
-    return { path, error: "read failed" };
-  try {
-    return { path, cfg: parseYaml(text) };
-  } catch (e) {
-    return { path, error: (e instanceof Error ? e.message : String(e)).split(`
-`)[0] ?? "" };
-  }
+  return env;
 }
 async function hookListCommand(io, args, options = {}) {
-  try {
-    const parsed = parseHookListArgs(args);
-    const t = tr(io.lang);
-    const project = io.projectDir || io.cwd;
-    const sections = [[t("hookList.header", { project })]];
-    if (parsed.gate) {
-      const g = await readGate(io);
-      sections.push(describeGate(g.cfg, g.path, io.lang, g.error));
-    }
-    if (parsed.feedback) {
-      const { rules, broken } = await scanRules(io);
-      const inactive = await listInactive(io, rules);
-      const projectDirs = configPaths(io, project, "feedback");
-      sections.push(describeFeedback(rules, inactive, broken, { lang: io.lang, now: await io.now(), projectDirs }));
-    }
-    if (parsed.gate && parsed.feedback)
-      sections.push(describeOptions(options, io));
-    return { text: sections.map((s) => s.join(`
-`)).join(`
-
-`), context: [] };
-  } catch (e) {
-    await logError(io, "hook-list", e instanceof Error ? e.message : String(e));
-    return { text: `[hook-list] internal error: ${e instanceof Error ? e.message : String(e)}`, context: [] };
-  }
+  const argv = ["bash", join(io.pluginRoot, "scripts", "hook-list.sh"), "claude", ...args.split(/\s+/).filter((a) => a !== "")];
+  const r = await io.run(argv, {
+    cwd: io.cwd,
+    env: { ...passEnv(io), ...optionEnv(options), CLAUDE_PROJECT_DIR: io.projectDir || io.cwd, CLAUDE_PLUGIN_ROOT: io.pluginRoot },
+    timeoutMs: TIMEOUT_MS
+  });
+  const out = r.stdout.trim();
+  if (r.exitCode === 0 && out !== "")
+    return { text: out, context: [] };
+  const reason = [r.stderr.trim(), r.error ?? "", r.timedOut ? "timed out" : ""].filter((s) => s !== "").join(`
+`);
+  return { text: `[hook-list] failed (exit ${r.exitCode})${reason === "" ? "" : `:
+${reason}`}`, context: [] };
 }
 
 // src/io.ts
@@ -5322,7 +5127,7 @@ export const register = (on, options) => {
         description: tr(io.lang)("correct.description"),
         argumentHint: "[--window 30d] [--min 2] [apply]"
       });
-      await $.command.register({ name: "hook-list", description: tr(io.lang)("hookList.description"), argumentHint: "[gate|feedback]" });
+      await $.command.register({ name: "hook-list", description: tr(io.lang)("hookList.description"), argumentHint: "[--no-open]" });
     } catch {}
     return next(e);
   });
