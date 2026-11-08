@@ -15,7 +15,7 @@ bash "${CLAUDE_PLUGIN_ROOT}/scripts/hook-list.sh" claude $ARGUMENTS
 In Codex, pass `codex` instead of `claude` (the project's `.agents/` is then read before
 `.claude/`). The script runs the `feedback-gate` binary (`<host> hook-list`), which reads
 `{.claude,.agents}/gate.yaml` and the global and project feedback rules, writes the page to
-`~/.claude/feedback-gate/hook-list/<project>.html` and opens it in the default browser
+`~/.claude/feedback-gate/hook-list/<project>-<hash>.html` and opens it in the default browser
 (`open` on macOS, `xdg-open` or `wslview` elsewhere). It changes no rule or gate file.
 
 - If the result says the browser could not be opened (a remote machine, no desktop), give

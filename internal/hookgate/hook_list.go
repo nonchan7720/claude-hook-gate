@@ -361,8 +361,8 @@ func HookListInactiveReason(rule Rule, now int64, lang Lang) string {
 // ScanRules と違い、1 つのルールの絞り込み（projects / when_exists の glob）が評価できなくても全体を止めず、そのルールを読めないものとして出す。
 // 一覧を出すだけなので、違反・エラーのログ（.errors.jsonl）には何も書かない。
 // 無効なルールは src/correct.ts の listInactive と同じく、同名の有効なルールに上書きされているものを除く。
-func hlScanFeedback(io Io) (active, inactive []Rule, broken []BrokenRule) {
-	broken = []BrokenRule{}
+func hlScanFeedback(io Io) ([]Rule, []Rule, []BrokenRule) {
+	broken := []BrokenRule{}
 	globalDirs := FeedbackDirs(io)
 	projectDirs := []string{}
 	for _, d := range ProjectFeedbackDirs(io) {
@@ -385,7 +385,7 @@ func hlScanFeedback(io Io) (active, inactive []Rule, broken []BrokenRule) {
 		}
 	}
 	merged = append(merged, projectRules...)
-	active, inactive = []Rule{}, []Rule{}
+	active, inactive := []Rule{}, []Rule{}
 	activeNames := map[string]bool{}
 	for _, r := range merged {
 		ok, err := IsRuleActive(io, r)

@@ -162,7 +162,7 @@ Shows, as a page in the browser, what feedback-gate runs in this project and whe
 /hook-list [--no-open]
 ```
 
-The list is built by the Go binary (`feedback-gate <claude|codex> hook-list`, `internal/hookgate/hook_list.go`) and the page is `webui/hook-list.html` (embedded in the binary). The mod's `/hook-list` (`src/hook-list.ts`) only runs it through `scripts/hook-list.sh`, so the same page is available where the mod's hooks do not run (managed environments) and in Codex, through the same script (the `/feedback-gate:hook-list` skill; in Codex, `bash <plugin>/scripts/hook-list.sh codex`). The HTML is written to `~/.claude/feedback-gate/hook-list/<project path>.html` and opened in the default browser (`open` on macOS, `xdg-open` or `wslview` elsewhere, `start` on Windows). Where no browser can be opened (a remote machine) or with `--no-open`, it returns the path of the file.
+The list is built by the Go binary (`feedback-gate <claude|codex> hook-list`, `internal/hookgate/hook_list.go`) and the page is `webui/hook-list.html` (embedded in the binary). The mod's `/hook-list` (`src/hook-list.ts`) only runs it through `scripts/hook-list.sh`, so the same page is available where the mod's hooks do not run (managed environments) and in Codex, through the same script (the `/feedback-gate:hook-list` skill; in Codex, `bash <plugin>/scripts/hook-list.sh codex`). The HTML is written to `~/.claude/feedback-gate/hook-list/<project path>-<hash>.html` and opened in the default browser (`open` on macOS, `xdg-open` or `wslview` elsewhere, `start` on Windows). Where no browser can be opened (a remote machine) or with `--no-open`, it returns the path of the file.
 
 The page shows:
 

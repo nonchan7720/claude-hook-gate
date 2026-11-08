@@ -162,7 +162,7 @@ flowchart LR
 /hook-list [--no-open]
 ```
 
-一覧を作るのは Go のバイナリ（`feedback-gate <claude|codex> hook-list`、`internal/hookgate/hook_list.go`）で、画面は `webui/hook-list.html`（バイナリに埋め込み）です。mod の `/hook-list`（`src/hook-list.ts`）は `scripts/hook-list.sh` でそれを呼ぶだけなので、mod のフックが動かない組織管理の環境や Codex でも、同じスクリプト（スキル `/feedback-gate:hook-list`、Codex では `bash <プラグイン>/scripts/hook-list.sh codex`）で同じ画面が出ます。HTML は `~/.claude/feedback-gate/hook-list/<プロジェクトのパス>.html` に書き出し、既定のブラウザ（macOS は `open`、ほかは `xdg-open` か `wslview`、Windows は `start`）で開きます。開けない環境（リモートなど）や `--no-open` では、書き出したファイルのパスだけを返します。
+一覧を作るのは Go のバイナリ（`feedback-gate <claude|codex> hook-list`、`internal/hookgate/hook_list.go`）で、画面は `webui/hook-list.html`（バイナリに埋め込み）です。mod の `/hook-list`（`src/hook-list.ts`）は `scripts/hook-list.sh` でそれを呼ぶだけなので、mod のフックが動かない組織管理の環境や Codex でも、同じスクリプト（スキル `/feedback-gate:hook-list`、Codex では `bash <プラグイン>/scripts/hook-list.sh codex`）で同じ画面が出ます。HTML は `~/.claude/feedback-gate/hook-list/<プロジェクトのパス>-<ハッシュ>.html` に書き出し、既定のブラウザ（macOS は `open`、ほかは `xdg-open` か `wslview`、Windows は `start`）で開きます。開けない環境（リモートなど）や `--no-open` では、書き出したファイルのパスだけを返します。
 
 画面に出るもの:
 
