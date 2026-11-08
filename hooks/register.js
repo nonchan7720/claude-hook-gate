@@ -3878,7 +3878,6 @@ function heredocWrites(command, cwd, home) {
 }
 
 // src/feedback-new-rule.ts
-var NEW_RULE_LIST_MAX = 30;
 var SIMILAR_MIN_SCORE = 2;
 var STOPWORDS = new Set(["the", "and", "for", "with", "when", "not", "use", "feedback", "rule", "rules"]);
 var ASCII = /^[a-z0-9]+$/;
@@ -3908,6 +3907,11 @@ function draftText(content) {
   }
 }
 var stemOf = (path) => splitext(basename(path))[0];
+function listLine(rule, similar) {
+  const fileName = basename(rule.path);
+  const nameNote = rule.name === stemOf(rule.path) ? "" : `name: ${rule.name}, `;
+  return `  ${similar ? "★" : "-"} ${fileName} (${nameNote}count: ${rule.count})${rule.description ? `: ${rule.description}` : ""}`;
+}
 var newRuleStatePath = (io, sessionId) => sessionStatePath(io, ".new_rule_state", sessionId);
 async function newRuleNotice(io, filePath, content, sessionId) {
   if (!truthy(sessionId) || !filePath)
@@ -3938,12 +3942,22 @@ async function newRuleNotice(io, filePath, content, sessionId) {
     return;
   await saveNameSet(io, statePath, "confirmed", confirmed.add(file));
   const draft = similarityTokens(`${stemOf(file)} ${draftText(content)}`);
-  const scored = rules.map((rule, index) => ({ rule, index, score: similarityScore(draft, similarityTokens(`${stemOf(rule.path)} ${rule.name} ${rule.description}`)) })).sort((a, b) => b.score - a.score || a.index - b.index);
+  const scored = rules.map((rule, index) => ({
+    rule,
+    index,
+    score: similarityScore(draft, similarityTokens(`${stemOf(rule.path)} ${rule.name} ${rule.description}`))
+  }));
   const t = tr(io.lang);
   const similar = scored.filter((s) => s.score >= SIMILAR_MIN_SCORE).length;
-  const lines = scored.slice(0, NEW_RULE_LIST_MAX).map(({ rule, score }) => `${score >= SIMILAR_MIN_SCORE ? "★" : "-"} ${rule.name} (count: ${rule.count}, ${rule.path})${rule.description ? `: ${rule.description}` : ""}`);
-  if (scored.length > NEW_RULE_LIST_MAX)
-    lines.push(t("newRule.more", { n: scored.length - NEW_RULE_LIST_MAX }));
+  const lines = [];
+  for (const d of dirs) {
+    const inDir = scored.filter((s) => dirname(s.rule.path) === d).sort((a, b) => b.score - a.score || a.index - b.index);
+    if (inDir.length === 0)
+      continue;
+    lines.push(`${d}/`);
+    for (const { rule, score } of inDir)
+      lines.push(listLine(rule, score >= SIMILAR_MIN_SCORE));
+  }
   return [t("newRule.header", { file, n: similar }), ...lines, t("newRule.instruction")].join(`
 `);
 }
