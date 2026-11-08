@@ -76,7 +76,7 @@ export const register: Register = (on, options) => {
         description: tr(io.lang)('correct.description'),
         argumentHint: '[--window 30d] [--min 2] [apply]',
       })
-      await $.command.register({ name: 'hook-list', description: tr(io.lang)('hookList.description'), argumentHint: '[gate|feedback]' })
+      await $.command.register({ name: 'hook-list', description: tr(io.lang)('hookList.description'), argumentHint: '[--no-open]' })
     } catch {
       // コマンド API の無いエンジンでもセッション開始は止めない。
     }
@@ -85,7 +85,7 @@ export const register: Register = (on, options) => {
 
   on('command.run', { command: 'correct' }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? '')))
 
-  // /hook-list: gate.yaml と feedback ルールが、いつ・何を動かすかを一覧にする（読むだけ）。
+  // /hook-list: gate.yaml と feedback ルールが、いつ・何を動かすかをブラウザで一覧にする（Go のバイナリを scripts/hook-list.sh で呼ぶだけ）。
   on('command.run', { command: 'hook-list' }, async ($, e) => hookListCommand(await createIo($, options), String(e.args ?? ''), options))
 
   on('classic.SessionStart', async ($, e, next) => {

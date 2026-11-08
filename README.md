@@ -156,21 +156,25 @@ With the automatic increase (`autoCount`) on, `count` goes up by 1 per session i
 
 ### `/hook-list`
 
-Lists what feedback-gate runs in this project and when. It writes nothing. `src/register.ts` registers it on `session.start`; the logic is in `src/hook-list.ts`.
+Shows, as a page in the browser, what feedback-gate runs in this project and when. It changes no rule or gate file.
 
 ```
-/hook-list [gate|feedback]
+/hook-list [--no-open]
 ```
 
-Without an argument it shows everything; `gate` / `feedback` show only that section.
+The list is built by the Go binary (`feedback-gate <claude|codex> hook-list`, `internal/hookgate/hook_list.go`) and the page is `webui/hook-list.html` (embedded in the binary). The mod's `/hook-list` (`src/hook-list.ts`) only runs it through `scripts/hook-list.sh`, so the same page is available where the mod's hooks do not run (managed environments) and in Codex, through the same script (the `/feedback-gate:hook-list` skill; in Codex, `bash <plugin>/scripts/hook-list.sh codex`). The HTML is written to `~/.claude/feedback-gate/hook-list/<project path>.html` and opened in the default browser (`open` on macOS, `xdg-open` or `wslview` elsewhere, `start` on Windows). Where no browser can be opened (a remote machine) or with `--no-open`, it returns the path of the file.
 
-- **gate.yaml**: the path of the `{.claude,.agents}/gate.yaml` found, then `rules` (PostToolUse right after an edit: `match`, the `run` commands, `parallel`, `run_checks`, `dir` / `per_file_dir` / `timeout` / `policy`), `consistency_checks` (Stop / SubagentStop; a check no rule names in `run_checks` is marked as never running) and `session_start` (SessionStart; `on` / `background`), each with a line on when it runs. A missing or unparsable file is reported as such.
-- **feedback rules**: for each active rule of the merged global + project view, where it lives (global / project), its `count` and level (provisional / confirmed / deny), how it is injected (every prompt / when a file matching `files` is read or edited / never), each `enforce` entry (event and effective severity, `path` / `changed` / `when` / `unless` / the `check` command, ...) and the file path. Then the inactive rules (expired, `projects` / `when_exists` not matching) and the unreadable ones, with the reason.
-- **Plugin settings**: the current `agentLaunchGuard`, `autoCount` and `language` (only without an argument).
+The page shows:
+
+- **gate.yaml**: the path of the file found, then `rules` (PostToolUse right after an edit: `match`, the `run` commands, `parallel`, `run_checks`, `dir` / `per_file_dir` / `timeout` / `policy`), `consistency_checks` (Stop / SubagentStop; a check no rule names in `run_checks` is marked as never running) and `session_start` (SessionStart; `on` / `background`), each with when it runs. A missing or unparsable file is reported as such.
+- **feedback rules**: for each active rule of the merged global + project view, where it lives, its `count` and level (provisional / confirmed / deny), how it is injected (every prompt / when a file matching `files` is read or edited / never), each `enforce` entry (event and effective severity, `path` / `changed` / `when` / `unless` / the `check` command, ...) and the file path. Then the inactive rules (expired, `projects` / `when_exists` not matching) and the unreadable ones, with the reason.
+- **Plugin settings**: the current `agentLaunchGuard`, `autoCount` and `language`.
+
+It has a filter box (name, command, glob) and follows the light / dark setting.
 
 ## Skills
 
-Two skills are bundled under `skills/`. Claude Code loads them with the plugin; invoke them as `/feedback-gate:<name>` or let Claude pick them up from their descriptions. Each is a `SKILL.md` with the procedure plus reference files it reads when needed; the hooks do not depend on them.
+Three skills are bundled under `skills/`. Claude Code loads them with the plugin; invoke them as `/feedback-gate:<name>` or let Claude pick them up from their descriptions. Each is a `SKILL.md` with the procedure plus reference files it reads when needed; the hooks do not depend on them.
 
 ### `/feedback-gate:feedback`
 
@@ -195,6 +199,10 @@ Writes or updates the project's `.claude/gate.yaml`.
 ```
 
 It first reads what the project already runs instead of guessing: the manifests (language and package manager), the task runner (`Makefile`, `justfile`, `Taskfile.yml`, `mise` tasks, `package.json` scripts), the CI configuration (GitHub Actions, GitLab CI, CircleCI, ...) and pre-commit style hooks, and the repository layout (single package, workspaces, one directory per package). It then maps those to the gate: file-scoped lint / format / typecheck and package tests in `rules` (with `$CLAUDE_GATE_FILES` where the tool accepts files), whole-project tests and builds in `consistency_checks` referenced by `run_checks`, `per_file_dir` for monorepos, a `name` on every command, `parallel` groups, `timeout` from measured durations and `files: false` for whole-project commands; CI-only steps (coverage upload, deploys, steps that need services or secrets) are left out and listed in the report. Before handing over it runs every command once on the current tree (through the normal permission flow), checks the file against the schema's key set and makes sure `.claude/.gate-status/` is in `.gitignore`. `review` reports the drift between the current file and CI without editing. The field reference, the discovery checklist and per-toolchain recipes (TypeScript, workspaces, Python, Go, Rust, Ruby, JVM, Terraform, shell, Makefile-driven) are in `skills/gate/`.
+
+### `/feedback-gate:hook-list`
+
+Shows the same page as [`/hook-list`](#hook-list) by running `scripts/hook-list.sh` (argument: `--no-open`). Use it in managed environments where the mod's `/hook-list` is not available; Claude may also use it when asked which hooks, gate rules or feedback rules are registered in the project.
 
 ## Install
 

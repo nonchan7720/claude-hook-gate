@@ -6,6 +6,7 @@ import { register } from '../src/register.ts'
 import { publishRunning } from '../src/running-registry.ts'
 import { loadMod } from './helpers/fake-engine.ts'
 import { exists, writeChangedFiles, writeGateYaml } from './helpers/gate.ts'
+import { feedbackGateBin } from './helpers/go-binary.ts'
 import { MISSING_DOGWOOD_BIN, makeIo, rmTree, tmpDir } from './helpers/node-io.ts'
 
 type Out = Record<string, unknown>
@@ -137,22 +138,21 @@ describe('/correct', () => {
 })
 
 describe('/hook-list', () => {
-  test('command.run lists the gate rules and the feedback rules', () =>
-    withMod(async (m, proj, feedback) => {
-      writeGateYaml(proj, { rules: [{ match: '**/*.py', run: ['ruff check'] }] })
-      writeRule(feedback, 'confirmed', 3)
-      const r = (await m.call('command.run', { command: 'hook-list', args: '' })) as Out
-      expect(String(r.text).startsWith(`[hook-list] ${proj}`)).toBe(true)
-      expect(String(r.text)).toContain('  1. match: **/*.py')
-      expect(String(r.text)).toContain('  - confirmed [グローバル] count 3')
-    }))
+  // scripts/hook-list.sh はリリースからバイナリを取ってこず、手元でビルドしたものを使う（子プロセスは process.env を継ぐ）。
+  process.env.FEEDBACK_GATE_BIN = feedbackGateBin()
 
-  test('the gate argument shows only gate.yaml', () =>
-    withMod(async (m) => {
-      const r = (await m.call('command.run', { command: 'hook-list', args: 'gate' })) as Out
-      expect(String(r.text)).toContain('gate.yaml がありません')
-      expect(String(r.text)).not.toContain('feedback ルール')
-    }))
+  test('command.run writes the page through the Go binary and returns its one-line result', () =>
+    withMod(
+      async (m, proj, _feedback, home) => {
+        writeGateYaml(proj, { rules: [{ match: '**/*.py', run: ['ruff check'] }] })
+        const r = (await m.call('command.run', { command: 'hook-list', args: '--no-open' })) as Out
+        expect(String(r.text)).toMatch(/^\[hook-list\] 一覧を書き出しました。ブラウザで開いてください: /)
+        const file = String(r.text).split(': ').at(-1) ?? ''
+        expect(file.startsWith(path.join(home, '.claude', 'feedback-gate', 'hook-list'))).toBe(true)
+        expect(fs.readFileSync(file, 'utf8')).toContain('"match":["**/*.py"]')
+      },
+      { language: 'ja' },
+    ))
 })
 
 describe('UserPromptSubmit', () => {

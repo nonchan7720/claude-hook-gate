@@ -156,21 +156,25 @@ flowchart LR
 
 ### `/hook-list`
 
-このプロジェクトで feedback-gate が「いつ・何を」動かすかを一覧で確認するコマンドです。ファイルは何も書き換えません。`src/register.ts` が `session.start` で登録し、ロジックは `src/hook-list.ts` にあります。
+このプロジェクトで feedback-gate が「いつ・何を」動かすかを、ブラウザの画面で一覧表示するコマンドです。ルールやゲートのファイルは何も書き換えません。
 
 ```
-/hook-list [gate|feedback]
+/hook-list [--no-open]
 ```
 
-引数なしで全部、`gate` / `feedback` でその節だけを出します。
+一覧を作るのは Go のバイナリ（`feedback-gate <claude|codex> hook-list`、`internal/hookgate/hook_list.go`）で、画面は `webui/hook-list.html`（バイナリに埋め込み）です。mod の `/hook-list`（`src/hook-list.ts`）は `scripts/hook-list.sh` でそれを呼ぶだけなので、mod のフックが動かない組織管理の環境や Codex でも、同じスクリプト（スキル `/feedback-gate:hook-list`、Codex では `bash <プラグイン>/scripts/hook-list.sh codex`）で同じ画面が出ます。HTML は `~/.claude/feedback-gate/hook-list/<プロジェクトのパス>.html` に書き出し、既定のブラウザ（macOS は `open`、ほかは `xdg-open` か `wslview`、Windows は `start`）で開きます。開けない環境（リモートなど）や `--no-open` では、書き出したファイルのパスだけを返します。
 
-- **gate.yaml**: 見つかった `{.claude,.agents}/gate.yaml` のパスと、`rules`（ファイル編集直後の PostToolUse。`match`・`run` のコマンド・`parallel`・`run_checks`・`dir` / `per_file_dir` / `timeout` / `policy`）、`consistency_checks`（Stop / SubagentStop。どの rule の `run_checks` にも無いものは「実行されない」と明示）、`session_start`（SessionStart。`on` / `background`）を、それぞれが動くタイミングの説明付きで並べます。無い・YAML として読めない場合はその旨を出します。
-- **feedback ルール**: グローバルとプロジェクトをマージした有効なルールごとに、置き場所（グローバル / プロジェクト）、`count` と段階（暫定・確定・deny）、注入のされ方（毎プロンプト / `files` に一致するファイルを読んだ・編集したとき / しない）、`enforce` の各要素（イベントと実効の severity、`path` / `changed` / `when` / `unless` / `check` のコマンドなど）、ファイルのパスを出します。続けて無効なルール（`expires` 切れ・`projects` / `when_exists` 不一致）と読めないルールを理由付きで出します。
-- **プラグイン設定**: `agentLaunchGuard`・`autoCount`・`language` の現在値（引数なしのときだけ）。
+画面に出るもの:
+
+- **gate.yaml**: 見つかったファイルのパスと、`rules`（ファイル編集直後の PostToolUse。`match`・`run` のコマンド・`parallel`・`run_checks`・`dir` / `per_file_dir` / `timeout` / `policy`）、`consistency_checks`（Stop / SubagentStop。どの rule の `run_checks` にも無いものは「実行されない」と表示）、`session_start`（SessionStart。`on` / `background`）を、それぞれが動くタイミングの説明付きで。無い・YAML として読めない場合はその旨。
+- **feedback ルール**: グローバルとプロジェクトをマージした有効なルールごとに、置き場所、`count` と段階（暫定・確定・deny）、注入のされ方（毎プロンプト / `files` に一致するファイルを読んだ・編集したとき / しない）、`enforce` の各要素（イベントと実効の severity、`path` / `changed` / `when` / `unless` / `check` のコマンドなど）、ファイルのパス。続けて無効なルール（`expires` 切れ・`projects` / `when_exists` 不一致）と読めないルールを理由付きで。
+- **プラグイン設定**: `agentLaunchGuard`・`autoCount`・`language` の現在値。
+
+名前・コマンド・glob での絞り込み欄があり、ライト / ダークの両方に対応しています。
 
 ## スキル
 
-`skills/` に 2 つのスキルを同梱しています。プラグインと一緒に Claude Code が読み込み、`/feedback-gate:<name>` で呼び出せます（説明文から Claude が自分で使うこともあります）。それぞれ手順を書いた `SKILL.md` と、必要なときに読む参照ファイルからなり、フックの動作はスキルに依存しません。
+`skills/` に 3 つのスキルを同梱しています。プラグインと一緒に Claude Code が読み込み、`/feedback-gate:<name>` で呼び出せます（説明文から Claude が自分で使うこともあります）。それぞれ手順を書いた `SKILL.md` と、必要なときに読む参照ファイルからなり、フックの動作はスキルに依存しません。
 
 ### `/feedback-gate:feedback`
 
@@ -195,6 +199,10 @@ flowchart LR
 ```
 
 コマンドを推測せず、まずプロジェクトが実際に動かしているものを読みます。マニフェスト（言語とパッケージマネージャ）、タスクランナー（`Makefile`、`justfile`、`Taskfile.yml`、`mise` のタスク、`package.json` の scripts）、CI 設定（GitHub Actions、GitLab CI、CircleCI など）や pre-commit 系のフック、リポジトリの構成（単一パッケージ、ワークスペース、1 ディレクトリ 1 パッケージ）です。それをゲートに写します。ファイル単位の lint・フォーマット検査・型検査とパッケージのテストは `rules` に（ツールがファイルを受け取れるなら `$CLAUDE_GATE_FILES` を渡す）、プロジェクト全体のテストやビルドは `consistency_checks` に置いて `run_checks` から参照し、モノレポには `per_file_dir`、各コマンドに `name`、独立したものは `parallel`、計測した所要時間から `timeout`、全体を見るコマンドには `files: false` を付けます。CI だけで必要なもの（カバレッジのアップロード、デプロイ、サービスやシークレットが要るステップ）は外して報告に列挙します。引き渡す前に、各コマンドを現在のツリーで 1 回ずつ実行し（通常の権限確認を通ります）、スキーマのキー一覧と照合し、`.gitignore` に `.claude/.gate-status/` があることを確かめます。`review` は現在のファイルと CI のずれを編集せずに報告します。フィールドのリファレンス、調査のチェックリスト、ツールチェーン別のレシピ（TypeScript、ワークスペース、Python、Go、Rust、Ruby、JVM、Terraform、シェル、Makefile 駆動）は `skills/gate/` にあります。
+
+### `/feedback-gate:hook-list`
+
+[`/hook-list`](#hook-list) と同じ画面を、`scripts/hook-list.sh` を実行して出します（引数は `--no-open`）。mod の `/hook-list` が使えない組織管理の環境で使います。プロジェクトにどんな hook・gate のルール・feedback ルールが登録されているかを尋ねられたときに、Claude が自分で使うこともあります。
 
 ## インストール
 
