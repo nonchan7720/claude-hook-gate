@@ -4911,7 +4911,7 @@ function parseItem(raw) {
   if (typeof d.cmd !== "string" || d.cmd.trim() === "")
     return;
   const t = Number(d.timeout);
-  const rawOn = "on" in d ? d.on : d.true;
+  const rawOn = d.on !== undefined && d.on !== null ? d.on : d.true;
   const on = typeof rawOn === "string" ? [rawOn] : Array.isArray(rawOn) ? rawOn.map(String) : undefined;
   return {
     cmd: d.cmd,
