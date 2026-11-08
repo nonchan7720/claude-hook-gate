@@ -55,7 +55,11 @@ func TestHookListGateModel(t *testing.T) {
 				"run": []any{"bun run lint"}, "run_checks": []any{"build"},
 			}},
 			"consistency_checks": []any{Dict{"name": "build", "run": []any{"make"}}, Dict{"name": "orphan", "dir": "pkg", "run": []any{"x"}}},
-			"session_start":      []any{"echo hi", Dict{"name": "graph", "cmd": "graph", "on": []any{"startup", "clear"}, "background": true}},
+			"session_start": []any{
+				"echo hi",
+				Dict{"name": "graph", "cmd": "graph", "on": []any{"startup", "clear"}, "background": true},
+				Dict{"cmd": "unquoted", "true": "resume"}, // YAML 1.1 で引用しない on: が読まれた形
+			},
 		}
 		g := HookListGateModel(cfg, "/p/.claude/gate.yaml", "")
 		require.NotNil(t, g.Path)
@@ -73,6 +77,7 @@ func TestHookListGateModel(t *testing.T) {
 		assert.Equal(t, []HookListRunNode{
 			{Cmd: "echo hi", Notes: []string{}},
 			{Cmd: "graph", Name: "graph", Notes: []string{"on: startup, clear", "background"}},
+			{Cmd: "unquoted", Notes: []string{"on: resume"}},
 		}, g.SessionStart)
 		assert.Equal(t, []HookListPair{{"max_parallel", "3"}}, g.Settings)
 	})

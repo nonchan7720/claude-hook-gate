@@ -243,7 +243,12 @@ func HookListGateModel(cfg any, path, errMsg string) HookListGate {
 			s = Dict{"cmd": raw}
 		}
 		notes := []string{}
-		if on := hlList(s["on"]); len(on) > 0 {
+		// YAML 1.1 では引用しないキー on が true になる（gate_session_start.go と同じく、どちらの書き方でも読む）。
+		rawOn, ok := s["on"]
+		if !ok {
+			rawOn = s["true"]
+		}
+		if on := hlList(rawOn); len(on) > 0 {
 			notes = append(notes, "on: "+strings.Join(on, ", "))
 		}
 		if s["background"] == true {
