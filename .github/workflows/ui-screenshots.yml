@@ -1,0 +1,121 @@
+name: UI screenshots
+
+# PR ごとに /hook-list の画面（webui/hook-list.html）を tests/fixtures/hook-list/ のサンプルで撮り、PR のコメントに貼る。
+# 画像は ui-screenshots ブランチの pr-<番号>/ に置き（そのコミットの SHA を含む raw URL で参照するので、キャッシュで古い画像が出ない）、
+# コメントは PR ごとに 1 つを上書きする。
+# 欠けた画像を貼らないよう、撮る前の検査（JS エラー・データの埋め込み漏れ・画像の読み込み失敗・横スクロール・真っ白）は
+# scripts/ui-screenshots.ts が行い、ここではコメントを書く前に、各画像の URL が撮ったものと同じバイト列を返すことを確かめる。
+on:
+  pull_request:
+    paths:
+      - webui/**
+      - internal/hookgate/hook_list.go
+      - cmd/feedback-gate/**
+      - locales/**
+      - scripts/ui-screenshots.ts
+      - tests/fixtures/hook-list/**
+      - .github/workflows/ui-screenshots.yml
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ui-screenshots-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  screenshots:
+    # フォークからの PR は書き込み権限が無いので対象外。
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    env:
+      PR: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      SHOTS: ${{ runner.temp }}/shots
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d # v5.2.4
+        with:
+          cache: true
+      - run: bun install --frozen-lockfile
+      - name: Install Chromium for Playwright
+        run: bunx playwright install --with-deps chromium
+      - name: Take the screenshots (fails on JS errors, missing data, broken images, overflow or blank captures)
+        run: bun scripts/ui-screenshots.ts "$SHOTS"
+
+      - name: Publish the images to the ui-screenshots branch
+        id: publish
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898299+github-actions[bot]@users.noreply.github.com"
+          dir="$RUNNER_TEMP/ui-screenshots"
+          # 別の PR のジョブと同時に push して拒否されたら、取り直してやり直す。
+          for attempt in 1 2 3 4 5; do
+            git worktree remove --force "$dir" 2>/dev/null || rm -rf "$dir"
+            git worktree prune
+            if git fetch --depth 1 origin ui-screenshots 2>/dev/null; then
+              git worktree add -B ui-screenshots "$dir" FETCH_HEAD
+            else
+              git worktree add --orphan -b ui-screenshots "$dir"
+            fi
+            rm -rf "$dir/pr-$PR"
+            mkdir -p "$dir/pr-$PR"
+            cp "$SHOTS"/* "$dir/pr-$PR/"
+            git -C "$dir" add -A
+            git -C "$dir" diff --cached --quiet || git -C "$dir" commit -q -m "UI screenshots for #$PR at $HEAD_SHA"
+            if git -C "$dir" push origin HEAD:refs/heads/ui-screenshots; then
+              echo "sha=$(git -C "$dir" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep $((attempt * 3))
+          done
+          echo "::error::could not push to the ui-screenshots branch"
+          exit 1
+
+      - name: Check that every image URL serves the captured image
+        env:
+          SHA: ${{ steps.publish.outputs.sha }}
+        run: |
+          set -euo pipefail
+          base="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$SHA/pr-$PR"
+          for f in $(jq -r '.[].file' "$SHOTS/shots.json"); do
+            ok=""
+            for i in $(seq 1 12); do
+              if curl -sfL -o "$RUNNER_TEMP/fetched.png" "$base/$f" && cmp -s "$RUNNER_TEMP/fetched.png" "$SHOTS/$f"; then
+                ok=1
+                break
+              fi
+              sleep 5
+            done
+            if [ -z "$ok" ]; then
+              echo "::error::$base/$f does not serve the captured image"
+              exit 1
+            fi
+            echo "ok: $f"
+          done
+
+      - name: Post or update the PR comment
+        env:
+          SHA: ${{ steps.publish.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          marker='<!-- hook-list-ui-screenshots -->'
+          base="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$SHA/pr-$PR"
+          {
+            echo "$marker"
+            echo "## /hook-list の画面"
+            echo
+            echo "\`tests/fixtures/hook-list/\` のサンプルで \`${HEAD_SHA:0:7}\` から生成（\`scripts/ui-screenshots.ts\`）。"
+            echo
+            jq -r --arg base "$base" '.[] | "### \(.title)\n\n\(.description)\n\n![\(.title)](\($base)/\(.file))\n"' "$SHOTS/shots.json"
+          } > "$RUNNER_TEMP/comment.md"
+          id="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | head -n 1)"
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F "body=@$RUNNER_TEMP/comment.md" > /dev/null
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F "body=@$RUNNER_TEMP/comment.md" > /dev/null
+          fi
