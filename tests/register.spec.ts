@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -7,6 +7,7 @@ import { register } from '../src/register.ts'
 import { gateStatusDir, type RunningEntry } from '../src/running-registry.ts'
 import { loadMod } from './helpers/fake-engine.ts'
 import { exists, writeChangedFiles, writeGateYaml } from './helpers/gate.ts'
+import { feedbackGateBin } from './helpers/go-binary.ts'
 import { MISSING_DOGWOOD_BIN, makeIo, rmTree, tmpDir } from './helpers/node-io.ts'
 
 type Out = Record<string, unknown>
@@ -111,7 +112,7 @@ describe('/correct', () => {
   test('session.start registers the command', () =>
     withMod(async (m) => {
       await m.call('session.start', {})
-      expect(commandLog.map((c) => c.name)).toEqual(['correct'])
+      expect(commandLog.map((c) => c.name)).toEqual(['correct', 'hook-list'])
       expect(commandLog[0]?.description).toContain('feedback ルール')
     }))
 
@@ -160,6 +161,33 @@ describe('/correct', () => {
       },
       { language: 'ja' },
       { LANG: 'en_US.UTF-8' },
+    ))
+})
+
+describe('/hook-list', () => {
+  // scripts/hook-list.sh はリリースからバイナリを取ってこず、手元でビルドしたものを使う（子プロセスは process.env を継ぐ）。
+  // このブロックの間だけ設定し、ほかのテストには漏らさない。
+  let saved: string | undefined
+  beforeAll(() => {
+    saved = process.env.FEEDBACK_GATE_BIN
+    process.env.FEEDBACK_GATE_BIN = feedbackGateBin()
+  })
+  afterAll(() => {
+    if (saved === undefined) delete process.env.FEEDBACK_GATE_BIN
+    else process.env.FEEDBACK_GATE_BIN = saved
+  })
+
+  test('command.run writes the page through the Go binary and returns its one-line result', () =>
+    withMod(
+      async (m, proj, _feedback, home) => {
+        writeGateYaml(proj, { rules: [{ match: '**/*.py', run: ['ruff check'] }] })
+        const r = (await m.call('command.run', { command: 'hook-list', args: '--no-open' })) as Out
+        expect(String(r.text)).toMatch(/^\[hook-list\] 一覧を書き出しました。ブラウザで開いてください: /)
+        const file = String(r.text).split(': ').at(-1) ?? ''
+        expect(file.startsWith(path.join(home, '.claude', 'feedback-gate', 'hook-list'))).toBe(true)
+        expect(fs.readFileSync(file, 'utf8')).toContain('"match":["**/*.py"]')
+      },
+      { language: 'ja' },
     ))
 })
 

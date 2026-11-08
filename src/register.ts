@@ -3,6 +3,7 @@ import { correctCommand } from './correct.ts'
 import { createIo } from './engine-io.ts'
 import { feedbackDir } from './feedback-rules.ts'
 import { runGo } from './go-bridge.ts'
+import { hookListCommand } from './hook-list.ts'
 import { tr } from './i18n.ts'
 import { merge, type Outcome } from './outcome.ts'
 import { join } from './path.ts'
@@ -12,7 +13,8 @@ import { listRunning, runningBand } from './running-registry.ts'
 // mod。classic.* のイベントの判定は Go 版のバイナリ（internal/hookgate、`feedback-gate claude <Event>`）に任せ
 // （src/go-bridge.ts が scripts/hook.sh 経由で起動する）、その結果（Outcome）を次の hook の結果に重ねて返すだけ。
 // settings hook（hooks/hooks.json）も同じバイナリを呼ぶので、判定の実装は Go の 1 つだけ。
-// TypeScript に残るのは、Go を呼ぶ部分と、/correct（src/correct.ts）と、プロンプト上の実行中の帯（ui.render）だけ。
+// TypeScript に残るのは、Go を呼ぶ部分と、/correct（src/correct.ts）と、/hook-list（src/hook-list.ts。これも Go を呼ぶ）と、
+// プロンプト上の実行中の帯（ui.render）だけ。
 
 const str = (v: unknown): string => (typeof v === 'string' ? v : '')
 
@@ -75,6 +77,7 @@ export const register: Register = (on, options) => {
         description: tr(io.lang)('correct.description'),
         argumentHint: '[--window 30d] [--min 2] [apply]',
       })
+      await $.command.register({ name: 'hook-list', description: tr(io.lang)('hookList.description'), argumentHint: '[--no-open]' })
     } catch {
       // コマンド API の無いエンジンでもセッション開始は止めない。
     }
@@ -82,6 +85,9 @@ export const register: Register = (on, options) => {
   })
 
   on('command.run', { command: 'correct' }, async ($, e) => correctCommand(await createIo($, options), String(e.args ?? '')))
+
+  // /hook-list: gate.yaml と feedback ルールが、いつ・何を動かすかをブラウザで一覧にする（Go のバイナリを scripts/hook-list.sh で呼ぶだけ）。
+  on('command.run', { command: 'hook-list' }, async ($, e) => hookListCommand(await createIo($, options), String(e.args ?? ''), options))
 
   on('classic.SessionStart', async ($, e, next) => {
     await markClassic($, options)

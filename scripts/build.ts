@@ -14,10 +14,30 @@ const root = path.resolve(import.meta.dir, '..')
 const hooksDir = path.join(root, 'hooks')
 const vendorDir = path.join(hooksDir, 'vendor')
 
+// メッセージの文面（locales/<lang>.yaml）。src/i18n.ts が文字列として import するもので、register.js に埋め込むと
+// それだけで 30 KiB 近くになるので、言語ごとに hooks/vendor/locales-<lang>.js（文字列を default export するだけ）へ切り出す。
+const localeLangs = ['ja', 'en']
+const localeEntry = (lang: string): string =>
+  `import text from ${JSON.stringify(path.join(root, 'locales', `${lang}.yaml`))} with { type: 'text' }\nexport default text\n`
+
 // hooks/vendor/<name>.js に切り出す依存と、その中身（再 export するだけのエントリ）。
 const vendors: Record<string, string> = {
   yaml: "export * from 'yaml'\n",
   i18next: "export { default } from 'i18next'\nexport * from 'i18next'\n",
+  ...Object.fromEntries(localeLangs.map((lang) => [`locales-${lang}`, localeEntry(lang)])),
+}
+
+// register.js のビルドで、src/i18n.ts の `../locales/<lang>.yaml` を外部の `locales-<lang>` に読み替える（下の useVendor が
+// hooks/vendor/locales-<lang>.js への相対パスに差し替える）。
+const externalLocales: Bun.BunPlugin = {
+  name: 'external-locales',
+  setup(b) {
+    b.onResolve({ filter: /(^|\/)locales\/[a-z]+\.yaml$/ }, (args) => {
+      const lang = path.basename(args.path, '.yaml')
+      if (!localeLangs.includes(lang)) throw new Error(`unknown locale file: ${args.path}`)
+      return { path: `locales-${lang}`, external: true }
+    })
+  },
 }
 
 // 1 ファイルの上限（ディレクトリ掲載の制限は 256 KiB 未満）。余裕を見てこれを超えたらビルドを失敗させる。
@@ -46,6 +66,7 @@ for (const [name, entry] of Object.entries(vendors)) {
 let code = await build({
   entrypoints: [path.join(root, 'src', 'register.ts')],
   external: ['claude-code', ...Object.keys(vendors)],
+  plugins: [externalLocales],
   minify: false,
 })
 // 外に出した依存の import を hooks/vendor/ への相対パスに差し替える（vendorPath は出力ファイルから見た hooks/vendor/）。
@@ -56,23 +77,6 @@ const useVendor = (text: string, vendorPath = './vendor'): string => {
   return text
 }
 code = useVendor(code)
-// メッセージの文面（locales/*.yaml を文字列として取り込んだもの）を hooks/vendor/locales.js に切り出す。
-// 文面は機能を足すたびに増え、register.js の上限を圧迫するため（自前のコードは読める形のまま残す）。
-{
-  const section = /\/\/ locales\/\w+\.yaml\nvar (\w+_default) = (`[\s\S]*?`);\n\n/g
-  const names: string[] = []
-  let vendored = ''
-  code = code.replace(section, (_, name: string, literal: string) => {
-    names.push(name)
-    vendored += `export const ${name} = ${literal};\n`
-    return ''
-  })
-  if (names.length === 0) throw new Error('locale strings not found in bundle')
-  const anchor = 'import i18next from "./vendor/i18next.js";\n'
-  if (!code.includes(anchor)) throw new Error('i18next import not found in bundle')
-  code = code.replace(anchor, `${anchor}import { ${names.join(', ')} } from "./vendor/locales.js";\n`)
-  outputs[path.join(vendorDir, 'locales.js')] = vendored
-}
 code = code.replace(/^var register = /m, 'export const register = ').replace(/\nexport \{\n {2}register\n\};\n?$/, '\n')
 if (!/^export const register = /m.test(code)) throw new Error('register export not found in bundle')
 // ディレクトリの検査は、権限を判定するフック（classic.PreToolUse）の引数と同じ名前が、そのフックの外を含めて

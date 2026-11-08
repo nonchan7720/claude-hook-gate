@@ -105,13 +105,20 @@ export function makeEngine(opts: FakeEngineOptions): FakeEngine {
   return {
     $,
     call: async (event, e, next = async () => ({})) => {
-      const hook = hooks.get(event)
+      // command.run はコマンド名ごとに登録される（matcher の command）ので、イベントの command で引く。
+      const command = (e as { command?: unknown } | undefined)?.command
+      const hook = (typeof command === 'string' ? hooks.get(`${event}:${command}`) : undefined) ?? hooks.get(event)
       if (!hook) throw new Error(`no hook for ${event}`)
       return hook($, e as HookEvent, next as never)
     },
     register: (register) => {
       // `on('ui.render', { component }, hook)` のように matcher を挟む形でも、最後の引数が hook。
-      register((event: string, ...args: unknown[]) => hooks.set(event, args.at(-1) as Hook), opts.options ?? {})
+      // matcher に command があれば（command.run）、コマンド名ごとに分けて控える。
+      register((event: string, ...args: unknown[]) => {
+        const matcher = args.length > 1 ? (args[0] as { command?: unknown }) : undefined
+        const key = typeof matcher?.command === 'string' ? `${event}:${matcher.command}` : event
+        hooks.set(key, args.at(-1) as Hook)
+      }, opts.options ?? {})
     },
   }
 }
