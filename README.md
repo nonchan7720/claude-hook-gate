@@ -154,9 +154,27 @@ Unknown arguments are ignored. There are five kinds of proposals, listed in this
 
 With the automatic increase (`autoCount`) on, `count` goes up by 1 per session in which the rule is violated. A `bump` proposal instead jumps to 3 or 5 based on the violations in the window; it always starts from the current `count`, and `apply` only rewrites a file whose `count` still matches the proposal, so the two never add up twice.
 
+### `/hook-list`
+
+Shows, as a page in the browser, what feedback-gate runs in this project and when. It changes no rule or gate file.
+
+```
+/hook-list [--no-open]
+```
+
+The list is built by the Go binary (`feedback-gate <claude|codex> hook-list`, `internal/hookgate/hook_list.go`) and the page is `webui/hook-list.html` (embedded in the binary). The mod's `/hook-list` (`src/hook-list.ts`) only runs it through `scripts/hook-list.sh`, so the same page is available where the mod's hooks do not run (managed environments) and in Codex, through the same script (the `/feedback-gate:hook-list` skill; in Codex, `bash <plugin>/scripts/hook-list.sh codex`). The HTML is written to `~/.claude/feedback-gate/hook-list/<project path>-<hash>.html` and opened in the default browser (`open` on macOS, `xdg-open` or `wslview` elsewhere, `start` on Windows). Where no browser can be opened (a remote machine) or with `--no-open`, it returns the path of the file.
+
+The page shows:
+
+- **gate.yaml**: the path of the file found, then `rules` (PostToolUse right after an edit: `match`, the `run` commands, `parallel`, `run_checks`, `dir` / `per_file_dir` / `timeout` / `policy`), `consistency_checks` (Stop / SubagentStop; a check no rule names in `run_checks` is marked as never running) and `session_start` (SessionStart; `on` / `background`), each with when it runs. A missing or unparsable file is reported as such.
+- **feedback rules**: for each active rule of the merged global + project view, where it lives, its `count` and level (provisional / confirmed / deny), how it is injected (every prompt / when a file matching `files` is read or edited / never), each `enforce` entry (event and effective severity, `path` / `changed` / `when` / `unless` / the `check` command, ...) and the file path. Then the inactive rules (expired, `projects` / `when_exists` not matching) and the unreadable ones, with the reason.
+- **Plugin settings**: the current `agentLaunchGuard`, `autoCount` and `language`.
+
+The feedback rules are a table with one row per rule; opening a row shows the details above. Buttons filter by level, scope and event, and a text box by name, command or glob, so dozens of rules stay easy to scan. Inactive rules are collapsed to a count; unreadable ones are shown open. The page follows the light / dark setting.
+
 ## Skills
 
-Two skills are bundled under `skills/`. Claude Code loads them with the plugin; invoke them as `/feedback-gate:<name>` or let Claude pick them up from their descriptions. Each is a `SKILL.md` with the procedure plus reference files it reads when needed; the hooks do not depend on them.
+Three skills are bundled under `skills/`. Claude Code loads them with the plugin; invoke them as `/feedback-gate:<name>` or let Claude pick them up from their descriptions. Each is a `SKILL.md` with the procedure plus reference files it reads when needed; the hooks do not depend on them.
 
 ### `/feedback-gate:feedback`
 
@@ -181,6 +199,10 @@ Writes or updates the project's `.claude/gate.yaml`.
 ```
 
 It first reads what the project already runs instead of guessing: the manifests (language and package manager), the task runner (`Makefile`, `justfile`, `Taskfile.yml`, `mise` tasks, `package.json` scripts), the CI configuration (GitHub Actions, GitLab CI, CircleCI, ...) and pre-commit style hooks, and the repository layout (single package, workspaces, one directory per package). It then maps those to the gate: file-scoped lint / format / typecheck and package tests in `rules` (with `$CLAUDE_GATE_FILES` where the tool accepts files), whole-project tests and builds in `consistency_checks` referenced by `run_checks`, `per_file_dir` for monorepos, a `name` on every command, `parallel` groups, `timeout` from measured durations and `files: false` for whole-project commands; CI-only steps (coverage upload, deploys, steps that need services or secrets) are left out and listed in the report. Before handing over it runs every command once on the current tree (through the normal permission flow), checks the file against the schema's key set and makes sure `.claude/.gate-status/` is in `.gitignore`. `review` reports the drift between the current file and CI without editing. The field reference, the discovery checklist and per-toolchain recipes (TypeScript, workspaces, Python, Go, Rust, Ruby, JVM, Terraform, shell, Makefile-driven) are in `skills/gate/`.
+
+### `/feedback-gate:hook-list`
+
+Shows the same page as [`/hook-list`](#hook-list) by running `scripts/hook-list.sh` (argument: `--no-open`). Use it in managed environments where the mod's `/hook-list` is not available; Claude may also use it when asked which hooks, gate rules or feedback rules are registered in the project.
 
 ## Install
 
@@ -316,7 +338,7 @@ What the plugin reads, runs, writes and decides, for reviewers and for anyone in
 - **Context it adds**: on UserPromptSubmit it adds the rules file and your confirmed feedback rules (`count >= 3`) to the context. PostToolUse, Stop and SubagentStop give Claude the gate results and rule violations (as feedback or a block reason); PostToolUse(Agent) adds a finished subagent's results to the caller's context.
 - **Settings hooks**: `hooks/hooks.json` registers a `command` hook for each event, which runs `scripts/hook.sh` and then `feedback-gate claude <Event>` (the Go binary) with the event's JSON on stdin. It runs the same checks as the mod hooks and returns the same things (deny / ask, block, added context), so the points above apply to it too. It exits without doing anything when the mod's marker for the session exists, or when the binary is neither cached nor downloadable. It reads the plugin settings from the `CLAUDE_PLUGIN_OPTION_*` environment variables.
 - **Commands**: it registers `/correct` at session start, and its `command.run` hook answers only that command.
-- **Bundled files**: `hooks/register.js` is built from `src/` by `scripts/build.ts` and is not minified. `hooks/vendor/yaml.js` and `hooks/vendor/i18next.js` are the npm packages [`yaml`](https://www.npmjs.com/package/yaml) and [`i18next`](https://www.npmjs.com/package/i18next) at the versions pinned in `package.json` / `bun.lock`, minified only to keep each file small. The getters, `Object.defineProperty` and promise checks (`typeof x.then === "function"`) that a scan reports are in these two libraries (yaml's document classes, i18next's async loading). The plugin's own code uses no `Proxy`, `eval` or `new Function`.
+- **Bundled files**: `hooks/register.js` is built from `src/` by `scripts/build.ts` and is not minified. The message texts (`locales/<lang>.yaml`) are split out as plain strings into `hooks/vendor/locales-<lang>.js` to keep `register.js` small. `hooks/vendor/yaml.js` and `hooks/vendor/i18next.js` are the npm packages [`yaml`](https://www.npmjs.com/package/yaml) and [`i18next`](https://www.npmjs.com/package/i18next) at the versions pinned in `package.json` / `bun.lock`, minified only to keep each file small. The getters, `Object.defineProperty` and promise checks (`typeof x.then === "function"`) that a scan reports are in these two libraries (yaml's document classes, i18next's async loading). The plugin's own code uses no `Proxy`, `eval` or `new Function`.
 
 ## Development
 
@@ -339,11 +361,14 @@ bun run test         # bun test (tests/*.spec.ts)
 bun run build        # bundle src/register.ts -> hooks/register.js (+ hooks/vendor/*.js)
 bun run test:plugin  # build, then run hooks/register.test.ts on the real engine
 bun run validate:plugin  # claude plugin validate . --strict
+bun scripts/ui-screenshots.ts out/  # capture the /hook-list page (sample in tests/fixtures/hook-list/)
 ```
 
 The TypeScript integration tests (`tests/cli.spec.ts`, `tests/codex-cli.spec.ts`) spawn the Go binary as a child process and check its stdin / stdout / stderr / exit code; `tests/hook-script.spec.ts` and `tests/codex-hook-script.spec.ts` test `scripts/hook.sh` with a fake binary and a fake release directory (`FEEDBACK_GATE_RELEASE_BASE_URL=file://...`). The binary is `FEEDBACK_GATE_BIN` when set (CI builds it once), otherwise the tests run `go build` into `node_modules/.cache/feedback-gate/feedback-gate`.
 
 The bundle (`hooks/register.js` and `hooks/vendor/`) is generated and committed by CI on the pull request; contributors do not commit it (it is not in the repository until CI adds it). The "Build bundle" workflow builds it on every pull request (same-repo branches) and pushes a `chore: build bundle` commit to the branch, adding the file or updating it if it changed. Run `bun run build` to produce it locally (e.g. for `bun run test:plugin`) and leave it uncommitted. Do not edit it by hand. `scripts/build.ts` fails the build if the bundle imports anything but relative paths and `claude-code`, or if any output file is 200 KiB or larger. It also writes invisible characters in the output as `\uXXXX` escapes, and fails if a parameter name of the `classic.PreToolUse` hook appears anywhere else in `hooks/register.js` (the plugin directory refuses a permission hook whose `next` it cannot trace). The CI workflow then runs `claude plugin validate . --strict` and `claude plugin test .` on the built bundle, using the Claude Code CLI from `devDependencies` (`@anthropic-ai/claude-code`, pinned by `bun.lock` and updated by Dependabot).
+
+The "UI screenshots" workflow captures the `/hook-list` page (`webui/hook-list.html`) on every pull request (same-repository branches) from the sample in `tests/fixtures/hook-list/` (`bun scripts/ui-screenshots.ts <out dir>`, which also works locally) and posts the images in a pull request comment (the same comment is updated on every push). The images go to `pr-<number>/` on the `ui-screenshots` branch and are referenced by URLs that contain the commit SHA. Capturing fails on a JS error, data that was not embedded, an image that did not load, horizontal overflow or a blank capture, and before the comment is written each image URL is checked to serve exactly what was captured, so no broken image is posted.
 
 Dependencies have a 7-day freeze period: `bunfig.toml` sets `minimumReleaseAge` so `bun install` only resolves versions published at least 7 days ago, and Dependabot (`.github/dependabot.yml`) waits 7 days (`cooldown`) before proposing npm or GitHub Actions updates. Actions are pinned to commit SHAs.
 

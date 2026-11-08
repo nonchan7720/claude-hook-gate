@@ -1,0 +1,40 @@
+# scripts/ui-screenshots.ts が /hook-list の画面を撮るためのサンプル（Go と TypeScript のモノレポを想定）。
+rules:
+  - match: ["**/*.go", go.mod]
+    run:
+      - parallel:
+          - name: go-lint
+            cmd: golangci-lint run ./...
+          - name: go-test
+            cmd: go test ./...
+            timeout: 300
+    run_checks: [build]
+  - match: ["web/**/*.{ts,tsx}"]
+    per_file_dir: pattern_root
+    run:
+      - name: biome
+        cmd: bunx biome check $CLAUDE_GATE_FILES
+      - name: typecheck
+        cmd: bunx tsc --noEmit
+        files: false
+    run_checks: [build]
+  - match: ["db/migrations/*.sql"]
+    dir: db
+    run:
+      - name: migrate-lint
+        cmd: atlas migrate lint --latest 1
+        share: false
+consistency_checks:
+  - name: build
+    run:
+      - make build
+      - name: e2e-smoke
+        cmd: make e2e-smoke
+        timeout: 600
+  - name: release-check
+    run: [make release-check]
+session_start:
+  - name: code-graph
+    cmd: codegraph summary --max 40
+    "on": [startup, clear]  # 引用しないと YAML 1.1 で true になる
+max_parallel: 3
