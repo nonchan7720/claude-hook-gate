@@ -212,7 +212,6 @@ tr:first-child td { border-top: 0; }
   function feedbackSection(f) {
     var s = el('section', null, [el('h2', null, [t('feedbackHeader')])]);
     s.id = 'feedback';
-    if (f.rules.length === 0) { s.appendChild(el('div', 'card empty', [t('none')])); return s; }
     function btn(group, value, text) {
       var b = el('button', 'fbtn', [text]);
       b.type = 'button';
@@ -224,26 +223,31 @@ tr:first-child td { border-top: 0; }
       });
       return b;
     }
-    s.appendChild(el('div', 'fbar', [el('span', 'label', [t('filterLevel')]), btn('level', 'provisional', t('level.provisional')), btn('level', 'confirmed', t('level.confirmed')), btn('level', 'deny', t('level.deny')),
-      el('span', 'label', [t('filterScope')]), btn('scope', 'global', t('scope.global')), btn('scope', 'project', t('scope.project')),
-      el('span', 'label', [t('filterEvent')]), btn('event', 'pre_bash', 'pre_bash'), btn('event', 'pre_edit', 'pre_edit'), btn('event', 'post_edit', 'post_edit'), btn('event', 'stop_check', 'stop_check')]))
-    var table = el('div', 'rtable', [el('div', 'rhead', [el('span', null, [t('colName')]), el('span', null, [t('colScope')]), el('span', null, [t('colLevel')]), el('span', null, [t('colInject')]), el('span', null, [t('colEnforce')])])]);
-    f.rules.forEach((r) => {
-      var inj = r.inject.kind === 'files' ? r.inject.files.join(', ') : r.inject.kind === 'prompt' ? t('injectShortPrompt') : t('injectShortNone');
-      var sum = el('summary', 'rsum', [
-        el('span', 'mono nm', [r.name]),
-        el('span', null, [pill(t(`scope.${r.scope}`), r.scope === 'project' ? '' : 'muted')]),
-        el('span', null, [pill(`${r.count} · ${t(`level.${r.level}`)}`, LEVEL_KIND[r.level])]),
-        el('span', 'cell-note mono', [inj]),
-        el('span', null, r.enforce.length ? r.enforce.map((e) => pill(e.event, SEVERITY_KIND[e.severity] || 'muted')) : [el('span', 'cell-note', [t('enforceNone')])]),
-      ]);
-      var row = el('details', 'rrow', [sum, el('div', 'rdetail', [ruleCard(r)])]);
-      row.dataset.level = r.level;
-      row.dataset.scope = r.scope;
-      row.dataset.events = r.enforce.map((e) => e.event).join(' ');
-      table.appendChild(row);
-    });
-    s.appendChild(table);
+    // 有効なルールが無くても、続く無効・読めないルールの一覧は出す（全部読めないときこそ要る）。
+    if (f.rules.length === 0) {
+      s.appendChild(el('div', 'card empty', [t('none')]));
+    } else {
+      s.appendChild(el('div', 'fbar', [el('span', 'label', [t('filterLevel')]), btn('level', 'provisional', t('level.provisional')), btn('level', 'confirmed', t('level.confirmed')), btn('level', 'deny', t('level.deny')),
+        el('span', 'label', [t('filterScope')]), btn('scope', 'global', t('scope.global')), btn('scope', 'project', t('scope.project')),
+        el('span', 'label', [t('filterEvent')]), btn('event', 'pre_bash', 'pre_bash'), btn('event', 'pre_edit', 'pre_edit'), btn('event', 'post_edit', 'post_edit'), btn('event', 'stop_check', 'stop_check')]))
+      const table = el('div', 'rtable', [el('div', 'rhead', [el('span', null, [t('colName')]), el('span', null, [t('colScope')]), el('span', null, [t('colLevel')]), el('span', null, [t('colInject')]), el('span', null, [t('colEnforce')])])]);
+      f.rules.forEach((r) => {
+        var inj = r.inject.kind === 'files' ? r.inject.files.join(', ') : r.inject.kind === 'prompt' ? t('injectShortPrompt') : t('injectShortNone');
+        var sum = el('summary', 'rsum', [
+          el('span', 'mono nm', [r.name]),
+          el('span', null, [pill(t(`scope.${r.scope}`), r.scope === 'project' ? '' : 'muted')]),
+          el('span', null, [pill(`${r.count} · ${t(`level.${r.level}`)}`, LEVEL_KIND[r.level])]),
+          el('span', 'cell-note mono', [inj]),
+          el('span', null, r.enforce.length ? r.enforce.map((e) => pill(e.event, SEVERITY_KIND[e.severity] || 'muted')) : [el('span', 'cell-note', [t('enforceNone')])]),
+        ]);
+        var row = el('details', 'rrow', [sum, el('div', 'rdetail', [ruleCard(r)])]);
+        row.dataset.level = r.level;
+        row.dataset.scope = r.scope;
+        row.dataset.events = r.enforce.map((e) => e.event).join(' ');
+        table.appendChild(row);
+      });
+      s.appendChild(table);
+    }
     if (f.inactive.length) {
       const d = el('details', 'more', [el('summary', 'msum', [t('inactiveHeader'), ' ', pill(String(f.inactive.length), 'muted')])]);
       f.inactive.forEach((r) => {

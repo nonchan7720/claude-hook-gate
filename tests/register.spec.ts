@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
@@ -139,7 +139,16 @@ describe('/correct', () => {
 
 describe('/hook-list', () => {
   // scripts/hook-list.sh はリリースからバイナリを取ってこず、手元でビルドしたものを使う（子プロセスは process.env を継ぐ）。
-  process.env.FEEDBACK_GATE_BIN = feedbackGateBin()
+  // このブロックの間だけ設定し、ほかのテストには漏らさない。
+  let saved: string | undefined
+  beforeAll(() => {
+    saved = process.env.FEEDBACK_GATE_BIN
+    process.env.FEEDBACK_GATE_BIN = feedbackGateBin()
+  })
+  afterAll(() => {
+    if (saved === undefined) delete process.env.FEEDBACK_GATE_BIN
+    else process.env.FEEDBACK_GATE_BIN = saved
+  })
 
   test('command.run writes the page through the Go binary and returns its one-line result', () =>
     withMod(

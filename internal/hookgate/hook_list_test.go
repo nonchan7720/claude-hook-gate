@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -53,12 +54,21 @@ func TestHookListGateModel(t *testing.T) {
 			"rules": []any{Dict{
 				"match": "src/**/*.ts", "per_file_dir": "pattern_root", "timeout": 120,
 				"run": []any{"bun run lint"}, "run_checks": []any{"build"},
+			}, Dict{
+				// gate は文字列の run_checks を受け付けない（gateListOf）ので、参照として数えない。
+				"match": "a", "run": []any{"b"}, "run_checks": "strref",
 			}},
-			"consistency_checks": []any{Dict{"name": "build", "run": []any{"make"}}, Dict{"name": "orphan", "dir": "pkg", "run": []any{"x"}}},
+			"consistency_checks": []any{
+				Dict{"name": "build", "run": []any{"make"}},
+				Dict{"name": "orphan", "dir": "pkg", "run": []any{"x"}},
+				Dict{"name": "strref", "run": []any{"y"}},
+			},
 			"session_start": []any{
 				"echo hi",
 				Dict{"name": "graph", "cmd": "graph", "on": []any{"startup", "clear"}, "background": true},
-				Dict{"cmd": "unquoted", "true": "resume"}, // YAML 1.1 で引用しない on: が読まれた形
+				Dict{"cmd": "unquoted", "true": "resume", "timeout": 3}, // YAML 1.1 で引用しない on: が読まれた形
+				Dict{"name": "no-cmd", "timeout": 5},                    // gate が捨てる要素は出さない
+				42,
 			},
 		}
 		g := HookListGateModel(cfg, "/p/.claude/gate.yaml", "")
@@ -69,15 +79,22 @@ func TestHookListGateModel(t *testing.T) {
 			Options:   []HookListPair{{"per_file_dir", "pattern_root"}, {"timeout", "120s"}},
 			Run:       []HookListRunNode{{Cmd: "bun run lint", Notes: []string{}}},
 			RunChecks: []string{"build"},
+		}, {
+			Match:     []string{"a"},
+			Options:   []HookListPair{},
+			Run:       []HookListRunNode{{Cmd: "b", Notes: []string{}}},
+			RunChecks: []string{},
 		}}, g.Rules)
 		assert.Equal(t, []HookListGateCheck{
 			{Name: "build", Referenced: true, Options: []HookListPair{}, Run: []HookListRunNode{{Cmd: "make", Notes: []string{}}}},
 			{Name: "orphan", Referenced: false, Options: []HookListPair{{"dir", "pkg"}}, Run: []HookListRunNode{{Cmd: "x", Notes: []string{}}}},
+			{Name: "strref", Referenced: false, Options: []HookListPair{}, Run: []HookListRunNode{{Cmd: "y", Notes: []string{}}}},
 		}, g.Checks)
+		// session_start は gate と同じ parseSessionStartItem で読む（既定の名前・timeout も gate と同じ）。
 		assert.Equal(t, []HookListRunNode{
-			{Cmd: "echo hi", Notes: []string{}},
-			{Cmd: "graph", Name: "graph", Notes: []string{"on: startup, clear", "background"}},
-			{Cmd: "unquoted", Notes: []string{"on: resume"}},
+			{Cmd: "echo hi", Name: Slug("echo hi"), Notes: []string{"timeout 10s"}},
+			{Cmd: "graph", Name: "graph", Notes: []string{"on: startup, clear", "background", "timeout 10s"}},
+			{Cmd: "unquoted", Name: Slug("unquoted"), Notes: []string{"on: resume", "timeout 3s"}},
 		}, g.SessionStart)
 		assert.Equal(t, []HookListPair{{"max_parallel", "3"}}, g.Settings)
 	})
@@ -151,9 +168,10 @@ func TestHookListMain(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := HookListMain(ClaudeHost, []string{"--no-open"}, env, proj, &stdout, &stderr)
 	require.Equal(t, 0, code, stderr.String())
-	slug := strings.Trim(regexp.MustCompile(`[^A-Za-z0-9._-]+`).ReplaceAllString(proj, "-"), "-")
-	file := filepath.Join(home, ".claude", "feedback-gate", "hook-list", slug+".html")
+	file := HookListPath(MakeOsIo(OsIoInit{Environ: env, PayloadCwd: proj}), proj)
 	assert.Equal(t, "[hook-list] Wrote the list. Open it in a browser: "+file+"\n", stdout.String())
+	// 一覧を出すだけなので、エラーのログ（.errors.jsonl）には何も書かない。
+	assert.NoFileExists(t, filepath.Join(feedback, ".errors.jsonl"))
 
 	html := Read(file)
 	// コマンドの中の </script> がデータの script 要素を閉じない。
@@ -174,43 +192,107 @@ func TestHookListMain(t *testing.T) {
 
 func TestHookListOpenInBrowser(t *testing.T) {
 	var runs [][]string
-	io := &recordingRunIo{Io: MakeIo(IoOpts{ProjectDir: TmpDir()}), runs: &runs}
+	saved := hlStartOpener
+	defer func() { hlStartOpener = saved }()
+	hlStartOpener = func(argv []string) bool {
+		runs = append(runs, argv)
+		return true
+	}
+	io := &pathIo{Io: MakeIo(IoOpts{ProjectDir: TmpDir()})}
 	// PATH に xdg-open も wslview も無ければ何も起動せず false。
-	io.path = ""
 	assert.False(t, hlOpenInBrowser(io, "linux", "/x.html"))
 	assert.Empty(t, runs)
 
 	// wslview だけがあればそれで開く。
 	bin := TmpDir()
 	defer RmTree(bin)
-	writeText(filepath.Join(bin, "wslview"), "#!/bin/sh\n")
-	require.NoError(t, os.Chmod(filepath.Join(bin, "wslview"), 0o755))
+	for _, name := range []string{"wslview", "open"} {
+		writeText(filepath.Join(bin, name), "#!/bin/sh\n")
+		require.NoError(t, os.Chmod(filepath.Join(bin, name), 0o755))
+	}
 	io.path = bin
 	assert.True(t, hlOpenInBrowser(io, "linux", "/x.html"))
-	assert.Equal(t, [][]string{{"wslview", "/x.html"}}, runs)
+	assert.Equal(t, [][]string{{filepath.Join(bin, "wslview"), "/x.html"}}, runs)
 
 	// macOS は open。
 	runs = nil
-	writeText(filepath.Join(bin, "open"), "#!/bin/sh\n")
-	require.NoError(t, os.Chmod(filepath.Join(bin, "open"), 0o755))
 	assert.True(t, hlOpenInBrowser(io, "darwin", "/x.html"))
-	assert.Equal(t, [][]string{{"open", "/x.html"}}, runs)
+	assert.Equal(t, [][]string{{filepath.Join(bin, "open"), "/x.html"}}, runs)
 }
 
-// recordingRunIo は Run を記録するだけ（実際には何も起動しない）。PATH を差し替える。
-type recordingRunIo struct {
+func TestHookListStartOpener(t *testing.T) {
+	bin := TmpDir()
+	defer RmTree(bin)
+	script := func(name, body string) string {
+		p := filepath.Join(bin, name)
+		writeText(p, "#!/bin/sh\n"+body+"\n")
+		require.NoError(t, os.Chmod(p, 0o755))
+		return p
+	}
+	assert.True(t, hlStartOpener([]string{script("ok", "exit 0")}))
+	assert.False(t, hlStartOpener([]string{script("ng", "exit 3")}))
+	assert.False(t, hlStartOpener([]string{filepath.Join(bin, "missing")}))
+	// ブラウザを前面で起動して待つ xdg-open のように終わらないものは、待ちきったら開けたとみなし、止めない。
+	marker := filepath.Join(bin, "still-running")
+	start := time.Now()
+	assert.True(t, hlStartOpener([]string{script("slow", "sleep 7; touch "+marker)}))
+	assert.GreaterOrEqual(t, time.Since(start), hlOpenWait)
+	require.Eventually(t, func() bool { return Exists(marker) }, 5*time.Second, 100*time.Millisecond, "the opener must not be killed")
+}
+
+func TestHookListPath(t *testing.T) {
+	io := MakeIo(IoOpts{ProjectDir: TmpDir()})
+	a, b := HookListPath(io, "/work/my app"), HookListPath(io, "/work/my-app")
+	assert.NotEqual(t, a, b, "paths that read the same must not share a file")
+	assert.Regexp(t, `/work-my-app-[0-9a-f]{10}\.html$`, a)
+	assert.Equal(t, a, HookListPath(io, "/work/my app"))
+	long := "/" + strings.Repeat("very-long-directory-name/", 20) + "project"
+	assert.Less(t, len(filepath.Base(HookListPath(io, long))), 120)
+	// 末尾（プロジェクト名の側）を残す。
+	assert.Regexp(t, `-project-[0-9a-f]{10}\.html$`, HookListPath(io, long))
+}
+
+func TestHookListScanFeedback(t *testing.T) {
+	proj, home, feedback := TmpDir(), TmpDir(), TmpDir()
+	defer RmTree(proj)
+	defer RmTree(home)
+	defer RmTree(feedback)
+	rule := func(name, extra string) {
+		writeText(filepath.Join(feedback, name+".md"), "---\nname: "+name+"\ndescription: d\ntype: feedback\ncount: 3\n"+extra+"---\n\nbody\n")
+	}
+	rule("ok", "")
+	rule("bad_glob", "projects: ['[unclosed']\n")
+	rule("expired", "expires: 2020-01-01\n")
+	writeText(filepath.Join(feedback, "unreadable.md"), "---\nname: [x\n---\n")
+	io := MakeIo(IoOpts{ProjectDir: proj, Env: EnvVars{Home: home, ClaudeFeedbackDir: feedback}})
+	active, inactive, broken := hlScanFeedback(io)
+	names := func(rules []Rule) []string {
+		out := []string{}
+		for _, r := range rules {
+			out = append(out, r.Name)
+		}
+		return out
+	}
+	// 1 つのルールの glob が壊れていても全体は止まらず、そのルールを読めないものとして出す。
+	assert.Equal(t, []string{"ok"}, names(active))
+	assert.Equal(t, []string{"expired"}, names(inactive))
+	paths := []string{}
+	for _, b := range broken {
+		paths = append(paths, filepath.Base(b.Path))
+	}
+	sort.Strings(paths)
+	assert.Equal(t, []string{"bad_glob.md", "unreadable.md"}, paths)
+	assert.NoFileExists(t, filepath.Join(feedback, ".errors.jsonl"))
+}
+
+// pathIo は PATH だけを差し替える。
+type pathIo struct {
 	Io
-	runs *[][]string
 	path string
 }
 
-func (r *recordingRunIo) Env() EnvVars {
-	env := r.Io.Env()
-	env.Path = r.path
+func (p *pathIo) Env() EnvVars {
+	env := p.Io.Env()
+	env.Path = p.path
 	return env
-}
-
-func (r *recordingRunIo) Run(argv []string, _ RunOptions) RunResult {
-	*r.runs = append(*r.runs, argv)
-	return RunResult{}
 }

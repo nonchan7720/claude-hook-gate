@@ -9,10 +9,13 @@ package hookgate
 // ルールやゲートのファイルは読むだけで、書くのは一覧の HTML（<homeConfigDir>/feedback-gate/hook-list/<project>.html）だけ。
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"regexp"
 	"runtime"
 	"strings"
@@ -194,6 +197,14 @@ func hlOptionPairs(d Dict) []HookListPair {
 	return out
 }
 
+// hlRunChecks は rule の run_checks。gate はリストしか受け付けない（gateListOf）ので、それ以外は参照なしとして扱う。
+func hlRunChecks(v any) []string {
+	if _, ok := v.([]any); !ok {
+		return []string{}
+	}
+	return hlList(v)
+}
+
 func hlDicts(v any) []Dict {
 	arr, _ := v.([]any)
 	out := make([]Dict, 0, len(arr))
@@ -224,10 +235,10 @@ func HookListGateModel(cfg any, path, errMsg string) HookListGate {
 	}
 	referenced := map[string]bool{}
 	for _, r := range hlDicts(c["rules"]) {
-		for _, name := range hlList(r["run_checks"]) {
+		for _, name := range hlRunChecks(r["run_checks"]) {
 			referenced[name] = true
 		}
-		g.Rules = append(g.Rules, HookListGateRule{Match: hlList(r["match"]), Options: hlOptionPairs(r), Run: HookListRunNodes(r["run"]), RunChecks: hlList(r["run_checks"])})
+		g.Rules = append(g.Rules, HookListGateRule{Match: hlList(r["match"]), Options: hlOptionPairs(r), Run: HookListRunNodes(r["run"]), RunChecks: hlRunChecks(r["run_checks"])})
 	}
 	for _, ch := range hlDicts(c["consistency_checks"]) {
 		name := "?"
@@ -236,35 +247,22 @@ func HookListGateModel(cfg any, path, errMsg string) HookListGate {
 		}
 		g.Checks = append(g.Checks, HookListGateCheck{Name: name, Referenced: referenced[name], Options: hlOptionPairs(ch), Run: HookListRunNodes(ch["run"])})
 	}
+	// gate と同じ読み方（parseSessionStartItem）をする。gate が捨てる要素（cmd が無い・空・文字列でない）は出さない。
 	starts, _ := c["session_start"].([]any)
 	for _, raw := range starts {
-		s, isDict := AsDict(raw)
-		if !isDict {
-			s = Dict{"cmd": raw}
+		item, ok := parseSessionStartItem(raw)
+		if !ok {
+			continue
 		}
 		notes := []string{}
-		// YAML 1.1 では引用しないキー on が true になる（gate_session_start.go と同じく、どちらの書き方でも読む）。
-		rawOn, ok := s["on"]
-		if !ok {
-			rawOn = s["true"]
+		if item.hasOn {
+			notes = append(notes, "on: "+strings.Join(item.on, ", "))
 		}
-		if on := hlList(rawOn); len(on) > 0 {
-			notes = append(notes, "on: "+strings.Join(on, ", "))
-		}
-		if s["background"] == true {
+		if item.background {
 			notes = append(notes, "background")
 		}
-		if Truthy(s["timeout"]) {
-			notes = append(notes, fmt.Sprintf("timeout %ss", Str(s["timeout"])))
-		}
-		node := HookListRunNode{Notes: notes}
-		if s["cmd"] != nil {
-			node.Cmd = Str(s["cmd"])
-		}
-		if Truthy(s["name"]) {
-			node.Name = Str(s["name"])
-		}
-		g.SessionStart = append(g.SessionStart, node)
+		notes = append(notes, "timeout "+JSNumber(item.timeout)+"s")
+		g.SessionStart = append(g.SessionStart, HookListRunNode{Cmd: item.cmd, Name: item.name, Notes: notes})
 	}
 	for _, key := range []string{"max_parallel", "report_success", "policy"} {
 		if v, ok := c[key]; ok && v != nil {
@@ -359,40 +357,58 @@ func HookListInactiveReason(rule Rule, now int64, lang Lang) string {
 	return t("correct.notMatching", map[string]any{"what": what})
 }
 
-// ListInactiveRules はグローバル / プロジェクトの feedback ディレクトリを無加工で読み、IsRuleActive が false のものを返す
-// （同名の有効なルールに上書きされている側は除く。src/correct.ts の listInactive と同じ）。
-func ListInactiveRules(io Io, active []Rule) []Rule {
-	dirs := []string{}
-	for _, d := range append(FeedbackDirs(io), ProjectFeedbackDirs(io)...) {
-		if !fbContainsString(dirs, d) {
-			dirs = append(dirs, d)
+// hlScanFeedback は ScanRules と同じ読み方（グローバルとプロジェクトをマージし、同名はプロジェクト優先）で、有効・無効・読めないルールに分ける。
+// ScanRules と違い、1 つのルールの絞り込み（projects / when_exists の glob）が評価できなくても全体を止めず、そのルールを読めないものとして出す。
+// 一覧を出すだけなので、違反・エラーのログ（.errors.jsonl）には何も書かない。
+// 無効なルールは src/correct.ts の listInactive と同じく、同名の有効なルールに上書きされているものを除く。
+func hlScanFeedback(io Io) (active, inactive []Rule, broken []BrokenRule) {
+	broken = []BrokenRule{}
+	globalDirs := FeedbackDirs(io)
+	projectDirs := []string{}
+	for _, d := range ProjectFeedbackDirs(io) {
+		if !fbContainsString(globalDirs, d) {
+			projectDirs = append(projectDirs, d)
 		}
 	}
-	activeNames := map[string]bool{}
-	for _, r := range active {
-		activeNames[r.Name] = true
+	globalRules := fbListRulesInAll(io, globalDirs, &broken)
+	projectRules := fbListRulesInAll(io, projectDirs, &broken)
+	overridden := map[string]bool{}
+	for _, r := range projectRules {
+		overridden[r.Name] = true
 	}
-	seen := map[string]bool{}
-	out := []Rule{}
-	for _, dir := range dirs {
-		rules, err := ListRules(io, dir)
-		if err != nil {
+	merged, hidden := []Rule{}, []Rule{}
+	for _, r := range globalRules {
+		if overridden[r.Name] {
+			hidden = append(hidden, r)
+		} else {
+			merged = append(merged, r)
+		}
+	}
+	merged = append(merged, projectRules...)
+	active, inactive = []Rule{}, []Rule{}
+	activeNames := map[string]bool{}
+	for _, r := range merged {
+		ok, err := IsRuleActive(io, r)
+		switch {
+		case err != nil:
+			broken = append(broken, BrokenRule{Path: r.Path, Reason: ErrorText(err)})
+		case ok:
+			active = append(active, r)
+			activeNames[r.Name] = true
+		default:
+			inactive = append(inactive, r)
+		}
+	}
+	// プロジェクトの同名ルールに隠されたグローバルのルールも、有効な同名ルールが無く、それ自体が無効なら無効として出す。
+	for _, r := range hidden {
+		if activeNames[r.Name] {
 			continue
 		}
-		for _, r := range rules {
-			if seen[r.Path] {
-				continue
-			}
-			seen[r.Path] = true
-			if activeNames[r.Name] {
-				continue
-			}
-			if ok, err := IsRuleActive(io, r); err == nil && !ok {
-				out = append(out, r)
-			}
+		if ok, err := IsRuleActive(io, r); err == nil && !ok {
+			inactive = append(inactive, r)
 		}
 	}
-	return out
+	return active, inactive, append(broken, fbProblemsOf(active)...)
 }
 
 // HookListLabels は locales の hookList.* を、`event.pre_bash` のような点区切りのキーの平らな辞書にする（画面の文言）。
@@ -441,19 +457,16 @@ func BuildHookListModel(io Io, options PluginOptions) (HookListModel, error) {
 		project = io.Cwd()
 	}
 	now := io.Now()
-	scan, err := ScanRules(io)
-	if err != nil {
-		return HookListModel{}, err
-	}
+	active, inactive, broken := hlScanFeedback(io)
 	projectDirs := ConfigPaths(io, project, "feedback")
 	feedback := HookListFeedback{Rules: []HookListRule{}, Inactive: []HookListInactive{}, Broken: []HookListBroken{}}
-	for _, r := range scan.Rules {
+	for _, r := range active {
 		feedback.Rules = append(feedback.Rules, HookListRuleModel(r, projectDirs))
 	}
-	for _, r := range ListInactiveRules(io, scan.Rules) {
+	for _, r := range inactive {
 		feedback.Inactive = append(feedback.Inactive, HookListInactive{Name: r.Name, Reason: HookListInactiveReason(r, now, io.Lang()), Path: r.Path})
 	}
-	for _, b := range scan.Broken {
+	for _, b := range broken {
 		feedback.Broken = append(feedback.Broken, HookListBroken(b))
 	}
 	return HookListModel{
@@ -480,13 +493,41 @@ func RenderHookListHTML(model HookListModel) (string, error) {
 
 var hlSlugRe = regexp.MustCompile(`[^A-Za-z0-9._-]+`)
 
-// HookListPath は書き出す HTML のパス。プロジェクトのパスをファイル名にする（同じプロジェクトは同じファイルを上書きする）。
+// hlSlugMax はファイル名に使うプロジェクトのパスの最大長（ハッシュを足しても 255 バイトに十分収まる長さ）。
+const hlSlugMax = 80
+
+// HookListPath は書き出す HTML のパス。ファイル名は、プロジェクトのパスを読める形にしたもの（末尾 hlSlugMax 文字）と、
+// パス全体のハッシュ（別のプロジェクトが同じ名前にならないように）。同じプロジェクトは同じファイルを上書きする。
 func HookListPath(io Io, project string) string {
 	slug := strings.Trim(hlSlugRe.ReplaceAllString(project, "-"), "-")
+	if len(slug) > hlSlugMax {
+		slug = strings.TrimLeft(slug[len(slug)-hlSlugMax:], "-")
+	}
 	if slug == "" {
 		slug = "project"
 	}
-	return Join(io.HomeConfigDir(), "feedback-gate", "hook-list", slug+".html")
+	sum := sha256.Sum256([]byte(project))
+	return Join(io.HomeConfigDir(), "feedback-gate", "hook-list", slug+"-"+hex.EncodeToString(sum[:])[:10]+".html")
+}
+
+// hlOpenWait は、ブラウザを開くコマンドの終了を待つ時間。xdg-open は環境によってブラウザを前面で起動して終わるまで待つので、
+// それまでに終わらなければ開けたとみなし、止めずにそのまま残す（止めるとブラウザごと終了してしまう）。
+const hlOpenWait = 5 * time.Second
+
+// hlStartOpener は argv を起動し、hlOpenWait 以内に終われば終了コードが 0 か、終わらなければ true を返す（テストで差し替える）。
+var hlStartOpener = func(argv []string) bool {
+	cmd := exec.Command(argv[0], argv[1:]...)
+	if err := cmd.Start(); err != nil {
+		return false
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err == nil
+	case <-time.After(hlOpenWait):
+		return true
+	}
 }
 
 // hlOpenInBrowser は file をブラウザで開く。macOS は open、Windows は start、ほかは xdg-open（無ければ wslview）。開けたら true。
@@ -501,10 +542,14 @@ func hlOpenInBrowser(io Io, goos, file string) bool {
 		candidates = [][]string{{"xdg-open", file}, {"wslview", file}}
 	}
 	for _, argv := range candidates {
-		if _, ok := Which(io, argv[0]); !ok && goos != "windows" {
-			continue
+		if goos != "windows" {
+			path, ok := Which(io, argv[0])
+			if !ok {
+				continue
+			}
+			argv = append([]string{path}, argv[1:]...)
 		}
-		if io.Run(argv, RunOptions{TimeoutMs: 15_000}).ExitCode == 0 {
+		if hlStartOpener(argv) {
 			return true
 		}
 	}

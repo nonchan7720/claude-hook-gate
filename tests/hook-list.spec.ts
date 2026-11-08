@@ -1,13 +1,22 @@
 // /hook-list（src/hook-list.ts）は scripts/hook-list.sh 経由で Go の `feedback-gate claude hook-list` を呼ぶだけなので、
 // ここでは実際のバイナリを走らせ、書き出された HTML に埋め込まれたデータ（webui/hook-list.html の hook-list-data）を確かめる。
-import { describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import { hookListCommand, optionEnv } from '../src/hook-list.ts'
 import { feedbackGateBin } from './helpers/go-binary.ts'
 import { makeIo, rmTree, tmpDir } from './helpers/node-io.ts'
 
-process.env.FEEDBACK_GATE_BIN = feedbackGateBin()
+// このファイルの間だけ、手元でビルドしたバイナリを使う（scripts/hook-list.sh は子プロセスで process.env を継ぐ）。
+let savedBin: string | undefined
+beforeAll(() => {
+  savedBin = process.env.FEEDBACK_GATE_BIN
+  process.env.FEEDBACK_GATE_BIN = feedbackGateBin()
+})
+afterAll(() => {
+  if (savedBin === undefined) delete process.env.FEEDBACK_GATE_BIN
+  else process.env.FEEDBACK_GATE_BIN = savedBin
+})
 
 type Model = {
   project: string
@@ -71,8 +80,13 @@ describe('hookListCommand', () => {
       writeRule(feedback, 'old', 'count: 3\nexpires: 2020-01-01\n')
       const io = makeIo({ projectDir: proj, env: { HOME: home, CLAUDE_FEEDBACK_DIR: feedback, LANG: 'en_US.UTF-8' } })
       const r = await hookListCommand(io, '--no-open', { agentLaunchGuard: true })
-      const file = path.join(home, '.claude', 'feedback-gate', 'hook-list', `${proj.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '')}.html`)
-      expect(r).toEqual({ text: `[hook-list] Wrote the list. Open it in a browser: ${file}`, context: [] })
+      expect(r.context).toEqual([])
+      const prefix = '[hook-list] Wrote the list. Open it in a browser: '
+      expect(r.text.startsWith(prefix)).toBe(true)
+      const file = r.text.slice(prefix.length)
+      // <プロジェクトのパスを読める形にしたもの>-<パス全体のハッシュ 10 桁>.html
+      expect(path.dirname(file)).toBe(path.join(home, '.claude', 'feedback-gate', 'hook-list'))
+      expect(path.basename(file)).toMatch(/^[A-Za-z0-9._-]+-[0-9a-f]{10}\.html$/)
       const model = embedded(fs.readFileSync(file, 'utf8'))
       expect(model.project).toBe(proj)
       expect(model.lang).toBe('en')
