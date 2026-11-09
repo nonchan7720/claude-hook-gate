@@ -32,7 +32,7 @@ function withSetup(body: (s: Setup, run: Run) => void): void {
   }
   fs.mkdirSync(s.bin)
   fs.mkdirSync(home, { recursive: true })
-  for (const c of ['printf', 'dirname', 'basename', 'cp', 'mv', 'mkdir', 'chmod', 'mktemp', 'cat', 'grep', 'rm']) {
+  for (const c of ['printf', 'dirname', 'basename', 'cp', 'mv', 'mkdir', 'chmod', 'mktemp', 'cat', 'grep', 'rm', 'cmp']) {
     const real = Bun.which(c)
     if (real) fs.symlinkSync(real, path.join(s.bin, c))
   }
@@ -56,7 +56,8 @@ exit 0
   )
   try {
     body(s, (args, env = {}, piped = false) => {
-      const e: Record<string, string> = { PATH: s.bin, HOME: home, ...env }
+      // /etc/codex of the test machine never decides anything here
+      const e: Record<string, string> = { PATH: s.bin, HOME: home, FEEDBACK_GATE_CODEX_SYSTEM_DIR: path.join(dir, 'no-etc-codex'), ...env }
       if (!('FEEDBACK_GATE_CODEX_BIN' in env)) e.FEEDBACK_GATE_CODEX_BIN = path.join(dir, 'no-such-codex')
       return piped
         ? spawnSync(BASH, ['-s', '--', ...args], { input: fs.readFileSync(SCRIPT, 'utf8'), encoding: 'utf8', env: e })
@@ -367,5 +368,128 @@ describe('plugins/codex/scripts/setup.sh', () => {
         expect(r.stderr).toContain('feedback-gate: codex plugin add failed; using the installed plugin if any')
         expect(calls(s)).toBe(`${UP}${ADD}1.0.0|\n`)
       }))
+  })
+  describe('managed hooks only (system layer)', () => {
+    /** like fakeInstall, and with --print it prints a "merged file" naming its arguments */
+    const printingInstall = (s: Setup, root: string, tag: string): void => {
+      const file = path.join(root, INSTALL)
+      fs.mkdirSync(path.dirname(file), { recursive: true })
+      fs.writeFileSync(
+        file,
+        `#!/bin/sh\nprintf '%s|%s\\n' "${tag}" "$*" >> "${s.calls}"\ncase " $* " in *' --print '*) printf 'merged ${tag} %s\\n' "$*" ;; esac\n`,
+      )
+      fs.chmodSync(file, 0o755)
+    }
+    const sysDir = (s: Setup, policy: string | null): string => {
+      const d = path.join(s.dir, 'etc-codex')
+      fs.mkdirSync(d, { recursive: true })
+      if (policy !== null) fs.writeFileSync(path.join(d, 'requirements.toml'), policy)
+      return d
+    }
+    const POLICY = '[features]\nhooks = true\n\n  allow_managed_hooks_only = true # set by IT\n'
+
+    test('allow_managed_hooks_only in requirements.toml: installs into <system>/hooks.json and removes the user copy', () =>
+      withSetup((s, run) => {
+        printingInstall(s, path.join(s.cache, '1.0.0'), '1.0.0')
+        const d = sysDir(s, POLICY)
+        const target = path.join(d, 'hooks.json')
+        const r = run(['--no-command'], { FEEDBACK_GATE_CODEX_SYSTEM_DIR: d })
+        expect(r.status).toBe(0)
+        expect(fs.readFileSync(target, 'utf8')).toBe(`merged 1.0.0 --print --to ${target}\n`)
+        expect(fs.statSync(target).mode & 0o777).toBe(0o644)
+        expect(calls(s)).toBe(`1.0.0|--print --to ${target}\n1.0.0|--remove\n`)
+        expect(r.stderr).toContain('allow_managed_hooks_only')
+        expect(r.stderr).toContain(`installed the feedback-gate hooks into ${target}`)
+      }))
+
+    test('an unchanged system file is not rewritten', () =>
+      withSetup((s, run) => {
+        printingInstall(s, path.join(s.cache, '1.0.0'), '1.0.0')
+        const d = sysDir(s, POLICY)
+        const target = path.join(d, 'hooks.json')
+        run(['--no-command'], { FEEDBACK_GATE_CODEX_SYSTEM_DIR: d })
+        fs.chmodSync(target, 0o600)
+        const r = run(['--no-command'], { FEEDBACK_GATE_CODEX_SYSTEM_DIR: d })
+        expect(r.status).toBe(0)
+        expect(r.stderr).toContain('already up to date')
+        expect(fs.statSync(target).mode & 0o777).toBe(0o600)
+      }))
+
+    test('--remove takes the hooks out of the system file only', () =>
+      withSetup((s, run) => {
+        printingInstall(s, path.join(s.cache, '1.0.0'), '1.0.0')
+        const d = sysDir(s, POLICY)
+        const target = path.join(d, 'hooks.json')
+        const r = run(['--no-command', '--remove'], { FEEDBACK_GATE_CODEX_SYSTEM_DIR: d })
+        expect(r.status).toBe(0)
+        expect(calls(s)).toBe(`1.0.0|--print --remove --to ${target}\n`)
+        expect(fs.readFileSync(target, 'utf8')).toBe(`merged 1.0.0 --print --remove --to ${target}\n`)
+      }))
+
+    test('an explicit target (--project, --to, --print, --toml) is used as is, even under the policy', () => {
+      for (const args of [['--project'], ['--to', 'x.json'], ['--print'], ['--toml']])
+        withSetup((s, run) => {
+          printingInstall(s, path.join(s.cache, '1.0.0'), '1.0.0')
+          const d = sysDir(s, POLICY)
+          expect(run(['--no-command', ...args], { FEEDBACK_GATE_CODEX_SYSTEM_DIR: d }).status).toBe(0)
+          expect(calls(s)).toBe(`1.0.0|${args.join(' ')}\n`)
+          expect(fs.existsSync(path.join(d, 'hooks.json'))).toBe(false)
+        })
+    })
+
+    test('a commented-out or false policy does not count', () => {
+      for (const policy of ['# allow_managed_hooks_only = true\n', 'allow_managed_hooks_only = false\n'])
+        withSetup((s, run) => {
+          printingInstall(s, path.join(s.cache, '1.0.0'), '1.0.0')
+          const d = sysDir(s, policy)
+          run(['--no-command'], { FEEDBACK_GATE_CODEX_SYSTEM_DIR: d })
+          expect(calls(s)).toBe('1.0.0|\n')
+        })
+    })
+
+    test('--system installs into the system layer without the policy and is not forwarded; it takes no explicit target', () =>
+      withSetup((s, run) => {
+        printingInstall(s, path.join(s.cache, '1.0.0'), '1.0.0')
+        const d = path.join(s.dir, 'new', 'etc-codex')
+        fs.mkdirSync(path.dirname(d))
+        const r = run(['--no-command', '--system'], { FEEDBACK_GATE_CODEX_SYSTEM_DIR: d })
+        expect(r.status).toBe(0)
+        expect(fs.existsSync(path.join(d, 'hooks.json'))).toBe(true)
+        expect(r.stderr).not.toContain('allow_managed_hooks_only in')
+        const bad = run(['--no-command', '--system', '--toml'], { FEEDBACK_GATE_CODEX_SYSTEM_DIR: d })
+        expect(bad.status).toBe(1)
+        expect(bad.stderr).toContain('--system')
+      }))
+
+    // as root every directory is writable: the sudo path runs for non-root users (CI)
+    test.skipIf(process.getuid?.() === 0)('a directory only root may write goes through sudo; a failing sudo prints the command', () =>
+      withSetup((s, run) => {
+        for (const c of ['install', 'sh']) {
+          const real = Bun.which(c)
+          if (real) fs.symlinkSync(real, path.join(s.bin, c))
+        }
+        printingInstall(s, path.join(s.cache, '1.0.0'), '1.0.0')
+        const d = sysDir(s, POLICY)
+        fs.chmodSync(d, 0o555)
+        const sudoLog = path.join(s.dir, 'sudo.log')
+        const sudo = path.join(s.dir, 'fake-sudo')
+        fs.writeFileSync(sudo, `#!/bin/sh\necho "$*" >> "${sudoLog}"\nchmod 755 "${d}"\n"$@"\n`, { mode: 0o755 })
+        try {
+          const r = run(['--no-command'], { FEEDBACK_GATE_CODEX_SYSTEM_DIR: d, FEEDBACK_GATE_SUDO: sudo })
+          expect(r.status).toBe(0)
+          expect(fs.readFileSync(sudoLog, 'utf8')).toContain(path.join(d, 'hooks.json'))
+          expect(fs.readFileSync(path.join(d, 'hooks.json'), 'utf8')).toStartWith('merged 1.0.0 --print')
+
+          fs.writeFileSync(sudo, '#!/bin/sh\nexit 1\n', { mode: 0o755 })
+          fs.chmodSync(d, 0o555)
+          printingInstall(s, path.join(s.cache, '1.0.0'), '1.0.1-changed')
+          const f = run(['--no-command'], { FEEDBACK_GATE_CODEX_SYSTEM_DIR: d, FEEDBACK_GATE_SUDO: sudo })
+          expect(f.status).toBe(1)
+          expect(f.stderr).toContain('sudo install -m 0644')
+        } finally {
+          fs.chmodSync(d, 0o755)
+        }
+      }),
+    )
   })
 })
