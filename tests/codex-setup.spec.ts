@@ -32,13 +32,32 @@ function withSetup(body: (s: Setup, run: Run) => void): void {
   }
   fs.mkdirSync(s.bin)
   fs.mkdirSync(home, { recursive: true })
-  for (const c of ['printf', 'dirname', 'basename']) {
+  for (const c of ['printf', 'dirname', 'basename', 'cp', 'mv', 'mkdir', 'chmod', 'mktemp', 'cat', 'grep', 'rm']) {
     const real = Bun.which(c)
     if (real) fs.symlinkSync(real, path.join(s.bin, c))
   }
+  fs.writeFileSync(
+    path.join(dir, 'fake-codex'),
+    `#!/bin/sh
+printf 'codex|%s\\n' "$*" >> "${s.calls}"
+case "$*" in
+  "plugin marketplace upgrade"*) [ "\${FAKE_CODEX_UPGRADE_FAILS:-}" = 1 ] && exit 1 ;;
+  "plugin add"*)
+    [ "\${FAKE_CODEX_ADD_FAILS:-}" = 1 ] && exit 1
+    if [ -n "\${FAKE_CODEX_NEW_VERSION:-}" ]; then
+      d="${s.cache}/$FAKE_CODEX_NEW_VERSION/plugins/codex/scripts"
+      mkdir -p "$d"
+      printf '#!/bin/sh\\nprintf "%%s|%%s\\\\n" "new-$FAKE_CODEX_NEW_VERSION" "$*" >> "${s.calls}"\\n' > "$d/install-hooks.sh"
+    fi ;;
+esac
+exit 0
+`,
+    { mode: 0o755 },
+  )
   try {
     body(s, (args, env = {}, piped = false) => {
-      const e = { PATH: s.bin, HOME: home, ...env }
+      const e: Record<string, string> = { PATH: s.bin, HOME: home, ...env }
+      if (!('FEEDBACK_GATE_CODEX_BIN' in env)) e.FEEDBACK_GATE_CODEX_BIN = path.join(dir, 'no-such-codex')
       return piped
         ? spawnSync(BASH, ['-s', '--', ...args], { input: fs.readFileSync(SCRIPT, 'utf8'), encoding: 'utf8', env: e })
         : spawnSync(BASH, [SCRIPT, ...args], { encoding: 'utf8', env: e })
@@ -125,4 +144,200 @@ describe('plugins/codex/scripts/setup.sh', () => {
       expect(r.status).toBe(0)
       expect(calls(s)).toBe('0.10.0|--project /x\n')
     }))
+
+  describe('feedback-gate-setup command', () => {
+    const cmdPath = (s: Setup, d = path.join(s.home, '.local', 'bin')): string => path.join(d, 'feedback-gate-setup')
+    // ダウンロードを無効にする（存在しない file:// URL）
+    const noDl = (s: Setup): Record<string, string> => ({ FEEDBACK_GATE_SETUP_URL: `file://${path.join(s.dir, 'nope')}` })
+    const rcLines = (f: string): string[] => fs.readFileSync(f, 'utf8').split('\n')
+
+    test('running as a file installs an executable, identical copy and still runs the installer', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const r = run(['--project', '/x'])
+        expect(r.status).toBe(0)
+        const dst = cmdPath(s)
+        expect(fs.readFileSync(dst, 'utf8')).toBe(fs.readFileSync(SCRIPT, 'utf8'))
+        expect(fs.statSync(dst).mode & 0o777).toBe(0o755)
+        expect(calls(s)).toBe('1.0.0|--project /x\n')
+        expect(r.stderr).toContain(`feedback-gate: installed feedback-gate-setup into ${path.dirname(dst)}`)
+      }))
+
+    test('piped on stdin, copies the selected plugin version of setup.sh', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const copy = path.join(s.cache, '1.0.0', 'plugins', 'codex', 'scripts', 'setup.sh')
+        fs.writeFileSync(copy, '#!/bin/bash\n# plugin copy\n')
+        const r = run(['--project'], noDl(s), true)
+        expect(r.status).toBe(0)
+        expect(fs.readFileSync(cmdPath(s), 'utf8')).toBe('#!/bin/bash\n# plugin copy\n')
+        expect(calls(s)).toBe('1.0.0|--project\n')
+      }))
+
+    test('piped without a plugin copy and without downloading: still succeeds and explains', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const r = run(['--project'], noDl(s), true)
+        expect(r.status).toBe(0)
+        expect(calls(s)).toBe('1.0.0|--project\n')
+        expect(fs.existsSync(cmdPath(s))).toBe(false)
+        expect(r.stderr).toContain('could not install feedback-gate-setup')
+        expect(fs.readdirSync(path.join(s.home, '.local', 'bin'))).toEqual([])
+      }))
+
+    test.skipIf(!Bun.which('curl'))('piped without a plugin copy downloads from FEEDBACK_GATE_SETUP_URL', () =>
+      withSetup((s, run) => {
+        fs.symlinkSync(Bun.which('curl') as string, path.join(s.bin, 'curl'))
+        install(s, ['1.0.0'])
+        const remote = path.join(s.dir, 'remote-setup.sh')
+        fs.writeFileSync(remote, '#!/bin/bash\n# remote\n')
+        const r = run([], { FEEDBACK_GATE_SETUP_URL: `file://${remote}` }, true)
+        expect(r.status).toBe(0)
+        expect(fs.readFileSync(cmdPath(s), 'utf8')).toBe('#!/bin/bash\n# remote\n')
+        expect(fs.statSync(cmdPath(s)).mode & 0o777).toBe(0o755)
+      }),
+    )
+
+    test('--no-command skips the install and is not forwarded', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const r = run(['--project', '--no-command', '/x'])
+        expect(r.status).toBe(0)
+        expect(calls(s)).toBe('1.0.0|--project /x\n')
+        expect(fs.existsSync(path.join(s.home, '.local'))).toBe(false)
+      }))
+
+    test('FEEDBACK_GATE_BIN_DIR is honored', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const d = path.join(s.dir, 'custom', 'bin')
+        run([], { FEEDBACK_GATE_BIN_DIR: d + '/' })
+        expect(fs.existsSync(cmdPath(s, d))).toBe(true)
+        expect(fs.existsSync(path.join(s.home, '.local'))).toBe(false)
+      }))
+
+    test('adds the bin dir to .zshrc once, with a marker', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const rc = path.join(s.home, '.zshrc')
+        fs.writeFileSync(rc, '# mine\n')
+        const r = run([], { SHELL: '/bin/zsh' })
+        run([], { SHELL: '/bin/zsh' })
+        const lines = rcLines(rc)
+        expect(lines.filter((l) => l === '# feedback-gate-setup').length).toBe(1)
+        expect(lines.filter((l) => l === 'export PATH="$HOME/.local/bin:$PATH"').length).toBe(1)
+        expect(lines[lines.indexOf('# feedback-gate-setup') + 1]).toBe('export PATH="$HOME/.local/bin:$PATH"')
+        expect(r.stderr).toContain(`added ${path.join(s.home, '.local', 'bin')} to PATH in ~/.zshrc`)
+        expect(fs.existsSync(path.join(s.home, '.bashrc'))).toBe(false)
+      }))
+
+    test('uses .bashrc for bash', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        run([], { SHELL: '/usr/bin/bash' })
+        expect(fs.readFileSync(path.join(s.home, '.bashrc'), 'utf8')).toContain('# feedback-gate-setup\nexport PATH="$HOME/.local/bin:$PATH"\n')
+        expect(fs.existsSync(path.join(s.home, '.zshrc'))).toBe(false)
+      }))
+
+    test('does not touch rc files when the dir is already in PATH', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const d = path.join(s.home, '.local', 'bin')
+        run([], { SHELL: '/bin/zsh', PATH: `${s.bin}:${d}/` })
+        expect(fs.existsSync(path.join(s.home, '.zshrc'))).toBe(false)
+      }))
+
+    test('FEEDBACK_GATE_NO_RC=1 only prints the line', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const r = run([], { SHELL: '/bin/zsh', FEEDBACK_GATE_NO_RC: '1' })
+        expect(fs.existsSync(path.join(s.home, '.zshrc'))).toBe(false)
+        expect(r.stderr).toContain('export PATH="$HOME/.local/bin:$PATH"')
+      }))
+
+    test('an unknown shell prints the line and writes nothing', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const r = run([], { SHELL: '/usr/bin/fish' })
+        expect(fs.readdirSync(s.home).sort()).toEqual(['.codex', '.local'])
+        expect(r.stderr).toContain('export PATH="$HOME/.local/bin:$PATH"')
+      }))
+
+    test('the installed command runs itself without failing on copying onto itself', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        run([])
+        const dst = cmdPath(s)
+        const before = fs.readFileSync(dst, 'utf8')
+        const r = spawnSync(BASH, [dst, '--project'], { encoding: 'utf8', env: { PATH: s.bin, HOME: s.home } })
+        expect(r.status).toBe(0)
+        expect(fs.readFileSync(dst, 'utf8')).toBe(before)
+        expect(r.stderr).not.toContain('could not install')
+        expect(r.stderr).not.toContain('installed feedback-gate-setup')
+        expect(calls(s)).toBe('1.0.0|\n1.0.0|--project\n')
+      }))
+  })
+
+  describe('plugin update', () => {
+    const codex = (s: Setup): Record<string, string> => ({ FEEDBACK_GATE_CODEX_BIN: path.join(s.dir, 'fake-codex') })
+    const UP = 'codex|plugin marketplace upgrade hook-gate\n'
+    const ADD = 'codex|plugin add feedback-gate@hook-gate\n'
+
+    test('upgrades the marketplace, adds the plugin, then runs the newest version installer', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const r = run(['--project'], { ...codex(s), FAKE_CODEX_NEW_VERSION: '1.1.0' })
+        expect(r.status).toBe(0)
+        expect(calls(s)).toBe(`${UP}${ADD}new-1.1.0|--project\n`)
+        expect(r.stderr).toContain('feedback-gate: running codex plugin marketplace upgrade hook-gate')
+      }))
+
+    test('falls back to marketplace add when the upgrade fails', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        run([], { ...codex(s), FAKE_CODEX_UPGRADE_FAILS: '1', FAKE_CODEX_NEW_VERSION: '1.1.0' })
+        expect(calls(s)).toBe(`${UP}codex|plugin marketplace add nonchan7720/claude-hook-gate\n${ADD}new-1.1.0|\n`)
+      }))
+
+    test('without codex it says so and uses the installed version', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const r = run(['--project'])
+        expect(r.status).toBe(0)
+        expect(r.stderr).toContain('codex not found in PATH; skipping the plugin update and using the installed plugin')
+        expect(calls(s)).toBe('1.0.0|--project\n')
+      }))
+
+    test('without codex and without a plugin the error mentions the skipped update', () =>
+      withSetup((_s, run) => {
+        const r = run([])
+        expect(r.status).toBe(1)
+        expect(r.stderr).toContain('the plugin update was skipped')
+      }))
+
+    test('--no-update skips codex and is not forwarded (also with --no-command)', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const r = run(['--no-update', '--no-command', '--project'], codex(s))
+        expect(r.status).toBe(0)
+        expect(calls(s)).toBe('1.0.0|--project\n')
+      }))
+
+    test('FEEDBACK_GATE_PLUGIN_DIR means no codex calls', () =>
+      withSetup((s, run) => {
+        const root = path.join(s.dir, 'checkout')
+        fakeInstall(s, root, 'checkout')
+        run([], { ...codex(s), FEEDBACK_GATE_PLUGIN_DIR: root })
+        expect(calls(s)).toBe('checkout|\n')
+      }))
+
+    test('a failing plugin add warns and falls back to the cached version', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const r = run([], { ...codex(s), FAKE_CODEX_ADD_FAILS: '1' })
+        expect(r.status).toBe(0)
+        expect(r.stderr).toContain('feedback-gate: codex plugin add failed; using the installed plugin if any')
+        expect(calls(s)).toBe(`${UP}${ADD}1.0.0|\n`)
+      }))
+  })
 })

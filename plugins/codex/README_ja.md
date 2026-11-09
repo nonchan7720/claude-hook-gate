@@ -26,6 +26,10 @@ Codex は `.agents/` を先に、次に `.claude/` を見ます（Claude Code �
 
    `curl -fsSL https://raw.githubusercontent.com/nonchan7720/claude-hook-gate/main/plugins/codex/scripts/setup.sh | bash` でも同じです。`setup.sh` は `~/.codex/plugins/cache/hook-gate/feedback-gate/` 以下（`$CODEX_HOME` を尊重）にインストールされた最新のバージョンを探し、そのバージョンの `install-hooks.sh` を実行します。オプションは `bash -s -- <オプション>` で渡せます（例: `| bash -s -- --project`）。`FEEDBACK_GATE_PLUGIN_DIR` を指定すると、キャッシュではなくチェックアウトや別のインストール先を使います。
 
+   このワンライナーは、自身を `feedback-gate-setup` というコマンドとして `~/.local/bin` にもインストールします（そのディレクトリが `PATH` に無ければ `~/.zshrc` / `~/.bashrc` に追記します。一度だけ新しいシェルを開いてください）。以降は `feedback-gate-setup` だけで済み、オプションも同じです（例: `feedback-gate-setup --project`）。プラグインを更新したあとにインストーラをもう一度走らせるのにも使えます。`--no-command` でこの手順を省き、`FEEDBACK_GATE_BIN_DIR` で置き場所を変え、`FEEDBACK_GATE_NO_RC=1` で rc ファイルに触らなくなります（追記する行を表示するだけ）。
+
+   `setup.sh`（つまり `feedback-gate-setup`）は、フックをインストールする前にプラグインを更新します。`codex plugin marketplace upgrade hook-gate`（初回は `codex plugin marketplace add nonchan7720/claude-hook-gate` でマーケットプレイスを追加）と `codex plugin add feedback-gate@hook-gate` を実行し、そのあと最新バージョンのフックをインストールします。つまり「プラグインの更新とフックの更新」が `feedback-gate-setup` 一つで済みます。`--no-update` で更新を省き（`install-hooks.sh` には渡しません）、`codex` が `PATH` に無いときは `FEEDBACK_GATE_CODEX_BIN` でその実行ファイルを指定します。`codex` が無ければインストール済みのバージョンを使い、`FEEDBACK_GATE_PLUGIN_DIR` を指定したときも更新しません。Codex はフックの信頼をハッシュで記録するので、更新のあとは `/hooks` でもう一度信頼してください（[それでもフックが動かないとき](#それでもフックが動かないとき)を参照）。
+
    代わりに、インストール先かこのリポジトリのチェックアウトから `install-hooks.sh` を自分で引数なしで実行することもできます。
 
    ```
@@ -142,7 +146,7 @@ plugin.json                     # ポータブルな Agent Plugins のマニフ�
 plugins/codex/
 ├── hooks/hooks.json            # 全イベントの command hook
 ├── scripts/hook.sh             # 入口: feedback-gate を探すかダウンロードし（../../scripts/install-binary.sh）、`feedback-gate codex <Event>` を動かす
-├── scripts/setup.sh            # ワンライナー用の入口: Codex のキャッシュにある最新バージョンの install-hooks.sh を実行する（`... | bash`）
+├── scripts/setup.sh            # ワンライナー用の入口: Codex のキャッシュにある最新バージョンの install-hooks.sh を実行する（`... | bash`）。自身を `feedback-gate-setup` コマンドとしてインストールし、先に `codex` でプラグインを更新する
 ├── scripts/install-hooks.sh    # Codex はまだプラグインのフックを走らせないので hooks/hooks.json を ~/.codex/hooks.json などに写す（`feedback-gate codex install-hooks`）
 └── README.md, README_ja.md
 ```
