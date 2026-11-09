@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.21.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.20.0...v0.21.0) (2026-11-09)
+
+
+### Features
+
+* **codex:** setup.sh installs into /etc/codex/hooks.json where Codex runs only managed hooks ([#104](https://github.com/nonchan7720/claude-hook-gate/issues/104)) ([99e7284](https://github.com/nonchan7720/claude-hook-gate/commit/99e7284f4ac6cb20ad795493777b2e7b9f0fb209))
+
+
+### Documentation
+
+* support Claude Cowork (install steps, limitations, .agents/ fallback for rules) ([#102](https://github.com/nonchan7720/claude-hook-gate/issues/102)) ([23cfe63](https://github.com/nonchan7720/claude-hook-gate/commit/23cfe633c2cc99b90e022a2760115175077ba6de))
+
 ## [0.20.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.19.0...v0.20.0) (2026-11-09)
 
 
