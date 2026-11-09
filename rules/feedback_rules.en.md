@@ -9,14 +9,15 @@
 
 - `~/.claude/feedback/`
   - global rules
-- `.claude/feedback/`
-  - project-specific rules
+- `.claude/feedback/`, `.agents/feedback/`
+  - project-specific rules (both are read; for the same `name`, the one in `.claude/` wins)
 
 Read every file in those directories, and always follow the rules with `count >= 3`.
 
 ### When you receive feedback
 
 Every time you receive the same pointer, correction or preference, create or update the file in `.claude/feedback/` or `~/.claude/feedback/` and increment its `count`. **Always do this before replying.**
+**When `.claude/` cannot be written**: if the write is refused (for example as a protected location; Claude Cowork protects the `.claude/` of the folder it works in), save project rules in `.agents/feedback/` instead (the hooks read it too). Do not leave the rule somewhere the hooks never read. If `~/.claude/feedback/` cannot be written, give the user the finished file and the path to put it in.
 **Before creating a file, check whether one exists**: read the `name` / `description` of every file in both directories and the body of any that is close. If a rule covers the same kind of situation (even with different wording, files or commands), do not create a new file: raise that rule's `count` by 1 and update its body with the new case (prefer updating; create a new file only when no rule fits).
 First, ask the user whether to save this feedback. Save it when the user chooses to.
 When recording it, turn the concrete remark into an abstract rule instead of writing it down verbatim.
