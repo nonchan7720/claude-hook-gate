@@ -86,13 +86,17 @@ which directory each runs in.
 ## 3. Write
 
 - Path `.claude/gate.yaml` at the project root (the git root, or the worktree root).
+  If writing under `.claude/` is refused (Claude Cowork treats it as a protected
+  location), use `.agents/gate.yaml`: the hooks read it when there is no
+  `.claude/gate.yaml`.
   Compare against reference.md: only the listed keys exist (`additionalProperties:
   false`); `rules` is required; every `run_checks` name exists in `consistency_checks`;
   `dir` is root-relative with no `..`; `parallel` is not nested.
 - Comments in the file: one line per rule saying where the command comes from (`# same
   as CI job "lint"`), so the next person can check drift.
-- Ensure `.gitignore` contains `.claude/.gate-status/` (the gate's state and logs). Add
-  it if missing.
+- Ensure `.gitignore` contains `.claude/.gate-status/` (the gate's state and logs; it
+  goes under `.agents/` instead when the project has no `.claude/` directory, so add
+  `.agents/.gate-status/` too in that case). Add it if missing.
 - Do not put machine-specific paths (such as the plugin's schema path) in the file.
 
 ## 4. Verify before handing over

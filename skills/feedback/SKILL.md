@@ -30,8 +30,8 @@ keys) of every file in both directories, so you update a rule instead of writing
 second one about the same thing:
 
 ```
-ls ~/.claude/feedback/*.md .claude/feedback/*.md 2>/dev/null   # from the project root
-grep -H -m3 -E '^(name|description|count):' ~/.claude/feedback/*.md .claude/feedback/*.md 2>/dev/null
+ls ~/.claude/feedback/*.md .claude/feedback/*.md .agents/feedback/*.md 2>/dev/null   # from the project root
+grep -H -m3 -E '^(name|description|count):' ~/.claude/feedback/*.md .claude/feedback/*.md .agents/feedback/*.md 2>/dev/null
 ```
 
 Read the body of every rule whose name or description is close to the feedback. **Updating
@@ -48,6 +48,15 @@ first, marked ★; rules with no word in common are listed by file name only, an
 mark only compares words, so open any of them that might still be the same rule). Pick the rule to update from that list; write the new file again only when none
 fits.
 
+**When `.claude/` cannot be written** (Claude Cowork refuses writes under the
+folder's `.claude/` as a protected location): write the project rule to
+`<project>/.agents/feedback/` instead. The hooks read it as well (`.claude/feedback/`
+first, then `.agents/feedback/`; a rule of the same `name` in `.claude/` wins), so do
+not leave the rule in some other file the hooks never read. The global
+`~/.claude/feedback/` is outside the folder Cowork works in: for a global rule there,
+show the user the finished file and the path to copy it to, or offer to keep it as a
+project rule under `.agents/feedback/`.
+
 `CLAUDE_FEEDBACK_DIR`, when set, replaces `~/.claude/feedback`. Never touch the state
 files next to the rules (`.violations.jsonl`, `.errors.jsonl`, `.count_state/`,
 `.ask_state/`, `.new_rule_state/`, `.inject_state/`, `.bash_started/`): they belong to the hooks. The only thing you read
@@ -59,7 +68,8 @@ from them is the violation log, in `review` mode.
    saving a new rule. Unless the user already said "save this" / "remember this", ask in
    one line, proposing the name, the scope and the one-sentence rule you intend to
    write. Then save before replying to the original request.
-2. **Pick the scope.** Project (`<project>/.claude/feedback/`) when the point is about
+2. **Pick the scope.** Project (`<project>/.claude/feedback/`, or `.agents/feedback/`
+   where `.claude/` cannot be written; see above) when the point is about
    this codebase, its tools or its conventions. Global (`~/.claude/feedback/`) when it
    is about how you work in general. A rule about one language or kind of file (an
    idiom, a required construct, a forbidden API in that language) gets `files` (e.g.
