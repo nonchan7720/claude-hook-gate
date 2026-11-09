@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.20.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.19.0...v0.20.0) (2026-11-09)
+
+
+### Features
+
+* **codex:** add setup.sh / feedback-gate-setup, one command that updates the plugin and installs the hooks ([#100](https://github.com/nonchan7720/claude-hook-gate/issues/100)) ([c581b5b](https://github.com/nonchan7720/claude-hook-gate/commit/c581b5b583ef6b58780df2373441cb8c7829bd07))
+
 ## [0.19.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.18.0...v0.19.0) (2026-11-08)
 
 
