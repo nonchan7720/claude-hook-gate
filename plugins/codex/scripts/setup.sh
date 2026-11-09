@@ -21,6 +21,15 @@
 #     「# feedback-gate-setup」の目印付きで export PATH=... を 1 回だけ追記する。それ以外のシェルでは行を表示するだけ。
 #     FEEDBACK_GATE_NO_RC=1 なら rc ファイルには触らず、行を表示するだけ。
 #   - --no-command を付けると置かない（このフラグは install-hooks.sh には渡さない）。
+# Codex が管理された hook しか走らせない環境（/etc/codex/requirements.toml に allow_managed_hooks_only = true）か、
+# --system を付けたとき（ポリシーが MDM プロファイルや ChatGPT のワークスペースから来ていて、ここからは見えない場合）は、
+# ~/.codex/hooks.json ではなくシステム層の /etc/codex/hooks.json に入れる（管理層なので /hooks での信頼も要らない）:
+#   - install-hooks.sh --print --to /etc/codex/hooks.json でマージ結果を自分の権限で作り、置くときだけ root で書く
+#     （ディレクトリに書けなければ sudo。sudo はパスワードを端末から読むので `| bash` でも使える）。中身が同じなら書かない。
+#   - sudo が使えなければ、管理者に渡すコマンドを表示して exit 1。
+#   - 書いたら ~/.codex/hooks.json の写しは外す（ポリシーが外れたとき二重に走らないよう、写しは 1 つ）。
+#   - --remove はシステムのファイルから外す。--project / --to / --print / --toml を付けたときはその指定どおり（判定しない）。
+#   FEEDBACK_GATE_CODEX_SYSTEM_DIR で /etc/codex を、FEEDBACK_GATE_SUDO で sudo を差し替えられる。--system は install-hooks.sh に渡さない。
 # `| bash` で標準入力から読まれるので、標準入力は読まず、$0 / BASH_SOURCE だけに頼らない。
 set -uo pipefail
 
@@ -31,14 +40,34 @@ CMD_NAME="feedback-gate-setup"
 # --no-command と --no-update だけを取り除き、残りはそのまま install-hooks.sh へ渡す
 install_command=1
 do_update=1
+system=0 # 1: --system、2: requirements.toml から判定
+remove=0
+explicit=0
 fwd=()
 for a in "$@"; do
   case "$a" in
     --no-command) install_command=0 ;;
     --no-update) do_update=0 ;;
-    *) fwd+=("$a") ;;
+    --system) system=1 ;;
+    *)
+      case "$a" in
+        --remove) remove=1 ;;
+        --project | --to | --print | --toml) explicit=1 ;;
+      esac
+      fwd+=("$a")
+      ;;
   esac
 done
+SYSTEM_DIR="${FEEDBACK_GATE_CODEX_SYSTEM_DIR:-/etc/codex}"
+SYSTEM_DIR="${SYSTEM_DIR%/}"
+if [ "$system" -eq 1 ] && [ "$explicit" -eq 1 ]; then
+  printf 'feedback-gate: --system writes %s/hooks.json; it takes no --project, --to, --print or --toml\n' "$SYSTEM_DIR" >&2
+  exit 1
+fi
+if [ "$system" -eq 0 ] && [ "$explicit" -eq 0 ] && [ -f "$SYSTEM_DIR/requirements.toml" ] &&
+  grep -Eq '^[[:space:]]*allow_managed_hooks_only[[:space:]]*=[[:space:]]*true([[:space:]]|#|$)' "$SYSTEM_DIR/requirements.toml"; then
+  system=2
+fi
 
 MARKETPLACE_SOURCE="nonchan7720/claude-hook-gate"
 MARKETPLACE_NAME="hook-gate"
@@ -222,4 +251,46 @@ fi
 
 printf 'feedback-gate: using %s\n' "$ROOT" >&2
 [ "$install_command" -eq 1 ] && { install_self_command "$ROOT" || true; }
-exec "${BASH:-bash}" "$ROOT/$INSTALL_REL" ${fwd[@]+"${fwd[@]}"}
+[ "$system" -eq 0 ] && exec "${BASH:-bash}" "$ROOT/$INSTALL_REL" ${fwd[@]+"${fwd[@]}"}
+
+# システム層: マージ結果は自分の権限で作り、置くときだけ root で書く
+target="$SYSTEM_DIR/hooks.json"
+if [ "$system" -eq 2 ]; then
+  printf 'feedback-gate: Codex runs only managed hooks here (allow_managed_hooks_only in %s/requirements.toml); installing into %s\n' "$SYSTEM_DIR" "$target" >&2
+fi
+tmp="$(mktemp "${TMPDIR:-/tmp}/feedback-gate-hooks.XXXXXX")" || exit 1
+trap 'rm -f "$tmp"' EXIT
+if [ "$remove" -eq 1 ]; then
+  "${BASH:-bash}" "$ROOT/$INSTALL_REL" --print --remove --to "$target" >"$tmp" || exit 1
+else
+  "${BASH:-bash}" "$ROOT/$INSTALL_REL" --print --to "$target" >"$tmp" || exit 1
+fi
+if [ -f "$target" ] && cmp -s "$tmp" "$target"; then
+  printf 'feedback-gate: %s is already up to date\n' "$target" >&2
+else
+  chmod 644 "$tmp"
+  parent="$SYSTEM_DIR"
+  while [ ! -d "$parent" ]; do parent="$(dirname "$parent")"; done
+  if [ -w "$parent" ] && { [ ! -e "$target" ] || [ -w "$target" ]; }; then
+    { mkdir -p "$SYSTEM_DIR" && cp "$tmp" "$target" && chmod 644 "$target"; } || exit 1
+  else
+    SUDO="${FEEDBACK_GATE_SUDO:-sudo}"
+    printf 'feedback-gate: writing %s needs administrator rights; running %s\n' "$target" "$SUDO" >&2
+    if ! { "$SUDO" mkdir -p "$SYSTEM_DIR" && "$SUDO" install -m 0644 "$tmp" "$target"; }; then
+      keep="${TMPDIR:-/tmp}/feedback-gate-hooks.json"
+      cp "$tmp" "$keep" 2>/dev/null
+      {
+        printf 'feedback-gate: could not write %s. Ask an administrator to run:\n' "$target"
+        printf '  sudo mkdir -p %s && sudo install -m 0644 %s %s\n' "$SYSTEM_DIR" "$keep" "$target"
+      } >&2
+      exit 1
+    fi
+  fi
+  if [ "$remove" -eq 1 ]; then
+    printf 'feedback-gate: removed the feedback-gate hooks from %s\n' "$target" >&2
+  else
+    printf 'feedback-gate: installed the feedback-gate hooks into %s (managed: Codex runs them without /hooks review)\n' "$target" >&2
+  fi
+fi
+# 写しは 1 つ: ユーザー層の写しは外す（ポリシーが外れたとき二重に走らないように）
+[ "$remove" -eq 1 ] || "${BASH:-bash}" "$ROOT/$INSTALL_REL" --remove >&2 || true
