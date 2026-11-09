@@ -18,7 +18,19 @@ Codex looks in `.agents/` first, then `.claude/` (Claude Code the other way roun
    codex plugin marketplace add nonchan7720/claude-hook-gate
    ```
 
-2. **Write the hooks where Codex reads them.** Codex does not yet run the hooks a plugin bundles (its `plugin_hooks` feature is still under development, [openai/codex#16430](https://github.com/openai/codex/issues/16430)), so the plugin installs but nothing runs until its `hooks/hooks.json` is copied into `~/.codex/hooks.json`. Run the installer once, from the installed copy or from a checkout of this repository, without arguments:
+2. **Write the hooks where Codex reads them.** Codex does not yet run the hooks a plugin bundles (its `plugin_hooks` feature is still under development, [openai/codex#16430](https://github.com/openai/codex/issues/16430)), so the plugin installs but nothing runs until its `hooks/hooks.json` is copied into `~/.codex/hooks.json`. Run the installer once. The easy way is the one-liner below, which needs no version:
+
+   ```
+   gh api repos/nonchan7720/claude-hook-gate/contents/plugins/codex/scripts/setup.sh -H "Accept: application/vnd.github.raw" | bash
+   ```
+
+   or, equivalently, `curl -fsSL https://raw.githubusercontent.com/nonchan7720/claude-hook-gate/main/plugins/codex/scripts/setup.sh | bash`. `setup.sh` finds the newest version installed under `~/.codex/plugins/cache/hook-gate/feedback-gate/` (`$CODEX_HOME` is respected) and runs that version's `install-hooks.sh`. Options are forwarded with `bash -s -- <options>`, e.g. `| bash -s -- --project`. `FEEDBACK_GATE_PLUGIN_DIR` points it at a checkout or another install instead of the cache.
+
+   The one-liner also installs itself as the command `feedback-gate-setup` in `~/.local/bin` (adding that directory to `PATH` in `~/.zshrc` / `~/.bashrc` when it is missing; open a new shell once). From then on `feedback-gate-setup` is enough, with the same options, e.g. `feedback-gate-setup --project`, and it is the quick way to run the installer again after updating the plugin. `--no-command` skips this step, `FEEDBACK_GATE_BIN_DIR` changes the directory, and `FEEDBACK_GATE_NO_RC=1` leaves the rc files alone (the line to add is only printed).
+
+   Before installing the hooks, `setup.sh` (and so `feedback-gate-setup`) updates the plugin: `codex plugin marketplace upgrade hook-gate` (adding the marketplace with `codex plugin marketplace add nonchan7720/claude-hook-gate` on the first run) and `codex plugin add feedback-gate@hook-gate`. Then it installs the hooks of the newest version, so "update the plugin and refresh the hooks" is the single command `feedback-gate-setup`. `--no-update` skips the update (it is not forwarded to `install-hooks.sh`), `FEEDBACK_GATE_CODEX_BIN` names the `codex` executable if it is not in `PATH`; without `codex` the installed version is used, and `FEEDBACK_GATE_PLUGIN_DIR` also disables the update. Codex records hook trust by hash, so after an update trust the hooks in `/hooks` again (see [If the hooks still do not run](#if-the-hooks-still-do-not-run)).
+
+   Alternatively, run `install-hooks.sh` yourself, from the installed copy or from a checkout of this repository, without arguments:
 
    ```
    bash ~/.codex/plugins/cache/hook-gate/feedback-gate/<version>/plugins/codex/scripts/install-hooks.sh
@@ -134,6 +146,7 @@ plugin.json                     # portable Agent Plugins manifest (repository ro
 plugins/codex/
 ├── hooks/hooks.json            # command hooks for every event
 ├── scripts/hook.sh             # entry: finds or downloads feedback-gate (see ../../scripts/install-binary.sh), runs `feedback-gate codex <Event>`
+├── scripts/setup.sh            # one-liner entry: runs install-hooks.sh of the newest installed plugin version in the Codex cache (`... | bash`), installs itself as the `feedback-gate-setup` command, and first updates the plugin via `codex`
 ├── scripts/install-hooks.sh    # copies hooks/hooks.json into ~/.codex/hooks.json etc., since Codex does not run plugin hooks yet (`feedback-gate codex install-hooks`)
 └── README.md, README_ja.md
 ```
