@@ -18,7 +18,15 @@ Codex は `.agents/` を先に、次に `.claude/` を見ます（Claude Code �
    codex plugin marketplace add nonchan7720/claude-hook-gate
    ```
 
-2. **フックを Codex が読む場所に書きます。** Codex はまだプラグイン同梱のフックを走らせません（`plugin_hooks` の機能が開発中のため。[openai/codex#16430](https://github.com/openai/codex/issues/16430)）。そのためプラグインは入っても、`hooks/hooks.json` を `~/.codex/hooks.json` に写すまで何も動きません。インストール先かこのリポジトリのチェックアウトから、インストーラを引数なしで 1 回実行してください。
+2. **フックを Codex が読む場所に書きます。** Codex はまだプラグイン同梱のフックを走らせません（`plugin_hooks` の機能が開発中のため。[openai/codex#16430](https://github.com/openai/codex/issues/16430)）。そのためプラグインは入っても、`hooks/hooks.json` を `~/.codex/hooks.json` に写すまで何も動きません。インストーラを 1 回実行してください。簡単なのは次のワンライナーで、バージョンを書く必要はありません。
+
+   ```
+   gh api repos/nonchan7720/claude-hook-gate/contents/plugins/codex/scripts/setup.sh -H "Accept: application/vnd.github.raw" | bash
+   ```
+
+   `curl -fsSL https://raw.githubusercontent.com/nonchan7720/claude-hook-gate/main/plugins/codex/scripts/setup.sh | bash` でも同じです。`setup.sh` は `~/.codex/plugins/cache/hook-gate/feedback-gate/` 以下（`$CODEX_HOME` を尊重）にインストールされた最新のバージョンを探し、そのバージョンの `install-hooks.sh` を実行します。オプションは `bash -s -- <オプション>` で渡せます（例: `| bash -s -- --project`）。`FEEDBACK_GATE_PLUGIN_DIR` を指定すると、キャッシュではなくチェックアウトや別のインストール先を使います。
+
+   代わりに、インストール先かこのリポジトリのチェックアウトから `install-hooks.sh` を自分で引数なしで実行することもできます。
 
    ```
    bash ~/.codex/plugins/cache/hook-gate/feedback-gate/<version>/plugins/codex/scripts/install-hooks.sh
@@ -134,6 +142,7 @@ plugin.json                     # ポータブルな Agent Plugins のマニフ�
 plugins/codex/
 ├── hooks/hooks.json            # 全イベントの command hook
 ├── scripts/hook.sh             # 入口: feedback-gate を探すかダウンロードし（../../scripts/install-binary.sh）、`feedback-gate codex <Event>` を動かす
+├── scripts/setup.sh            # ワンライナー用の入口: Codex のキャッシュにある最新バージョンの install-hooks.sh を実行する（`... | bash`）
 ├── scripts/install-hooks.sh    # Codex はまだプラグインのフックを走らせないので hooks/hooks.json を ~/.codex/hooks.json などに写す（`feedback-gate codex install-hooks`）
 └── README.md, README_ja.md
 ```

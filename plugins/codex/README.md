@@ -18,7 +18,15 @@ Codex looks in `.agents/` first, then `.claude/` (Claude Code the other way roun
    codex plugin marketplace add nonchan7720/claude-hook-gate
    ```
 
-2. **Write the hooks where Codex reads them.** Codex does not yet run the hooks a plugin bundles (its `plugin_hooks` feature is still under development, [openai/codex#16430](https://github.com/openai/codex/issues/16430)), so the plugin installs but nothing runs until its `hooks/hooks.json` is copied into `~/.codex/hooks.json`. Run the installer once, from the installed copy or from a checkout of this repository, without arguments:
+2. **Write the hooks where Codex reads them.** Codex does not yet run the hooks a plugin bundles (its `plugin_hooks` feature is still under development, [openai/codex#16430](https://github.com/openai/codex/issues/16430)), so the plugin installs but nothing runs until its `hooks/hooks.json` is copied into `~/.codex/hooks.json`. Run the installer once. The easy way is the one-liner below, which needs no version:
+
+   ```
+   gh api repos/nonchan7720/claude-hook-gate/contents/plugins/codex/scripts/setup.sh -H "Accept: application/vnd.github.raw" | bash
+   ```
+
+   or, equivalently, `curl -fsSL https://raw.githubusercontent.com/nonchan7720/claude-hook-gate/main/plugins/codex/scripts/setup.sh | bash`. `setup.sh` finds the newest version installed under `~/.codex/plugins/cache/hook-gate/feedback-gate/` (`$CODEX_HOME` is respected) and runs that version's `install-hooks.sh`. Options are forwarded with `bash -s -- <options>`, e.g. `| bash -s -- --project`. `FEEDBACK_GATE_PLUGIN_DIR` points it at a checkout or another install instead of the cache.
+
+   Alternatively, run `install-hooks.sh` yourself, from the installed copy or from a checkout of this repository, without arguments:
 
    ```
    bash ~/.codex/plugins/cache/hook-gate/feedback-gate/<version>/plugins/codex/scripts/install-hooks.sh
@@ -134,6 +142,7 @@ plugin.json                     # portable Agent Plugins manifest (repository ro
 plugins/codex/
 ├── hooks/hooks.json            # command hooks for every event
 ├── scripts/hook.sh             # entry: finds or downloads feedback-gate (see ../../scripts/install-binary.sh), runs `feedback-gate codex <Event>`
+├── scripts/setup.sh            # one-liner entry: runs install-hooks.sh of the newest installed plugin version in the Codex cache (`... | bash`)
 ├── scripts/install-hooks.sh    # copies hooks/hooks.json into ~/.codex/hooks.json etc., since Codex does not run plugin hooks yet (`feedback-gate codex install-hooks`)
 └── README.md, README_ja.md
 ```
