@@ -82,15 +82,21 @@ feedback_gate_fetch() { # <url> <output file>
   return 1
 }
 
+# <file> がこのスクリプト（setup.sh）か。`| bash` で読まれているとき BASH_SOURCE[0] が bash 自身のバイナリを指す環境があるので、
+# 置く元は中身で確かめる（ダウンロードしたものも同じ: エラーページなどを置かない）。
+is_setup_script() {
+  [ -f "$1" ] && grep -q "^CMD_NAME=\"$CMD_NAME\"\$" "$1" 2>/dev/null
+}
+
 install_self_command() { # <plugin root>
   local root="$1" bin_dir dst src="" tmp
   bin_dir="${FEEDBACK_GATE_BIN_DIR:-${XDG_BIN_HOME:-${HOME:-}/.local/bin}}"
   while [ "${#bin_dir}" -gt 1 ] && [ "${bin_dir%/}" != "$bin_dir" ]; do bin_dir="${bin_dir%/}"; done
   dst="$bin_dir/$CMD_NAME"
 
-  if [ -f "${BASH_SOURCE[0]:-}" ]; then
+  if is_setup_script "${BASH_SOURCE[0]:-}"; then
     src="${BASH_SOURCE[0]}"
-  elif [ -f "$root/$SETUP_REL" ]; then
+  elif is_setup_script "$root/$SETUP_REL"; then
     src="$root/$SETUP_REL"
   fi
 
@@ -110,6 +116,10 @@ install_self_command() { # <plugin root>
     elif ! feedback_gate_fetch "$SETUP_URL" "$tmp"; then
       rm -f "$tmp"
       printf 'feedback-gate: could not install %s: no local copy of setup.sh and downloading %s failed\n' "$CMD_NAME" "$SETUP_URL" >&2
+      return 0
+    elif ! is_setup_script "$tmp"; then
+      rm -f "$tmp"
+      printf 'feedback-gate: could not install %s: %s did not return setup.sh\n' "$CMD_NAME" "$SETUP_URL" >&2
       return 0
     fi
     if ! chmod 755 "$tmp" 2>/dev/null || ! mv -f "$tmp" "$dst" 2>/dev/null; then

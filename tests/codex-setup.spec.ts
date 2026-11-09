@@ -150,6 +150,8 @@ describe('plugins/codex/scripts/setup.sh', () => {
     // ダウンロードを無効にする（存在しない file:// URL）
     const noDl = (s: Setup): Record<string, string> => ({ FEEDBACK_GATE_SETUP_URL: `file://${path.join(s.dir, 'nope')}` })
     const rcLines = (f: string): string[] => fs.readFileSync(f, 'utf8').split('\n')
+    // setup.sh と認められる中身（CMD_NAME の行が目印）。それ以外は置く元にしない。
+    const fakeSetup = (tag: string): string => `#!/bin/bash\nCMD_NAME="feedback-gate-setup"\n# ${tag}\n`
 
     test('running as a file installs an executable, identical copy and still runs the installer', () =>
       withSetup((s, run) => {
@@ -167,11 +169,23 @@ describe('plugins/codex/scripts/setup.sh', () => {
       withSetup((s, run) => {
         install(s, ['1.0.0'])
         const copy = path.join(s.cache, '1.0.0', 'plugins', 'codex', 'scripts', 'setup.sh')
-        fs.writeFileSync(copy, '#!/bin/bash\n# plugin copy\n')
+        fs.writeFileSync(copy, fakeSetup('plugin copy'))
         const r = run(['--project'], noDl(s), true)
         expect(r.status).toBe(0)
-        expect(fs.readFileSync(cmdPath(s), 'utf8')).toBe('#!/bin/bash\n# plugin copy\n')
+        expect(fs.readFileSync(cmdPath(s), 'utf8')).toBe(fakeSetup('plugin copy'))
         expect(calls(s)).toBe('1.0.0|--project\n')
+      }))
+
+    test('a file that is not setup.sh (e.g. the bash binary BASH_SOURCE points at under `| bash`, or a stray plugin file) is never copied', () =>
+      withSetup((s, run) => {
+        install(s, ['1.0.0'])
+        const copy = path.join(s.cache, '1.0.0', 'plugins', 'codex', 'scripts', 'setup.sh')
+        fs.writeFileSync(copy, '#!/bin/bash\n# something else\n')
+        const r = run(['--project'], noDl(s), true)
+        expect(r.status).toBe(0)
+        expect(calls(s)).toBe('1.0.0|--project\n')
+        expect(fs.existsSync(cmdPath(s))).toBe(false)
+        expect(r.stderr).toContain('could not install feedback-gate-setup')
       }))
 
     test('piped without a plugin copy and without downloading: still succeeds and explains', () =>
@@ -190,11 +204,25 @@ describe('plugins/codex/scripts/setup.sh', () => {
         fs.symlinkSync(Bun.which('curl') as string, path.join(s.bin, 'curl'))
         install(s, ['1.0.0'])
         const remote = path.join(s.dir, 'remote-setup.sh')
-        fs.writeFileSync(remote, '#!/bin/bash\n# remote\n')
+        fs.writeFileSync(remote, fakeSetup('remote'))
         const r = run([], { FEEDBACK_GATE_SETUP_URL: `file://${remote}` }, true)
         expect(r.status).toBe(0)
-        expect(fs.readFileSync(cmdPath(s), 'utf8')).toBe('#!/bin/bash\n# remote\n')
+        expect(fs.readFileSync(cmdPath(s), 'utf8')).toBe(fakeSetup('remote'))
         expect(fs.statSync(cmdPath(s)).mode & 0o777).toBe(0o755)
+      }),
+    )
+
+    test.skipIf(!Bun.which('curl'))('a download that is not setup.sh (an error page) is not installed', () =>
+      withSetup((s, run) => {
+        fs.symlinkSync(Bun.which('curl') as string, path.join(s.bin, 'curl'))
+        install(s, ['1.0.0'])
+        const remote = path.join(s.dir, 'remote-setup.sh')
+        fs.writeFileSync(remote, '<html>Not Found</html>\n')
+        const r = run([], { FEEDBACK_GATE_SETUP_URL: `file://${remote}` }, true)
+        expect(r.status).toBe(0)
+        expect(fs.existsSync(cmdPath(s))).toBe(false)
+        expect(r.stderr).toContain('did not return setup.sh')
+        expect(fs.readdirSync(path.join(s.home, '.local', 'bin'))).toEqual([])
       }),
     )
 
