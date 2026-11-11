@@ -410,6 +410,7 @@ function splitRoot(projectDir, path) {
   }
   return [projectDir, relativize(path, projectDir)];
 }
+var rootLabel = (root, projectDir, rel) => root === projectDir ? rel : `${basename(root)}/${rel}`;
 
 // src/running-registry.ts
 var MAX_RUN_MS = 600000;
@@ -1952,6 +1953,115 @@ async function notification(io, type, payload) {
     click
   ]);
   return ok();
+}
+
+// src/stop-review.ts
+var EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+var DEFAULT_EFFORT = "xhigh";
+var DEFAULT_MAX_ROUNDS = 1;
+var MAX_LISTED_FILES = 30;
+function parseStopReview(raw) {
+  if (raw !== true && !isDict(raw))
+    return;
+  const d = isDict(raw) ? raw : {};
+  if (d.enabled === false)
+    return;
+  const rounds = Number(d.max_rounds);
+  return {
+    effort: d.effort === false ? null : typeof d.effort === "string" && EFFORT_LEVELS.includes(d.effort) ? d.effort : DEFAULT_EFFORT,
+    match: asList(d.match).map(String),
+    maxRounds: Number.isInteger(rounds) && rounds >= 1 ? rounds : DEFAULT_MAX_ROUNDS,
+    prompt: typeof d.prompt === "string" ? d.prompt.trim() : "",
+    subagents: d.subagents !== false
+  };
+}
+var stateIdOf = (payload) => {
+  const sessionId = jqStr(payload.session_id) || "unknown";
+  const agentId = jqStr(payload.agent_id);
+  return agentId ? `${sessionId}--${agentId}` : sessionId;
+};
+var pendingPath = (io, stateId) => join(gateStatusDir(io), `review_pending.${stateId}.txt`);
+var roundsPath = (io, stateId) => join(gateStatusDir(io), `review_rounds.${stateId}.txt`);
+async function notePendingReview(io, stateId, paths) {
+  const memo = pendingPath(io, stateId);
+  const existing = await io.readFile(memo) ?? "";
+  const have = new Set(existing.split(`
+`));
+  const added = paths.filter((p) => p !== "" && !have.has(p));
+  if (added.length > 0)
+    await io.writeFile(memo, `${existing}${[...new Set(added)].map((p) => `${p}
+`).join("")}`);
+}
+async function loadConfig(io, path) {
+  const text = await io.readFile(path);
+  if (text === undefined)
+    return;
+  try {
+    const cfg = parseYaml(text);
+    return isDict(cfg) ? parseStopReview(cfg.stop_review) : undefined;
+  } catch {
+    return;
+  }
+}
+async function main2(io, payload) {
+  const yaml = await findGateYaml(io);
+  if (!yaml)
+    return ok();
+  const stateId = stateIdOf(payload);
+  const pending = pendingPath(io, stateId);
+  const roundsFile = roundsPath(io, stateId);
+  const clear = () => io.removeFiles([pending, roundsFile]);
+  const cfg = await loadConfig(io, yaml);
+  if (!cfg || jqStr(payload.agent_id) !== "" && !cfg.subagents) {
+    await clear();
+    return ok();
+  }
+  const projectDir = io.projectDir || io.cwd;
+  const globs = compileGlobs(cfg.match);
+  const labels = [];
+  for (const line of (await io.readFile(pending) ?? "").split(`
+`)) {
+    if (line === "")
+      continue;
+    const [root, rel] = splitRoot(projectDir, line);
+    if (globs.length > 0 && !globs.some((rx) => rx.test(rel)))
+      continue;
+    const label = rootLabel(root, projectDir, rel);
+    if (!labels.includes(label))
+      labels.push(label);
+  }
+  const done = Number.parseInt((await io.readFile(roundsFile) ?? "").trim(), 10) || 0;
+  if (labels.length === 0 || done >= cfg.maxRounds) {
+    await clear();
+    return done > 0 ? { ...ok(), reportConsumed: true } : ok();
+  }
+  await io.writeFile(roundsFile, String(done + 1));
+  await io.removeFiles([pending]);
+  const t = tr(io.lang);
+  const lines = [t("stopReview.header", { round: done + 1, max: cfg.maxRounds })];
+  if (cfg.effort)
+    lines.push(t("stopReview.effort", { effort: cfg.effort }));
+  lines.push(t("stopReview.steps"));
+  lines.push(t("stopReview.files"));
+  for (const label of labels.slice(0, MAX_LISTED_FILES))
+    lines.push(`- ${label}`);
+  if (labels.length > MAX_LISTED_FILES)
+    lines.push(t("stopReview.more", { count: labels.length - MAX_LISTED_FILES }));
+  if (cfg.prompt)
+    lines.push(cfg.prompt);
+  const reason = lines.join(`
+`);
+  return { exitCode: 2, stdout: `${JSON.stringify({ decision: "block", reason })}
+`, stderr: `${reason}
+` };
+}
+async function stopReview(io, payload) {
+  try {
+    return await main2(io, payload);
+  } catch (e) {
+    return ok("", `[stop-review] internal error (ignored): ${e instanceof Error ? e.message : String(e)}
+`);
+  }
 }
 
 // src/shared-run.ts
@@ -3602,7 +3712,7 @@ async function allStop(io, payload) {
   let stdout = "";
   let stderr = "";
   let reportConsumed = false;
-  for (const step of [() => stopTestGate(io, "checks", payload), () => feedbackStopCheck(io, payload)]) {
+  for (const step of [() => stopTestGate(io, "checks", payload), () => feedbackStopCheck(io, payload), () => stopReview(io, payload)]) {
     const r = await step();
     stdout += r.stdout;
     stderr += r.stderr;
@@ -4020,7 +4130,7 @@ async function downgradeRepeatedAsks(io, violations, sessionId, toolInput) {
   if (newlyAsked.size > 0)
     await saveAskedKeys(io, sid, new Set([...asked, ...newlyAsked]));
 }
-async function main2(io, payload) {
+async function main3(io, payload) {
   const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
   const toolInput = isDict(payload.tool_input) ? payload.tool_input : {};
   const rules = await listRules(io);
@@ -4083,7 +4193,7 @@ async function main2(io, payload) {
 }
 async function feedbackGuard(io, payload) {
   try {
-    return await main2(io, payload);
+    return await main3(io, payload);
   } catch (e) {
     await logError(io, "feedback-guard", errorText(e));
     return ok("", `[feedback-guard] internal error (ignored): ${errorText(e)}
@@ -4136,7 +4246,7 @@ var label = (projectDir, file) => {
   const rel = relpath(file, projectDir);
   return rel.startsWith("../") || rel === ".." ? file : rel;
 };
-async function main3(io, payload, files, threshold) {
+async function main4(io, payload, files, threshold) {
   const rules = await listRules(io);
   if (!wantsBashEdits(rules))
     return ok();
@@ -4186,7 +4296,7 @@ async function main3(io, payload, files, threshold) {
 }
 async function feedbackBashEdits(io, payload, files, threshold) {
   try {
-    return await main3(io, payload, files, threshold);
+    return await main4(io, payload, files, threshold);
   } catch (e) {
     await logError(io, "feedback-bash-edit", errorText(e));
     return ok("", `[feedback-bash-edit] internal error (ignored): ${errorText(e)}
@@ -4379,7 +4489,7 @@ function isReadOnlyCommand(command) {
 var MTIME_SLACK_MS = 2000;
 var STALE_STARTED_MS = 2 * 60 * 60 * 1000;
 var STATE_DIR = ".gate-status";
-var stateIdOf = (payload) => {
+var stateIdOf2 = (payload) => {
   const sessionId = jqStr(payload.session_id) || "unknown";
   const agentId = jqStr(payload.agent_id);
   return agentId ? `${sessionId}--${agentId}` : sessionId;
@@ -4387,7 +4497,7 @@ var stateIdOf = (payload) => {
 var startedKey = (payload) => {
   const toolUseId = jqStr(payload.tool_use_id).replace(/[^A-Za-z0-9_.-]/g, "_");
   if (toolUseId === "")
-    return stateIdOf(payload);
+    return stateIdOf2(payload);
   const sessionId = jqStr(payload.session_id) || "unknown";
   return `${sessionId}--${toolUseId}`;
 };
@@ -4469,7 +4579,7 @@ async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
   const changed = [...picked];
   if (changed.length === 0 || !gate)
     return { changed, recorded: [], threshold, gate };
-  const memo = join(stateDir, `changed_files.${stateIdOf(payload)}.txt`);
+  const memo = join(stateDir, `changed_files.${stateIdOf2(payload)}.txt`);
   const existing = await io.readFile(memo) ?? "";
   const have = new Set(existing.split(`
 `));
@@ -4477,6 +4587,7 @@ async function detect(io, projectDir, gate, startedDirPath, raw, payload) {
   if (recorded.length > 0)
     await io.writeFile(memo, `${existing}${recorded.map((p) => `${p}
 `).join("")}`);
+  await notePendingReview(io, stateIdOf2(payload), changed);
   return { changed, recorded, threshold, gate };
 }
 var OTHER_STATE_RE = /^(?:changed_files|gate_passed|gate_failed)\.(.+)\.txt$/;
@@ -4624,7 +4735,7 @@ async function buildFileOutput(io, rules, files, mode, projectDir) {
   const label = files.map((f) => fileLabel2(projectDir, f)).join(", ");
   return tr(io.lang)(mode === "read" ? "inject.fileHeaderRead" : "inject.fileHeaderEdit", { files: label }) + await formatRules(io, rules);
 }
-async function main4(io, payload) {
+async function main5(io, payload) {
   const files = targetFiles(payload, io);
   if (files.length === 0)
     return ok();
@@ -4654,7 +4765,7 @@ async function main4(io, payload) {
 }
 async function feedbackFileInject(io, payload) {
   try {
-    return await main4(io, payload);
+    return await main5(io, payload);
   } catch (e) {
     await logError(io, "feedback-file-inject", errorText(e));
     return ok("", `[feedback-file-inject] internal error (ignored): ${errorText(e)}
@@ -4663,7 +4774,7 @@ async function feedbackFileInject(io, payload) {
 }
 
 // src/feedback-post-edit.ts
-async function main5(io, payload) {
+async function main6(io, payload) {
   const toolName = truthy(payload.tool_name) ? String(payload.tool_name) : "";
   if (toolName !== "Edit" && toolName !== "Write" && toolName !== "MultiEdit")
     return ok();
@@ -4695,7 +4806,7 @@ async function main5(io, payload) {
 }
 async function feedbackPostEdit(io, payload) {
   try {
-    return await main5(io, payload);
+    return await main6(io, payload);
   } catch (e) {
     await logError(io, "feedback-post-edit", errorText(e));
     return ok("", `[feedback-post-edit] internal error (ignored): ${errorText(e)}
@@ -4913,6 +5024,7 @@ async function recordChanges(io, payload) {
 `).includes(filePath))
       await io.writeFile(memo, `${existing}${filePath}
 `);
+    await notePendingReview(io, stateId, [filePath]);
   }
   return ok();
 }
@@ -4931,7 +5043,9 @@ var STATE_FILES = [
   ["bash_started", ".json"],
   ["feedback_gate_attempts", ".txt"],
   ["subagent_report", ".json"],
-  ["summary", ".txt"]
+  ["summary", ".txt"],
+  ["review_pending", ".txt"],
+  ["review_rounds", ".txt"]
 ];
 var DAY_MS3 = 1440 * 60 * 1000;
 var globMatch = (name, prefix, suffix) => name.length >= prefix.length + suffix.length && name.startsWith(prefix) && name.endsWith(suffix);
@@ -5155,6 +5269,7 @@ function subagentStop(io, sessionId, payload) {
   return runSteps(io, sessionId, "SubagentStop", [
     async (i) => gate = await stopTestGate(i, "checks", payload),
     async (i) => feedback = await feedbackStopCheck(i, payload),
+    async (i) => gate?.exitCode === 0 && feedback?.exitCode === 0 ? stopReview(i, payload) : ok(),
     (i) => saveSubagentReport(i, payload, gate, feedback)
   ]);
 }
