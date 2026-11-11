@@ -146,11 +146,11 @@ func StopReview(io Io, payload Dict) ScriptResult {
 	stateID := bashStateIDOf(payload)
 	pending := ReviewPendingPath(io, stateID)
 	roundsFile := ReviewRoundsPath(io, stateID)
-	clear := func() { io.RemoveFiles([]string{pending, roundsFile}) }
+	clearState := func() { io.RemoveFiles([]string{pending, roundsFile}) }
 
 	cfg, enabled := loadStopReview(io, yaml)
 	if !enabled || (JqStr(payload["agent_id"]) != "" && !cfg.Subagents) {
-		clear()
+		clearState()
 		return Ok("", "")
 	}
 
@@ -191,7 +191,7 @@ func StopReview(io Io, payload Dict) ScriptResult {
 		}
 	}
 	if len(labels) == 0 || done >= cfg.MaxRounds {
-		clear()
+		clearState()
 		// 見直しでブロックした後の Stop は stop_hook_active なので、完了通知を出させるために印を返す（all_stop.go）。
 		return ScriptResult{ReportConsumed: done > 0}
 	}
