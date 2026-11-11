@@ -24,8 +24,8 @@ function hooks で作られた Claude Code プラグインです。次の 3 つ�
 | PostToolUse（Bash） | `src/feedback-file-inject.ts`（heredoc の書き先）→ `src/bash-changes.ts` → `src/feedback-bash-edit.ts` → `src/stop-test-gate.ts`（`rules`） | 文面から分かる heredoc の書き先（[Bash で書いたファイル](#bash-で書いたファイル)）にマッチする `files` 付きルールを追加してから、コマンドが実際に書き換えたファイル（cwd の作業ツリーと、`.claude/worktrees/` 配下の worktree のうちコマンドにパス（`worktrees/<name>`）が出てくるものについて。それ以外の worktree は見ないので、別の Claude Code セッションがそこで編集中のファイルをこのコマンドの変更と取り違えない。git の変更・未追跡ファイルと、コマンド中に作られたコミットが触ったファイルのうち、mtime がコマンド開始以降のもの）を拾う。heredoc・`python`・`sed -i` などで書いても、Edit / Write に掛かる検査が抜けないようにするため。*同じ*作業ツリーで動く別セッションとは 2 つの仕組みで分ける（[同じ作業ツリーの複数セッション](#同じ作業ツリーの複数セッション)）: 読むだけのコマンド（`ls`・`cat`・`grep`・`rg`・`find`・`git log` / `git diff` / `git status` など。ファイルへのリダイレクト無し）は最初から見ず、別セッションが gate の状態（別セッションの `changed_files` / `gate_passed` / `gate_failed`）に既に持っているファイルはそのセッションに任せる。各ファイルを、Edit / Write の後と同じく `post_edit` の enforce でファイル全体に対して評価し、実行後に判定できる `pre_edit` の enforce（下記）も評価して、全ファイルの結果を 1 つの block / warn にまとめる。そのあと `{.claude,.agents}/gate.yaml` があるときだけ変更ファイルとして記録し、記録があれば該当ルールを実行する。feedback の検査は `gate.yaml` が無くても動く。git の履歴・作業ツリー操作（rebase / checkout / merge など）は検査も記録もしない。 | 同じ（下記） |
 | PreToolUse（Agent / SendMessage）、任意 | `src/agent-launch-guard.ts` | `agentLaunchGuard` が `true` のときだけ有効。サブエージェントへ指示を送る前に、送信本文を見せて確認する。 | 同じ（下記） |
 | Notification | `src/notification.ts`（`notify`） | 確認待ちのときにデスクトップ通知（`terminal-notifier` が必要、macOS）。 | 同じ（下記） |
-| Stop | `src/all-stop.ts` | ゲートの `checks` フェーズ（直っていない rules の失敗を再実行し、予約された consistency checks を実行）、`src/feedback-stop-check.ts`、`stop` 通知を順に実行する。 | 同じ（下記） |
-| SubagentStop | ゲートの `checks` フェーズ、`src/feedback-stop-check.ts`、続けて `src/subagent-report.ts`（`saveSubagentReport`） | サブエージェント向けの同じゲートと `stop_check` ルール。結果は呼び出し元のエージェントへ渡すために控えます（[サブエージェントの結果](#results-of-subagents)）。 | 同じ（下記） |
+| Stop | `src/all-stop.ts` | ゲートの `checks` フェーズ（直っていない rules の失敗を再実行し、予約された consistency checks を実行）、`src/feedback-stop-check.ts`、`src/stop-review.ts`（`gate.yaml` の [stop_review](#stop_review)。有効なときだけ）、`stop` 通知を順に実行する。 | 同じ（下記） |
+| SubagentStop | ゲートの `checks` フェーズ、`src/feedback-stop-check.ts`、`src/stop-review.ts`、続けて `src/subagent-report.ts`（`saveSubagentReport`） | サブエージェント向けの同じゲートと `stop_check` ルール、[stop_review](#stop_review)。結果は呼び出し元のエージェントへ渡すために控えます（[サブエージェントの結果](#results-of-subagents)）。 | 同じ（下記） |
 | PostToolUse（Agent） | `src/subagent-report.ts`（`subagentReport`） | 終わったサブエージェントの gate / `stop_check` の結果を、呼び出し元のエージェントの context に追加します。 | 同じ（下記） |
 
 ### 組織管理の環境向けの settings hook
@@ -174,7 +174,7 @@ feedback ルールは 1 ルール 1 行の一覧表で、行を開くと上記�
 
 ## スキル
 
-`skills/` に 3 つのスキルを同梱しています。プラグインと一緒に Claude Code が読み込み、`/feedback-gate:<name>` で呼び出せます（説明文から Claude が自分で使うこともあります）。それぞれ手順を書いた `SKILL.md` と、必要なときに読む参照ファイルからなり、フックの動作はスキルに依存しません。
+`skills/` に 3 つのスキルと、effort を切り替えるだけの `effort-<level>`（[下記](#feedback-gateeffort-level)）を同梱しています。プラグインと一緒に Claude Code が読み込み、`/feedback-gate:<name>` で呼び出せます（説明文から Claude が自分で使うこともあります）。それぞれ手順を書いた `SKILL.md` と、必要なときに読む参照ファイルからなり、フックの動作はスキルに依存しません。
 
 ### `/feedback-gate:feedback`
 
@@ -203,6 +203,10 @@ feedback ルールは 1 ルール 1 行の一覧表で、行を開くと上記�
 ### `/feedback-gate:hook-list`
 
 [`/hook-list`](#hook-list) と同じ画面を、`scripts/hook-list.sh` を実行して出します（引数は `--no-open`）。mod の `/hook-list` が使えない組織管理の環境で使います。プロジェクトにどんな hook・gate のルール・feedback ルールが登録されているかを尋ねられたときに、Claude が自分で使うこともあります。
+
+### `/feedback-gate:effort-<level>`
+
+`effort-low`・`effort-medium`・`effort-high`・`effort-xhigh`・`effort-max` の 5 つ。本文はほぼ空で、frontmatter の `effort` によって、呼び出したターンの残りの effort をその値に切り替えます（Claude Code のスキルの機能。モデルが対応していない値は、それ以下で対応している最も高い値になります。環境変数 `CLAUDE_CODE_EFFORT_LEVEL` があればそちらが優先）。hook の出力ではセッションの effort を変えられないので、[stop_review](#stop_review) はブロックの理由の中でこのスキルを Claude に呼ばせます。`/feedback-gate:effort-max このテストが落ちる原因を調べて` のように自分で使うこともできます。
 
 ## インストール
 
@@ -291,6 +295,29 @@ session_start:
 - 失敗やタイムアウトでセッションを止めることはありません。終了コードとログのパス（`.claude/.gate-status/logs/<session>/<name>.<id>.log`）を stderr に 1 回だけ知らせ、あわせて hook 出力の最上位 `systemMessage` にも載せ（exit 0 の hook の stderr は Claude Code に表示されないため）、hook の終了コードは 0 のまま、ほかのコマンドも走ります。`timeout` が 600 を超える場合は 600 に切り詰めます。SessionStart の hook 自体はフェーズ全体で最大 600 秒まで待ちます（`hooks/hooks.json` の `timeout: 600`）。
 - `background: true` はコマンドを切り離して起動し、hook は待ちません（出力はログにだけ残り、context には入りません）。
 - ポリシーも実行共有も使いません: 出力をいま必要とするので、dogwood による後回しも、エージェント間の共有もしません。読むのはプロジェクトルートの `gate.yaml` だけです。
+
+### stop_review
+
+<a id="stop_review"></a>作業の結果をモデル自身に確かめさせると精度が上がるので、停止の直前に「今回の変更を見直す」1 手を強制する設定です。既定は無効で、`gate.yaml` に書いたプロジェクトでだけ動きます。
+
+```yaml
+stop_review: true          # すべて既定値で有効
+# または
+stop_review:
+  effort: xhigh            # low / medium / high / xhigh / max。既定 xhigh。false で effort は変えない
+  match: ['src/**', '**/*.go']   # 対象にする変更ファイル（省略時はすべて）
+  max_rounds: 1            # 見直し中の修正を続けて見直す回数の上限（既定 1）
+  subagents: true          # SubagentStop でも行う（既定 true）
+  prompt: |                # 指示の末尾に足すプロジェクト固有の確認事項
+    マイグレーションを足したら down も確認する。
+```
+
+- **いつ。** Stop / SubagentStop で、gate の `checks` フェーズと feedback の `stop_check` が通ったあと（どちらかが止めた回には出しません）。前回の見直し以降にそのセッション（サブエージェントならそのエージェント）が変更したファイルがあるときだけです。変更が無いターン（質問への回答など）では何もしません。
+- **何を返すか。** 停止を 1 回ブロックし（`decision: block`）、理由として手順を返します: まず Skill ツールで `feedback-gate:effort-<effort>` を呼んでそのターンの残りの effort を切り替え、変更ファイルの差分と周辺を実物で読み直し、依頼を満たしているか・ロジックや境界条件・呼び出し側やテスト、ドキュメントの更新漏れ・不要な変更の残り・実際に動かしたかを確かめ、問題があれば直し、無ければ確かめた内容を 1〜3 行で報告して止まる、というものです。末尾に変更ファイルの一覧（30 件まで）と `prompt` が付きます。
+- **effort の切り替え。** hook の出力にはセッションの effort を変える手段が無いので、同梱スキル（[`/feedback-gate:effort-<level>`](#feedback-gateeffort-level)）の frontmatter `effort` を使います。効くのは見直しのターンの残りだけで、セッションの設定は変わりません。スキルを呼ぶのはモデルなので、呼ばなかった場合や、スキルの `effort` を扱わない環境（Codex など）では effort は変わらず、見直しだけが行われます。
+- **変更ファイルの控え。** `changed_files` と同じタイミング（Edit / Write / MultiEdit と、Bash が書き換えたファイル）で `.claude/.gate-status/review_pending.<session>[--<agent>].txt` に足します。`changed_files` と違って gate が通っても消えず、見直しを出したときに消します。
+- **繰り返さない。** 見直しの途中の修正も控えに足されるので、次の Stop でまた見直しになります。これを `max_rounds` 回（`review_rounds.<session>[--<agent>].txt`）で打ち切ります。既定の 1 では、見直しは 1 ターンに 1 回で、その修正は（gate と `stop_check` は通したうえで）見直さずに停止を通します。回数は、見直すものが無かった Stop と打ち切った Stop で 0 に戻ります。
+- 状態ファイルは他と同じく SessionStart の `reset-gate`（`startup` / `clear`、または 24 時間超）が消します。見直しでブロックしたあと実際に止まった回には、`stop` 通知を出します。
 
 ### エージェント間の実行共有
 

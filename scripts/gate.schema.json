@@ -38,6 +38,47 @@
         "$ref": "#/definitions/sessionStartCommand"
       }
     },
+    "stop_review": {
+      "description": "Stop / SubagentStop で、gate の checks フェーズと feedback の stop_check が通ったあと、前回の見直し以降にこのセッション（サブエージェントならそのエージェント）が変更したファイルがあれば、停止を 1 回ブロックして同じモデル自身に作業内容を見直させる。reason の先頭で同梱スキル feedback-gate:effort-<effort> を呼ばせ、そのターンの残りの effort を切り替える。true は既定値で有効、false・省略は無効。",
+      "oneOf": [
+        { "type": "boolean" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "false で無効にする（設定を残したまま止めたいとき）。"
+            },
+            "effort": {
+              "oneOf": [{ "enum": ["low", "medium", "high", "xhigh", "max"] }, { "const": false }],
+              "default": "xhigh",
+              "description": "見直しの間に切り替える effort。モデルが対応していない値は、Claude Code がそれ以下で対応している最も高い値にする。false は effort を切り替えず、見直しだけ行う。環境変数 CLAUDE_CODE_EFFORT_LEVEL が設定されていると、そちらが優先される。"
+            },
+            "match": {
+              "description": "対象にする変更ファイルの glob（ルート相対。rules[].match と同じ書き方）。省略時はすべての変更ファイル。どれにも合わなければ見直しを行わない。",
+              "oneOf": [{ "type": "string", "minLength": 1 }, { "type": "array", "items": { "type": "string", "minLength": 1 } }]
+            },
+            "max_rounds": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "description": "見直しの途中で行った修正を、続けて何回まで再度見直させるか。1 なら見直しは 1 回で、その修正は見直さずに停止を通す。"
+            },
+            "prompt": {
+              "type": "string",
+              "description": "見直しの指示の末尾に足す、プロジェクト固有の確認事項。"
+            },
+            "subagents": {
+              "type": "boolean",
+              "default": true,
+              "description": "SubagentStop でも行うか。false ならメインのセッションの Stop だけ。"
+            }
+          }
+        }
+      ]
+    },
     "consistency_checks": {
       "type": "array",
       "description": "checks フェーズ（Stop/SubagentStop）で評価される、名前付きの整合性チェック定義集。match は持たない（match するのは rules 側）。無条件には実行されず、rules フェーズで実際にマッチした rule が run_checks で名前を参照したものだけが予約され、checks フェーズで実行される。PJ全体のビルド・テストなどを書く。複数 pkg のルールから同じ定義を参照でき、重複を避けられる。失敗すると停止をブロックする。",

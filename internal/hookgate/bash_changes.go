@@ -411,6 +411,8 @@ func bashDetect(io Io, projectDir string, gate bool, startedDirPath, raw string,
 			return bashNone
 		}
 	}
+	// stop_review 用（gate が通っても消えない一覧）
+	NotePendingReview(io, bashStateIDOf(payload), changed)
 	return BashChangeResult{Changed: changed, Recorded: recorded, Threshold: threshold, Gate: gate}
 }
 

@@ -35,6 +35,16 @@ bashEdit:
   header: "[feedback] Files rewritten by Bash violate feedback rules (the same checks as Edit / Write)."
   preEditAfter: "Note: this is a pre_edit rule, but with Bash the content cannot be known before it runs, so it was detected after the command (the file is already written; fix it to follow the rule)."
 
+stopReview:
+  header: "[stop-review] Before you stop, review the work of this turn yourself (round {{round}}/{{max}})."
+  effort: "0. First invoke the skill `feedback-gate:effort-{{effort}}` with the Skill tool to switch the effort of the rest of this turn to {{effort}} (where the skill is not available, skip this and think as carefully as you can)."
+  steps: |-
+    1. Re-read the diff of the changed files below and the code around it (look at the real files with git diff or Read, not from memory).
+    2. Check: does it do everything the user asked / are there logic errors, missed edge cases or missing error handling / are callers, tests and docs updated / is any debug code or change nobody asked for left in / did you actually run what can be run.
+    3. Fix what you find. If there is nothing, report in 1-3 lines what you checked and stop (do not repeat the same review).
+  files: "Changed files:"
+  more: "- ... and {{count}} more"
+
 stopCheck:
   checking: "[feedback-stop-check] checking: {{rule}} ({{file}})"
   gaveUp: "[feedback-stop-check] Blocked {{max}} times in a row. Giving up the loop; please check manually."

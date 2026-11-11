@@ -1,8 +1,9 @@
-// Stop hook: gate の checks フェーズ → feedback ルールの stop_check → 完了通知、の順に実行する。
+// Stop hook: gate の checks フェーズ → feedback ルールの stop_check → stop_review（自己確認）→ 完了通知、の順に実行する。
 import { feedbackStopCheck } from './feedback-stop-check.ts'
 import type { Io, ScriptResult } from './io.ts'
 import { notification } from './notification.ts'
 import type { Dict } from './pyutil.ts'
+import { stopReview } from './stop-review.ts'
 import { stopTestGate } from './stop-test-gate.ts'
 
 export async function allStop(io: Io, payload: Dict): Promise<ScriptResult> {
@@ -10,7 +11,7 @@ export async function allStop(io: Io, payload: Dict): Promise<ScriptResult> {
   let stderr = ''
   let reportConsumed = false
   // gate が 1 つでも止めたらそこで終了し、通知は出さない
-  for (const step of [() => stopTestGate(io, 'checks', payload), () => feedbackStopCheck(io, payload)]) {
+  for (const step of [() => stopTestGate(io, 'checks', payload), () => feedbackStopCheck(io, payload), () => stopReview(io, payload)]) {
     const r = await step()
     stdout += r.stdout
     stderr += r.stderr

@@ -24,8 +24,8 @@ The hooks are registered in `src/register.ts` (bundled into `hooks/register.js` 
 | PostToolUse (Bash) | `src/feedback-file-inject.ts` (heredoc targets), `src/bash-changes.ts`, `src/feedback-bash-edit.ts`, then `src/stop-test-gate.ts` (`rules`) | Adds the `files`-scoped rules matching the targets of plain heredoc writes (see [Files written by Bash](#files-written-by-bash)), then finds the files the command actually rewrote (git-modified or untracked files, and files of commits made during the command, whose mtime is at or after the command start; in the cwd's working tree and in each worktree under `.claude/worktrees/` whose path (`worktrees/<name>`) appears in the command; other worktrees are not looked at, so files another Claude Code session is editing there meanwhile are not taken for this command's changes), so writing with a heredoc, `python`, `sed -i` and the like does not skip the checks that Edit / Write get. Two things keep another session working in the *same* working tree apart (see [Several sessions in one working tree](#several-sessions-in-one-working-tree)): a command that only reads (`ls`, `cat`, `grep`, `rg`, `find`, `git log` / `git diff` / `git status` and the like, with no redirection to a file) is never looked at, and files another session already holds in its gate state (`changed_files` / `gate_passed` / `gate_failed` of another session) are left to that session. Each of those files is checked against the `post_edit` enforce entries as a whole file, like after Edit / Write, and against the `pre_edit` entries that can be judged afterwards (see below); the results of all files are merged into one block / warn. Then, only with `{.claude,.agents}/gate.yaml`, the files are recorded and the matching rules run if something was recorded. The feedback checks work without `gate.yaml`. Git history / working-tree operations (rebase / checkout / merge etc.) are never checked nor recorded. | Same (see below) |
 | PreToolUse (Agent / SendMessage), opt-in | `src/agent-launch-guard.ts` | Only when `agentLaunchGuard` is `true`: asks before sending instructions to a subagent, showing the full text. | Same (see below) |
 | Notification | `src/notification.ts` (`notify`) | Desktop notification when Claude waits for you (needs `terminal-notifier`, macOS). | Same (see below) |
-| Stop | `src/all-stop.ts` | Runs, in order: the gate `checks` phase (reruns the rules that failed and were not fixed, then the reserved consistency checks), `src/feedback-stop-check.ts`, then the `stop` notification. | Same (see below) |
-| SubagentStop | gate `checks` phase, `src/feedback-stop-check.ts`, then `src/subagent-report.ts` (`saveSubagentReport`) | Same gate and `stop_check` rules for subagents. The result is kept so it can be handed to the calling agent (see [Results of subagents](#results-of-subagents)). | Same (see below) |
+| Stop | `src/all-stop.ts` | Runs, in order: the gate `checks` phase (reruns the rules that failed and were not fixed, then the reserved consistency checks), `src/feedback-stop-check.ts`, `src/stop-review.ts` (the [stop_review](#stop_review) of `gate.yaml`, only when enabled), then the `stop` notification. | Same (see below) |
+| SubagentStop | gate `checks` phase, `src/feedback-stop-check.ts`, `src/stop-review.ts`, then `src/subagent-report.ts` (`saveSubagentReport`) | Same gate, `stop_check` rules and [stop_review](#stop_review) for subagents. The result is kept so it can be handed to the calling agent (see [Results of subagents](#results-of-subagents)). | Same (see below) |
 | PostToolUse (Agent) | `src/subagent-report.ts` (`subagentReport`) | Adds the gate / `stop_check` result of the subagent that just finished to the calling agent's context. | Same (see below) |
 
 ### Settings hooks for managed environments
@@ -174,7 +174,7 @@ The feedback rules are a table with one row per rule; opening a row shows the de
 
 ## Skills
 
-Three skills are bundled under `skills/`. Claude Code loads them with the plugin; invoke them as `/feedback-gate:<name>` or let Claude pick them up from their descriptions. Each is a `SKILL.md` with the procedure plus reference files it reads when needed; the hooks do not depend on them.
+Three skills, plus the `effort-<level>` skills that only switch the effort ([below](#feedback-gateeffort-level)), are bundled under `skills/`. Claude Code loads them with the plugin; invoke them as `/feedback-gate:<name>` or let Claude pick them up from their descriptions. Each is a `SKILL.md` with the procedure plus reference files it reads when needed; the hooks do not depend on them.
 
 ### `/feedback-gate:feedback`
 
@@ -203,6 +203,10 @@ It first reads what the project already runs instead of guessing: the manifests 
 ### `/feedback-gate:hook-list`
 
 Shows the same page as [`/hook-list`](#hook-list) by running `scripts/hook-list.sh` (argument: `--no-open`). Use it in managed environments where the mod's `/hook-list` is not available; Claude may also use it when asked which hooks, gate rules or feedback rules are registered in the project.
+
+### `/feedback-gate:effort-<level>`
+
+Five skills: `effort-low`, `effort-medium`, `effort-high`, `effort-xhigh` and `effort-max`. Their body is nearly empty; the `effort` key of the frontmatter switches the effort of the rest of the turn that invoked the skill (a Claude Code skill feature: a level the model does not support becomes the highest supported level at or below it, and the environment variable `CLAUDE_CODE_EFFORT_LEVEL` takes precedence when set). Hook output cannot change the session's effort, so [stop_review](#stop_review) has Claude invoke this skill from the block reason. You can also use it yourself, e.g. `/feedback-gate:effort-max find out why this test fails`.
 
 ## Install
 
@@ -291,6 +295,29 @@ session_start:
 - A failing or timed-out command never blocks the session: it is reported with its exit status and log path (`.claude/.gate-status/logs/<session>/<name>.<id>.log`) once on stderr and as a top-level `systemMessage` of the hook output (Claude Code does not show the stderr of an exit-0 hook), the hook still exits 0, and the other commands still run. A `timeout` above 600 is capped to 600; the SessionStart hook itself waits at most 600 s (`timeout: 600` in `hooks/hooks.json`) for the whole phase.
 - `background: true` starts the command detached (output goes to the log only, nothing is injected) and the hook does not wait for it.
 - No policy and no sharing: these commands are not deferred by dogwood and not shared between agents, because their output is needed now. Only the project root's `gate.yaml` is read.
+
+### stop_review
+
+<a id="stop_review"></a>Having the model check its own result improves accuracy, so this setting forces one "review what you changed" step right before stopping. It is off by default and only runs in projects whose `gate.yaml` enables it.
+
+```yaml
+stop_review: true          # enabled with all defaults
+# or
+stop_review:
+  effort: xhigh            # low / medium / high / xhigh / max. Default xhigh. false leaves the effort alone
+  match: ['src/**', '**/*.go']   # changed files to review (default: all)
+  max_rounds: 1            # how many times in a row the fixes made during a review are reviewed again (default 1)
+  subagents: true          # also on SubagentStop (default true)
+  prompt: |                # project-specific things to check, appended to the instructions
+    When you add a migration, check the down migration too.
+```
+
+- **When.** On Stop / SubagentStop, after the gate `checks` phase and the feedback `stop_check` passed (not on a stop one of them blocked), and only when this session (or, for a subagent, that agent) changed files since the last review. A turn that changed nothing (answering a question) is not touched.
+- **What it returns.** It blocks the stop once (`decision: block`) with these steps as the reason: first invoke `feedback-gate:effort-<effort>` with the Skill tool to switch the effort of the rest of the turn; re-read the diff of the changed files and the code around it from the real files; check that the request is fully met, logic and edge cases, callers / tests / docs that were not updated, leftover changes nobody asked for, and whether what can be run was run; fix what is found, or else report in 1-3 lines what was checked and stop. The list of changed files (up to 30) and `prompt` follow.
+- **Switching the effort.** Hook output has no way to change the session's effort, so the bundled skills ([`/feedback-gate:effort-<level>`](#feedback-gateeffort-level)) do it through their `effort` frontmatter. It lasts for the rest of the review turn only; the session setting is unchanged. The model is the one that invokes the skill, so when it does not, or where a skill's `effort` is not honored (Codex, for example), the effort stays as it was and only the review happens.
+- **The list of changed files.** Files are added to `.claude/.gate-status/review_pending.<session>[--<agent>].txt` at the same moments as `changed_files` (Edit / Write / MultiEdit, and the files a Bash command rewrote). Unlike `changed_files` it is not emptied when the gate passes; it is emptied when a review is issued.
+- **No loop.** Fixes made during the review are added to the list too, so the next Stop would ask for another review. That stops after `max_rounds` rounds (`review_rounds.<session>[--<agent>].txt`). With the default of 1 there is one review per turn, and its fixes go through (still checked by the gate and `stop_check`) without another review. The counter returns to 0 on a Stop with nothing to review and on the Stop that hit the limit.
+- The state files are removed by `reset-gate` on SessionStart like the others (`startup` / `clear`, or older than 24 hours). The Stop that finally goes through after a review sends the `stop` notification.
 
 ### Sharing runs between agents
 

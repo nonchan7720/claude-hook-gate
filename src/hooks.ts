@@ -13,7 +13,7 @@ import { feedbackInject } from './feedback-inject.ts'
 import { feedbackPostEdit } from './feedback-post-edit.ts'
 import { feedbackStopCheck } from './feedback-stop-check.ts'
 import { sessionStartGate } from './gate-session-start.ts'
-import type { Io, ScriptResult } from './io.ts'
+import { type Io, ok, type ScriptResult } from './io.ts'
 import { notification as desktopNotification } from './notification.ts'
 import { merge, type Outcome, toOutcome } from './outcome.ts'
 import type { Dict } from './pyutil.ts'
@@ -21,6 +21,7 @@ import { recordChanges } from './record-changes.ts'
 import { resetGate } from './reset-gate.ts'
 import { loadRules } from './rules-file.ts'
 import { loadSummary } from './running-registry.ts'
+import { stopReview } from './stop-review.ts'
 import { stopTestGate } from './stop-test-gate.ts'
 import { saveSubagentReport, subagentReport } from './subagent-report.ts'
 
@@ -152,7 +153,7 @@ export function postToolUseEdits(io: Io, sessionId: string, payloads: Dict[]): P
 export const notification = (io: Io, sessionId: string, payload: Dict): Promise<HookRun> =>
   runSteps(io, sessionId, 'Notification', [(i) => desktopNotification(i, 'notify', payload)])
 
-/** Stop: gate の checks フェーズ、feedback の stop_check、完了通知（src/all-stop.ts）。 */
+/** Stop: gate の checks フェーズ、feedback の stop_check、stop_review、完了通知（src/all-stop.ts）。 */
 export const stop = (io: Io, sessionId: string, payload: Dict): Promise<HookRun> => runSteps(io, sessionId, 'Stop', [(i) => allStop(i, payload)])
 
 /** SubagentStop: gate の checks フェーズと stop_check。結果は呼び出し元の PostToolUse(Agent) へ渡すために控える（src/subagent-report.ts）。 */
@@ -162,6 +163,8 @@ export function subagentStop(io: Io, sessionId: string, payload: Dict): Promise<
   return runSteps(io, sessionId, 'SubagentStop', [
     async (i) => (gate = await stopTestGate(i, 'checks', payload)),
     async (i) => (feedback = await feedbackStopCheck(i, payload)),
+    // gate と stop_check が通った回だけ、stop_review（自己確認）を行う。
+    async (i) => (gate?.exitCode === 0 && feedback?.exitCode === 0 ? stopReview(i, payload) : ok()),
     (i) => saveSubagentReport(i, payload, gate, feedback),
   ])
 }

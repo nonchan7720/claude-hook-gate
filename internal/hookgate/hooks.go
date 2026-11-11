@@ -273,7 +273,7 @@ func NotificationHook(io Io, sessionID string, payload Dict) HookRun {
 	return RunSteps(io, sessionID, "Notification", []Step{func(i Io) ScriptResult { return Notification(i, "notify", payload) }}, Outcome{})
 }
 
-// Stop: gate の checks フェーズ、feedback の stop_check、完了通知（all_stop.go）。
+// Stop: gate の checks フェーズ、feedback の stop_check、stop_review、完了通知（all_stop.go）。
 func Stop(io Io, sessionID string, payload Dict) HookRun {
 	return RunSteps(io, sessionID, "Stop", []Step{func(i Io) ScriptResult { return AllStop(i, payload) }}, Outcome{})
 }
@@ -291,6 +291,13 @@ func SubagentStop(io Io, sessionID string, payload Dict) HookRun {
 			r := FeedbackStopCheck(i, payload)
 			feedback = &r
 			return r
+		},
+		// gate と stop_check が通った回だけ、stop_review（自己確認）を行う。
+		func(i Io) ScriptResult {
+			if gate != nil && gate.ExitCode == 0 && feedback != nil && feedback.ExitCode == 0 {
+				return StopReview(i, payload)
+			}
+			return Ok("", "")
 		},
 		func(i Io) ScriptResult { return SaveSubagentReport(i, payload, gate, feedback) },
 	}, Outcome{})

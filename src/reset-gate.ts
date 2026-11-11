@@ -27,6 +27,8 @@ const STATE_FILES: ReadonlyArray<readonly [string, string]> = [
   ['feedback_gate_attempts', '.txt'],
   ['subagent_report', '.json'],
   ['summary', '.txt'],
+  ['review_pending', '.txt'],
+  ['review_rounds', '.txt'],
 ]
 const DAY_MS = 1440 * 60 * 1000
 

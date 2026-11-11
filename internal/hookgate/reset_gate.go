@@ -28,6 +28,8 @@ var fbStateFiles = []fbStateFile{
 	{"feedback_gate_attempts", ".txt"},
 	{"subagent_report", ".json"},
 	{"summary", ".txt"},
+	{"review_pending", ".txt"},
+	{"review_rounds", ".txt"},
 }
 
 const fbResetDayMs int64 = 1440 * 60 * 1000
