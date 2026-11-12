@@ -2,26 +2,51 @@
 
 [← README](../README.md) · [日本語](ja/security.md)
 
-What the plugin reads, runs, writes and decides, for reviewers and for anyone installing it.
+What this plugin reads, runs, writes and decides. The same holds for the Go binary used in managed environments.
 
-- **Network**: the plugin's own code sends nothing over the network; it has no HTTP client. Data can leave your machine only through the programs it starts on your behalf (below): the commands you write in `{.claude,.agents}/gate.yaml` and in the `check` of your feedback rules, which run as you, and the macOS desktop notification.
-- **Credentials**: it reads no tokens, keys or passwords, and needs none. The only environment variables it reads are `CLAUDE_FEEDBACK_DIR`, `DOGWOOD_BIN`, `FEEDBACK_GATE_LANG`, `HOME`, `LANG`, `LC_ALL`, `LC_MESSAGES`, `PATH`, `TERM_PROGRAM` and `__CFBundleIdentifier` (to find files, programs and the message language). Commands you put in `gate.yaml` or a rule's `check` run with your environment, like any command you run yourself.
-- **What it reads from the conversation**: the tool input of Bash / Edit / Write / MultiEdit calls (the command, the file path and the new text), to check them against your feedback rules and to know which files changed; the prompt and message of `Agent` / `SendMessage` calls, only when `agentLaunchGuard` is on, to show them in the confirmation; and the text of the Notification event, to put it in the desktop notification. It does not read the transcript.
-- **What it reads from disk**: your feedback rules (`~/{.claude,.agents}/feedback/*.md`, `<project>/{.claude,.agents}/feedback/*.md`), the rules file, `{.claude,.agents}/gate.yaml`, its own state files (below), the files Claude edited, and git's view of the working tree.
-- **Programs it starts**:
-  - `sh -c` with the commands in `{.claude,.agents}/gate.yaml` and the `check` of your feedback rules (written by you; the plugin does not ship any).
-  - `git` (`rev-parse`, `ls-files`, `diff`, `log`; read-only) to find the repository root and the files a Bash command changed.
-  - `sh`, `mkdir`, `mv`, `rm`, `rmdir`, `kill -0`, `sleep` for its own state files and locks under the directories listed below.
-  - `dogwood` (optional) to decide whether a gate command runs now.
-  - On macOS, for notifications: `osascript` (reads the name of the front window, so it does not notify about the project you are looking at) and `terminal-notifier` (shows the notification; clicking it runs `open -b <terminal app>` or `code -r <project>` to bring the window forward).
-- **Files it writes**:
-  - `<project>/{.claude,.agents}/.gate-status/`: gate state, command logs and locks (only when the project has `{.claude,.agents}/gate.yaml`).
-  - `~/{.claude,.agents}/feedback/`: `.violations.jsonl`, `.errors.jsonl`, `.count_state/`, `.ask_state/`, `.new_rule_state/`, `.bash_started/`, `.classic_seen/` (one empty marker per session; written by the mod's `classic.*` hooks, read by `scripts/hook.sh`).
-  - The `count:` line in the frontmatter of your feedback rule files, which are instructions Claude follows: rewritten when a rule is violated with `autoCount` on (turn it off in the plugin settings), and by `/correct apply`. Nothing else in those files is changed.
-  - It does not write settings, `CLAUDE.md`, build or start-up files, or hook configuration.
-- **Permission decisions** (PreToolUse): the hook only ever returns `deny` or `ask`, never `allow`, so it can make a call stricter but never skip your own permission check. It decides for Bash / Edit / Write / MultiEdit when one of your feedback rules matches (`deny` or `ask` by the rule's `count` / `severity`), and for `Agent` / `SendMessage` only when `agentLaunchGuard` is on (`ask`, showing the full text). In every other case it passes the event on unchanged. It never changes the permission mode, settings, agents or Remote Control.
-- **Context it adds**: on UserPromptSubmit it adds the rules file and your confirmed feedback rules (`count >= 3`) to the context. PostToolUse, Stop and SubagentStop give Claude the gate results and rule violations (as feedback or a block reason); PostToolUse(Agent) adds a finished subagent's results to the caller's context. When [stop_review](gate.md#stop_review) is enabled in `gate.yaml`, Stop / SubagentStop also return the review instructions as a block reason (they include the paths of the files the session changed and the text of `stop_review.prompt` from `gate.yaml`) and tell Claude to invoke a bundled `effort-<level>` skill. The `prompt` text reaches Claude as instructions, so review the `gate.yaml` of a repository you do not trust the same way you review its commands.
-- **Bundled skills and effort**: the `effort-<level>` skills only switch the effort (the amount of reasoning, which affects usage) of the rest of the turn that invoked them. They declare no `allowed-tools`, `model` or `hooks`, add no tools or permissions, and leave the session setting unchanged.
-- **Settings hooks**: `hooks/hooks.json` registers a `command` hook for each event, which runs `scripts/hook.sh` and then `feedback-gate claude <Event>` (the Go binary) with the event's JSON on stdin. It runs the same checks as the mod hooks and returns the same things (deny / ask, block, added context), so the points above apply to it too. It exits without doing anything when the mod's marker for the session exists, or when the binary is neither cached nor downloadable. It reads the plugin settings from the `CLAUDE_PLUGIN_OPTION_*` environment variables.
-- **Commands**: it registers `/correct` at session start, and its `command.run` hook answers only that command.
-- **Bundled files**: `hooks/register.js` is built from `src/` by `scripts/build.ts` and is not minified. The message texts (`locales/<lang>.yaml`) are split out as plain strings into `hooks/vendor/locales-<lang>.js` to keep `register.js` small. `hooks/vendor/yaml.js` and `hooks/vendor/i18next.js` are the npm packages [`yaml`](https://www.npmjs.com/package/yaml) and [`i18next`](https://www.npmjs.com/package/i18next) at the versions pinned in `package.json` / `bun.lock`, minified only to keep each file small. The getters, `Object.defineProperty` and promise checks (`typeof x.then === "function"`) that a scan reports are in these two libraries (yaml's document classes, i18next's async loading). The plugin's own code uses no `Proxy`, `eval` or `new Function`.
+## Network and credentials
+
+- The plugin itself sends nothing over the network. Data leaves the machine only through the commands you put in `gate.yaml` or in a rule's `check`.
+- The exception is downloading the binary in managed environments and Cowork (from the GitHub release, with a checksum check).
+- It reads no tokens, keys or passwords. The environment variables it reads only locate files and programs and pick the language (`HOME`, `PATH`, `LANG`, `CLAUDE_FEEDBACK_DIR`, `DOGWOOD_BIN`, `FEEDBACK_GATE_LANG`, ...).
+
+## What it reads
+
+| From | What |
+| --- | --- |
+| The conversation | The input of Bash / Edit / Write / MultiEdit calls (command, path, new content). With `agentLaunchGuard`, the text of Agent / SendMessage. The text of notifications. It does not read the transcript |
+| The disk | Rules, the shared rules file, `gate.yaml`, its own state files, the files Claude edited, and git's view of the working tree |
+
+## What it runs
+
+| Program | Purpose |
+| --- | --- |
+| `sh -c` | The commands in `gate.yaml` and the `check` of a rule (both written by you) |
+| `git` (read-only) | Finds the repository root and the files a Bash command changed |
+| `sh`, `mkdir`, `mv`, `rm`, `rmdir`, `kill -0`, `sleep` | Handle its own state files and locks |
+| `dogwood` (optional) | Decides whether a gate command runs now |
+| `osascript`, `terminal-notifier` (macOS) | Desktop notifications |
+
+## What it writes
+
+- `<project>/.claude/.gate-status/`: gate state, command logs, locks.
+- `~/.claude/feedback/`: the violation log, the error log, per-session state.
+- The `count:` line of a rule file (with `autoCount`, and on `/correct apply`). Nothing else in the file changes.
+- It writes no settings files, no `CLAUDE.md` and no hook configuration.
+
+## Decisions and context
+
+- **Permission decisions.** Only `deny` and `ask`, never `allow`. It can make a call stricter but cannot skip your own permission prompts. It does not change the permission mode or settings.
+- **Context it adds.** The shared rules file and the confirmed rules, gate results and rule violations, and the check results of subagents.
+- **`stop_review`.** When enabled, it returns review instructions that include the paths of the changed files and the `prompt` from `gate.yaml`. `prompt` reaches Claude as instructions.
+- **The `effort-<level>` skills.** They only switch the effort of the rest of the turn. They add no tools or permissions.
+
+## Untrusted repositories
+
+The commands in `gate.yaml` are run as written, and `stop_review.prompt` becomes instructions to Claude. Read `gate.yaml` and `.claude/feedback/` before you open a repository you do not trust.
+
+## Bundled files
+
+- `hooks/register.js` is the bundle built from `src/`; it is not minified.
+- `hooks/vendor/yaml.js` and `hooks/vendor/i18next.js` are the npm packages (versions pinned in `bun.lock`), minified.
+- The plugin's own code uses no `Proxy`, `eval` or `new Function`.

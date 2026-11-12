@@ -1,13 +1,44 @@
-# Settings hooks for managed environments
+# Managed environments
 
 [← README](../README.md) · [日本語](ja/managed-environments.md)
 
-Where an organization manages Claude Code (Team / Enterprise login, or managed settings), the built-in guard `cc-plugin-sec-default` runs first and passes every `classic.*` event over the plugins you install (`/plugin` shows "Its hooks on classic.SessionStart, ... do not run here"). None of the mod hooks in the [Hooks](hooks.md) table run there. A `command` hook in `hooks/hooks.json` (a settings hook) is not skipped by the guard, and it receives the same classic events with the same stdin JSON and the same return conventions (exit 2 blocks, `permissionDecision`, `decision: block`, `additionalContext`). So `hooks/hooks.json` registers a command hook for each of SessionStart, UserPromptSubmit, PreToolUse (`Bash|Edit|Write|MultiEdit|Agent|SendMessage`), PostToolUse (`Read|Bash|Edit|Write|MultiEdit|Agent|Task`), Notification, Stop and SubagentStop, and every row of the [Hooks](hooks.md) table behaves the same through it.
+Where an organization manages Claude Code (Team / Enterprise login, or managed settings), a built-in guard skips the plugin's function hooks, the mod (`/plugin` shows "Its hooks on classic.SessionStart, ... do not run here"). The mod does not run in Cowork either.
 
-- **How it runs.** Each hook is `bash "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh" <Event>`, which runs `feedback-gate claude <Event>`: a single Go binary (`cmd/feedback-gate`; the checks are in `internal/hookgate`) published on this repository's GitHub Releases. It reads the classic JSON from stdin, runs the same checks as the mod hooks, and prints the result the way a classic command hook does. PostToolUse, Stop and SubagentStop have a 600 s `timeout`, since a gate command can take long.
-- **Where the binary comes from.** `scripts/hook.sh` looks for it in this order: `FEEDBACK_GATE_BIN` (a path to an executable; for development and tests, and a way to skip the download); then `${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate`, where `<version>` is the `version` in `.claude-plugin/plugin.json`; otherwise it downloads `https://github.com/nonchan7720/claude-hook-gate/releases/download/v<version>/feedback-gate_<os>_<arch>.tar.gz` (`os`: `linux` / `darwin`, `arch`: `amd64` / `arm64`) together with `checksums.txt`, verifies the SHA-256 (`sha256sum` or `shasum`; without either it installs nothing, since it cannot verify), unpacks it and moves the binary into the cache atomically. `FEEDBACK_GATE_RELEASE_BASE_URL` replaces the `https://github.com/nonchan7720/claude-hook-gate/releases/download` part (a `file://` directory works too, which is what the tests use; it needs `curl`, since `wget` cannot read `file://`). So the binary always matches the installed plugin version. Several plugin versions can share the cache (for example the Claude Code plugin and the Codex plugin at different versions): a version directory is touched whenever its binary is used, and after a fresh install only the other version directories not used for more than 30 days are removed (and download work directories older than 60 minutes, left by a hook that was killed).
-- **First run.** The first hook after an install or an update (SessionStart) downloads the binary (a few MB) within that hook's timeout, once per version. To avoid that, point `FEEDBACK_GATE_BIN` at a prebuilt binary.
-- **Needs `curl` or `wget` on the first run.** If the binary is not cached yet and the download is impossible (neither `curl` nor `wget`, neither `sha256sum` nor `shasum`, no network, a checksum mismatch, an unsupported OS or CPU), the command hook does nothing (exit 0) and writes one line to stderr, `feedback-gate: could not install the feedback-gate v<version> binary (<reason>); the hook did nothing`, where `<reason>` is one of `no-download-tool`, `no-sha256-tool`, `download-failed`, `checksum-mismatch`, `unsupported-platform`, `bad-version`, `extract-failed`, `cache-unwritable`, `no-cache-dir`. Only the mod hooks work then, which means nothing runs where the guard skips them. Once the binary is cached, nothing else is needed.
-- **No double runs.** Every `classic.*` mod hook writes a marker file `~/{.claude,.agents}/feedback/.classic_seen/<session>` (`CLAUDE_FEEDBACK_DIR` is respected; `classic.Notification` rewrites it each time, and anything older than 24h is swept). `scripts/hook.sh` exits 0 when the marker of the session exists, so where the mod hooks run, the command hooks stay silent. Where the guard skips them, no marker is written and the command hooks do the work. (The mod hook and the command hook of one event start at the same time, so the first event of a session, SessionStart, can run both; its reset is idempotent, and from then on the marker is there.)
-- **Plugin settings.** `language`, `agentLaunchGuard`, `autoCount` and `rulesFile` reach the command hook as the environment variables `CLAUDE_PLUGIN_OPTION_language`, `CLAUDE_PLUGIN_OPTION_agentLaunchGuard` (`true` / `false`), `CLAUDE_PLUGIN_OPTION_autoCount` and `CLAUDE_PLUGIN_OPTION_rulesFile`, and `feedback-gate` reads them.
-- **Differences.** The status line while a check is evaluated (`$.ui.status`) is a feature of the mod and is not shown by the command hook. The band above the prompt (running gate commands) is drawn by the mod's `ui.render` from the same files under `.claude/.gate-status/running/`, which the command hook writes as usual; it is redrawn when the mod next renders.
+There the same checks are done by a Go binary, `feedback-gate`, started from the command hooks in `hooks/hooks.json`. Its decisions (deny, ask, block, added context) are the same as the mod's.
+
+## Getting the binary
+
+`scripts/hook.sh` looks for it in this order:
+
+1. The environment variable `FEEDBACK_GATE_BIN` (the path of an executable)
+2. The cache: `${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate`
+3. A download from the GitHub release (`feedback-gate_<os>_<arch>.tar.gz` and `checksums.txt`; the SHA-256 is checked before the binary goes into the cache)
+
+- The version always matches the installed plugin.
+- The download happens once per version, inside the first hook (SessionStart). Set `FEEDBACK_GATE_BIN` to avoid it.
+- Supported: linux and darwin, amd64 and arm64.
+- The cache of another version that has not been used for more than 30 days is removed automatically.
+- `FEEDBACK_GATE_RELEASE_BASE_URL` replaces the download location.
+
+## When it cannot be installed
+
+If there is no binary and it cannot be downloaded, the hook does nothing (your work is not stopped) and prints one line to stderr:
+
+```
+feedback-gate: could not install the feedback-gate v<version> binary (<reason>); the hook did nothing
+```
+
+| `<reason>` | Cause |
+| --- | --- |
+| `no-download-tool` | Neither `curl` nor `wget` |
+| `no-sha256-tool` | Neither `sha256sum` nor `shasum` |
+| `download-failed` | The network cannot be reached |
+| `checksum-mismatch` | The checksum does not match |
+| `unsupported-platform` | Unsupported OS or CPU |
+| `extract-failed`, `cache-unwritable`, `no-cache-dir`, `bad-version` | Extracting or writing to the cache failed |
+
+## Relation to the mod
+
+- **No double run.** Where the mod runs, it writes a per-session marker and the command hook does nothing when it sees it.
+- **Settings.** The plugin settings arrive as environment variables such as `CLAUDE_PLUGIN_OPTION_language`.
+- **Display.** The status-line text shown during an evaluation is a mod-only feature.

@@ -1,13 +1,44 @@
-# 組織管理の環境向けの settings hook
+# 組織管理の環境
 
 [← README](../../README_ja.md) · [English](../managed-environments.md)
 
-Claude Code を組織が管理している環境（Team / Enterprise ログイン、または managed settings）では、組み込みのガード `cc-plugin-sec-default` が最初に走り、`classic.*` イベントをインストールしたプラグインすべてに対して飛ばします（`/plugin` に「Its hooks on classic.SessionStart, ... do not run here」と出ます）。そこでは [フック](hooks.md) の表にある mod のフックが一つも走りません。`hooks/hooks.json` の `command` hook（settings hook）はガードに飛ばされず、同じ classic イベントを、同じ stdin の JSON と同じ戻り値の規約（exit 2 で block、`permissionDecision`、`decision: block`、`additionalContext`）で受け取ります。そこで `hooks/hooks.json` に、SessionStart・UserPromptSubmit・PreToolUse（`Bash|Edit|Write|MultiEdit|Agent|SendMessage`）・PostToolUse（`Read|Bash|Edit|Write|MultiEdit|Agent|Task`）・Notification・Stop・SubagentStop の command hook を登録しています。[フック](hooks.md) の表の各行は、command hook 経由でも同じ挙動です。
+Team / Enterprise ログインや managed settings の Claude Code では、組み込みのガードがプラグインの関数 hook（mod）を飛ばします（`/plugin` に「Its hooks on classic.SessionStart, ... do not run here」と出ます）。Cowork でも mod は動きません。
 
-- **動き方。** 各 hook は `bash "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh" <Event>` で、`scripts/hook.sh` が `feedback-gate claude <Event>` を実行します。これは、このリポジトリの GitHub Releases で配布している Go 製の単一バイナリ（`cmd/feedback-gate`。検査は `internal/hookgate`）です。stdin の classic の JSON を読み、mod のフックと同じ検査を行い、classic の command hook と同じ形で結果を出力します。PostToolUse・Stop・SubagentStop は gate のコマンドが長くなりうるので `timeout` を 600 秒にしています。
-- **バイナリの入手先。** `scripts/hook.sh` は次の順に探します。まず `FEEDBACK_GATE_BIN`（実行できるファイルのパス。開発とテスト用で、ダウンロードを避ける手段でもあります）、次に `${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate` です。`<version>` は `.claude-plugin/plugin.json` の `version` です。どちらにも無ければ、`https://github.com/nonchan7720/claude-hook-gate/releases/download/v<version>/feedback-gate_<os>_<arch>.tar.gz`（`os` は `linux` / `darwin`、`arch` は `amd64` / `arm64`）を `checksums.txt` と一緒にダウンロードし、SHA-256（`sha256sum` か `shasum`。どちらも無ければ検証できないので何も入れません）を照合し、展開して、バイナリをキャッシュへ原子的に移します。`FEEDBACK_GATE_RELEASE_BASE_URL` で `https://github.com/nonchan7720/claude-hook-gate/releases/download` の部分を差し替えられます（`file://` のディレクトリも使え、テストはこれを使います。`wget` は `file://` を読めないので `curl` が必要です）。バイナリは常にインストール済みのプラグインのバージョンと一致します。複数のバージョンが同じキャッシュを共有できます（たとえば Claude Code のプラグインと Codex のプラグインが別のバージョンのとき）。バージョンのディレクトリはそのバイナリを使うたびに touch し、新しくインストールしたあとは、30 日より長く使われていない別バージョンのディレクトリだけを削除します（フックが強制終了されて残った、60 分より古いダウンロード用の作業ディレクトリも片付けます）。
-- **初回の動作。** インストールや更新のあとの最初のフック（SessionStart）が、そのフックの `timeout` の中でバイナリ（数 MB）をダウンロードします。バージョンごとに 1 回だけです。避けたいときは、`FEEDBACK_GATE_BIN` でビルド済みのバイナリを指定してください。
-- **初回は `curl` か `wget` が必要です。** バイナリがまだキャッシュに無く、ダウンロードもできない場合（`curl` も `wget` も無い、`sha256sum` も `shasum` も無い、ネットワークが無い、チェックサムの不一致、未対応の OS や CPU）、command hook は何もしません（exit 0）。標準エラーには `feedback-gate: could not install the feedback-gate v<version> binary (<reason>); the hook did nothing` の 1 行だけを出します。`<reason>` は `no-download-tool`、`no-sha256-tool`、`download-failed`、`checksum-mismatch`、`unsupported-platform`、`bad-version`、`extract-failed`、`cache-unwritable`、`no-cache-dir` のどれかです。その場合に動くのは mod のフックだけなので、ガードに飛ばされる環境では何も動きません。バイナリがキャッシュに入れば、ほかに必要なものはありません。
-- **二重に動かさない。** `classic.*` の mod のフックは、走るたびにマーカーファイル `~/{.claude,.agents}/feedback/.classic_seen/<session>` を書きます（`CLAUDE_FEEDBACK_DIR` を尊重。`classic.Notification` では毎回書き直し、24 時間より古いものは掃除されます）。`scripts/hook.sh` はそのセッションのマーカーがあれば exit 0 で黙るので、mod のフックが走る環境では command hook は何もしません。ガードに飛ばされる環境ではマーカーが書かれず、command hook が処理します。（同じイベントの mod のフックと command hook は同時に始まるので、セッションの最初のイベントである SessionStart は両方が走りうる場合があります。リセットは何度走っても同じ結果になり、以降はマーカーがあります。）
-- **プラグイン設定。** `language`・`agentLaunchGuard`・`autoCount`・`rulesFile` は、環境変数 `CLAUDE_PLUGIN_OPTION_language`・`CLAUDE_PLUGIN_OPTION_agentLaunchGuard`（`true` / `false`）・`CLAUDE_PLUGIN_OPTION_autoCount`・`CLAUDE_PLUGIN_OPTION_rulesFile` として command hook に渡され、`feedback-gate` が読みます。
-- **違い。** 評価中にステータス行に出す表示（`$.ui.status`）は mod の機能で、command hook は出しません。プロンプトの上の帯（実行中の gate コマンド）は mod の `ui.render` が `.claude/.gate-status/running/` の同じファイルから描き、command hook もそのファイルを従来どおり書きます。描き直しは mod が次に描画するときです。
+そこで同じ検査を、`hooks/hooks.json` の command hook から Go 製バイナリ `feedback-gate` で行います。判定（拒否・確認・ブロック・追加するコンテキスト）は mod と同じです。
+
+## バイナリの入手
+
+`scripts/hook.sh` が次の順に探します。
+
+1. 環境変数 `FEEDBACK_GATE_BIN`（実行できるファイルのパス）
+2. キャッシュ: `${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate`
+3. GitHub のリリースからダウンロード（`feedback-gate_<os>_<arch>.tar.gz` と `checksums.txt`。SHA-256 を照合してからキャッシュに置く）
+
+- バージョンは常にインストール済みのプラグインと一致します。
+- ダウンロードはバージョンごとに 1 回で、最初のフック（SessionStart）の中で行います。避けたいときは `FEEDBACK_GATE_BIN` を指定します。
+- 対応するのは linux / darwin の amd64 / arm64 です。
+- 30 日より長く使われていない別バージョンのキャッシュは自動で消します。
+- `FEEDBACK_GATE_RELEASE_BASE_URL` でダウンロード元を差し替えられます。
+
+## 取得できないとき
+
+バイナリが無くダウンロードもできなければ、フックは何もせずに終わり（作業は止めません）、標準エラーに 1 行だけ出します。
+
+```
+feedback-gate: could not install the feedback-gate v<version> binary (<reason>); the hook did nothing
+```
+
+| `<reason>` | 原因 |
+| --- | --- |
+| `no-download-tool` | `curl` も `wget` も無い |
+| `no-sha256-tool` | `sha256sum` も `shasum` も無い |
+| `download-failed` | ネットワークに届かない |
+| `checksum-mismatch` | チェックサムが合わない |
+| `unsupported-platform` | 未対応の OS / CPU |
+| `extract-failed`、`cache-unwritable`、`no-cache-dir`、`bad-version` | 展開やキャッシュへの書き込みができない |
+
+## mod との関係
+
+- **二重に動かない。** mod が動く環境では、mod がセッションごとの印を書き、command hook はそれを見て何もしません。
+- **設定。** プラグイン設定は環境変数 `CLAUDE_PLUGIN_OPTION_language` などで渡されます。
+- **表示の違い。** 評価中にステータス行へ出す表示は mod だけの機能です。

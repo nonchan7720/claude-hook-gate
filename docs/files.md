@@ -2,15 +2,55 @@
 
 [← README](../README.md) · [日本語](ja/files.md)
 
-- `{.claude,.agents}/gate.yaml` in the project (opt-in: without it, the gate does nothing). The format is described by `scripts/gate.schema.json`; the default policy is in `scripts/dogwood/`.
-- `~/{.claude,.agents}/feedback/*.md`: feedback rules with frontmatter (`name`, `description`, `type`, `count`, optional `enforce`, `expires`, `projects`, `when_exists`, `files`, `exclude_files`). Rules with `count >= 3` are injected and enforced; those with `files` (globs relative to the project root) are injected when a matching file is read or edited instead of on every prompt (see [File-scoped rules](hooks.md#file-scoped-rules)). `expires` (`YYYY-MM-DD`, valid through the end of that day in UTC, or an ISO 8601 datetime) turns a rule off after that point; `projects` (a string or list of globs matched against the project directory's absolute path, a leading `~` expands to `HOME`) limits it to matching projects; `when_exists` (a string or list of globs relative to the project root) limits it to projects where at least one exists. A rule is active only when all three that are set are satisfied; an unparsable `expires` is ignored. These filters apply only to the merged global + project lookup, and an expired project rule also hides the global rule of the same name. Override the directory with `CLAUDE_FEEDBACK_DIR`. The project's `.claude/feedback/*.md` is read as well; when a project rule has the same `name` as a global one, the project rule takes precedence.
-- <a id="broken-rules"></a>Broken rules: one broken rule file never turns off the other rules. A file whose frontmatter is not valid YAML is skipped on its own. An `enforce` that is not a list (for example a forgotten `- `) is treated as empty, and an `enforce` entry that is not a mapping (`- ` with nothing after it), or whose `when` / `unless` is not a usable regular expression, is dropped on its own; the rest of the rule still works. An entry that throws while being evaluated is skipped the same way. Regular expressions are written in Python's `re` syntax and run as JavaScript: a leading `(?i)` / `(?s)` / `(?m)`, `(?P<name>...)`, `(?P=name)`, and `\A` / `\Z` / `\z` (start / end of the whole text, also under the multiline flag used by `pre_edit` / `post_edit`) are translated; a leading `(?x)` and anything JavaScript rejects (an inline flag in the middle such as `x(?i)y`, `a*+`, `(?#...)`, `(?P>name)`) make that entry invalid. Each broken file or entry is recorded once, with the file and the reason, in `~/.claude/feedback/.errors.jsonl` (next to `.violations.jsonl`), and is listed at the top of the context injected on every prompt (`The following rule files could not be read and are disabled: ...`) until it is fixed; `/correct` reports it as a `broken` proposal. Internal errors that the feedback hooks swallow so as not to stop your work are recorded in the same file.
-- `~/.claude/feedback/.inject_state/<session>[--<agent>].json`: the `files`-scoped rules already injected in the current turn (see [File-scoped rules](hooks.md#file-scoped-rules)). Removed on every prompt and at session start; entries older than 24 hours are swept.
-- The rules file, added to the context on every prompt. By default the bundled `rules/feedback_rules.md` (Japanese) or `rules/feedback_rules.en.md` (English) is used, by the [language of the messages](settings.md#language-of-the-messages). To replace it entirely, put your own file at the `rulesFile` path (default `~/.claude/feedback-gate/feedback_rules.md`, configurable in the plugin settings; a leading `~` is expanded). If that file exists it is used instead of the bundled one (never both, whatever the language). Avoid `~/.claude/rules/`: Claude Code loads that directory itself, so the rules would be injected twice.
+## Where things live
 
-The configuration directory is `.claude` or `.agents`: each file above is looked up in both, `.claude` first under Claude Code and `.agents` first under Codex. State files (changed files, attempt counters, command logs) are written under `.gate-status/` in the first of the two that exists (`.claude/` when neither does; `gate.yaml` stays directly under it). Symlinking one to the other is fine: a rule found through both paths is read once, and the state has one home. Add `.gate-status/` to the project's `.gitignore`. State files left by older versions directly under `.claude/` (and `.claude/hooks/logs/`) are removed automatically at session start. `bash_started.*.json` there (or under `~/.claude/feedback/.bash_started/` in a project without `gate.yaml`) holds the start time of the Bash command in flight, used to tell which files that command rewrote. It is keyed by the `tool_use_id` of the call, which both PreToolUse and PostToolUse carry, not by the session / agent id: the engine does not pass the agent id to `classic.PreToolUse`, while `classic.PostToolUse` has `agent_id`, so a key based on them would not match inside a subagent. Files left by commands that failed (no PostToolUse) are removed at the next Bash start once they are older than 2 hours.
+| File | Location |
+| --- | --- |
+| Gate definition | `<project>/.claude/gate.yaml` (without it the gate does nothing) |
+| Rules (all projects) | `~/.claude/feedback/*.md` (change with `CLAUDE_FEEDBACK_DIR`) |
+| Rules (this project) | `<project>/.claude/feedback/*.md`; wins over a global rule with the same `name` |
+| Shared rules file | `~/.claude/feedback-gate/feedback_rules.md` (the bundled one when missing) |
+| Gate state and logs | `<project>/.claude/.gate-status/` (add it to `.gitignore`) |
+| Violation and error logs | `~/.claude/feedback/.violations.jsonl`, `.errors.jsonl` |
 
-While gate commands run, a band above the prompt shows what is running, one item per line, e.g.
+`.agents` works in place of `.claude`. Claude Code looks in `.claude` first, Codex in `.agents` first. One may be a symlink to the other.
+
+## Rule frontmatter
+
+| Key | Meaning |
+| --- | --- |
+| `name`, `description`, `type` | Required. `type` is `feedback` |
+| `count` | Enforcement level; injected and enforced from 3 (see the [README](../README.md#2-turn-a-correction-into-a-rule)) |
+| `enforce` | The conditions a hook detects (`pre_bash` / `pre_edit` / `post_edit` / `stop_check`) |
+| `files`, `exclude_files` | Inject only when such a file is touched (see [File-scoped rules](hooks.md#file-scoped-rules)) |
+| `expires` | Inactive after this time (`YYYY-MM-DD` or ISO 8601) |
+| `projects` | Active only in matching projects (globs of absolute paths) |
+| `when_exists` | Active only in projects where a matching file exists |
+
+The full format and examples are in [`skills/feedback/reference.md`](../skills/feedback/reference.md) and [`examples.md`](../skills/feedback/examples.md).
+
+## Shared rules file
+
+The file added to every prompt. By default it is the bundled `rules/feedback_rules.md` (`rules/feedback_rules.en.md` for English). To replace it, put your own file at the `rulesFile` path; it is then used instead of the bundled one.
+
+Do not put it under `~/.claude/rules/`: Claude Code loads that directory itself, so the text would be added twice.
+
+## Broken rules
+
+One broken rule file never turns off the other rules.
+
+| Problem | Handling |
+| --- | --- |
+| The frontmatter is not valid YAML | Only that file is skipped |
+| `enforce` is not a list | `enforce` is treated as empty |
+| An `enforce` entry is invalid (not a mapping, unusable regex) | Only that entry is dropped |
+
+- The broken file and the reason are recorded in `.errors.jsonl`, and a list is shown at the top of every prompt until it is fixed. `/correct` reports it as `broken`.
+- Write regular expressions the way Python's `re` takes them. A leading `(?i)` / `(?s)` / `(?m)`, `(?P<name>...)` and `\A` / `\Z` work. A leading `(?x)`, inline flags in the middle, `a*+` and `(?#...)` do not.
+
+## The running display
+
+While gate commands run, a list appears above the prompt.
 
 ```
 [gate] running:
@@ -19,8 +59,6 @@ While gate commands run, a band above the prompt shows what is running, one item
   test $ bun run test (8s)
 ```
 
-Finished commands stay in start order with `✓` for success or `✗` for failure and their fixed duration; a running one shows `name $ cmd` and its elapsed seconds, refreshed every second. A multi-line command is folded to its first line, and a long one is cut with ` ...` so each line stays around 80 characters. The band yields to the engine's own band while a survey is shown.
-
-The band is shared by the agents of one session (the main agent and its subagents): their running commands are merged into one list, e.g. `  lint $ bun lint (3s)` and `  test $ bun test waiting (2s)` under `[gate] running:`. `waiting` marks a command that is waiting for the same run in another agent (see [Sharing runs between agents](gate.md#sharing-runs-between-agents)). The band disappears only when every agent of the session has finished; while another agent of the session is still running, its list stays. Other Claude Code sessions open on the same project (for example in another terminal) are not shown, and the one-line summary below is kept per session too.
-
-When everything has finished, the band goes away and the result of that round is left on the one-line status line instead, as counts only, e.g. `[gate] done: ✓ 5 / ✗ 1 (81.0s)` (`✗` is left out when nothing failed, `✓` when nothing passed; the seconds run from the first start to the last finish, not the sum, since checks run in parallel; check names are not shown, see the Stop hook output for which one failed. The status line cannot hold line breaks or long text, so it stays short). It stays until the next gate command starts running and the band appears again. Feedback checks still use the status line while they run: `[feedback-guard] evaluating: <rule>` or `[feedback-stop-check] checking: <rule> (<file>)`, cleared when the hook finishes.
+- It combines the main agent and the subagents of one session. `waiting` marks a command that waits for the same run in another agent (see [Sharing runs between agents](gate.md#sharing-runs-between-agents)).
+- When everything has finished the list goes away and `[gate] done: ✓ 5 / ✗ 1 (81.0s)` stays in the status line. The Stop hook output says which one failed.
+- While a rule is evaluated, the status line shows `[feedback-guard] evaluating: <rule>` and the like.
