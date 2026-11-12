@@ -6,7 +6,7 @@ A Claude Code plugin that keeps Claude from repeating a mistake you already corr
 
 - **Feedback rules**: a correction you gave once is kept as a Markdown rule and injected into every prompt. A hook stops the commands and edits that break it.
 - **Quality gate**: the lint and tests you list in the project's `gate.yaml` run after each edit and when Claude stops. Claude cannot stop while they fail.
-- **Review before stopping** (optional): before stopping, Claude reviews the files it changed, at a higher effort.
+- **Review before stopping** (optional): before stopping, Claude reviews the files it changed. The effort (depth of reasoning) is raised for that review only.
 - **Notifications**: a desktop notification when Claude waits for you and when it is done (macOS).
 
 Besides Claude Code it runs in [Codex](plugins/codex/README.md) and Claude Cowork, with the same rules and the same `gate.yaml`.
@@ -60,7 +60,7 @@ After correcting Claude, ask for:
 
 It turns the correction into a general rule and saves it in `~/.claude/feedback/` (all projects) or `<project>/.claude/feedback/` (that project only). A rule is a file like this:
 
-```markdown
+```
 ---
 name: no_force_push
 description: Never force-push; rewrite history only when the user asks for it.
@@ -83,13 +83,27 @@ Do not force-push a branch. Add commits instead.
 | 3-4 (confirmed) | yes | ask | block |
 | 5 or more | yes | deny | block |
 
-`enforce` has four events: `pre_bash` (before a command runs), `pre_edit` (before a write), `post_edit` (the whole file after an edit) and `stop_check` (the changed files on stop). The format and examples are in [`skills/feedback/reference.md`](skills/feedback/reference.md) and [`examples.md`](skills/feedback/examples.md).
+`enforce` holds the conditions a hook should detect.
+
+| `event` | What is checked |
+| --- | --- |
+| `pre_bash` | The command about to run |
+| `pre_edit` | The content about to be written |
+| `post_edit` | The whole file after an edit |
+| `stop_check` | The changed files when Claude stops |
+
+The format and examples are in [`skills/feedback/reference.md`](skills/feedback/reference.md) and [`examples.md`](skills/feedback/examples.md).
 
 ## What you see while it runs
 
 - While gate commands run, a `[gate] running:` list appears above the prompt. When they finish, `[gate] done: ✓ 5 / ✗ 1 (81.0s)` stays in the status line.
 - When the gate fails, Claude gets the failure and keeps fixing (it gives up after 5 failures in a row). When everything passes, Claude gets a summary and then stops.
 - When a rule is broken, the call is warned about, asked about or denied according to `count`, and the rule's `message` goes back to Claude as the reason.
+
+  ```
+  no_force_push (count: 5): Do not force-push. Push a new commit, or ask the user first.
+  ```
+
 - With `stop_review` enabled, a `[stop-review]` instruction appears once right before stopping, and Claude reviews its changes before it stops.
 
 ## Commands and skills
@@ -119,10 +133,16 @@ Details: [Settings](docs/settings.md).
 
 ## Where it runs
 
-- **Claude Code**: nothing else to install.
-- **Managed Claude Code (Team / Enterprise) and Claude Cowork**: the plugin's function hooks do not run there, so a Go binary, `feedback-gate`, that performs the same checks is downloaded from the GitHub release on first use. It needs `bash` and `curl` or `wget`. See [Managed environments](docs/managed-environments.md) and [Cowork](docs/install.md#claude-cowork).
-- **Codex**: see the [Codex plugin README](plugins/codex/README.md).
-- **Optional tools**: `terminal-notifier` (notifications on macOS) and `dogwood` (decides whether a gate command runs now). See [Requirements](docs/install.md#requirements).
+| Environment | Needs | Details |
+| --- | --- | --- |
+| Claude Code | nothing | |
+| Managed Claude Code (Team / Enterprise) | `bash`, and `curl` or `wget` | [Managed environments](docs/managed-environments.md) |
+| Claude Cowork | same | [Cowork](docs/install.md#claude-cowork) |
+| Codex | same | [Codex plugin README](plugins/codex/README.md) |
+
+Outside plain Claude Code, a Go binary, `feedback-gate`, that performs the same checks is downloaded from the GitHub release on first use; that is what the tools above are for.
+
+Optional: `terminal-notifier` (notifications on macOS) and `dogwood` (decides whether a gate command runs now). See [Requirements](docs/install.md#requirements).
 
 ## Security and permissions
 
@@ -139,7 +159,7 @@ The full list of what it reads, runs and writes is in [Security and permissions]
 | --- | --- |
 | [Hooks](docs/hooks.md) | What runs on each event, files written by Bash, file-scoped rules, results of subagents |
 | [gate.yaml phases and behavior](docs/gate.md) | `session_start`, `stop_review`, sharing runs between agents, failures and the success report |
-| [What it reads](docs/files.md) | Where rules and state files live, broken rules, the running display |
+| [Rules and files](docs/files.md) | Where rules and state files live, the rule format, broken rules, the running display |
 | [Commands and skills](docs/commands-and-skills.md) | `/correct`, `/hook-list`, the bundled skills |
 | [Settings](docs/settings.md) | Agent launch guard, automatic count increase, language |
 | [Install](docs/install.md) | Codex, Claude Cowork, requirements |

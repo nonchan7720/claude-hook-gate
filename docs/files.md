@@ -1,4 +1,4 @@
-# What it reads
+# Rules and files
 
 [← README](../README.md) · [日本語](ja/files.md)
 

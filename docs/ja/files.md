@@ -1,4 +1,4 @@
-# 読み込むもの
+# ルールとファイル
 
 [← README](../../README_ja.md) · [English](../files.md)
 

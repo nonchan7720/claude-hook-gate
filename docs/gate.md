@@ -9,7 +9,7 @@ When each phase of `gate.yaml` runs and what a failure does. Every key is listed
 | `rules` | Right after a file is edited; every rule whose `match` hits | The turn goes on. Rerun when Claude stops; a rule that still fails blocks the stop |
 | `consistency_checks` | When Claude stops; only the ones a matched rule named in `run_checks` | Claude cannot stop until it is fixed (gives up after 5 in a row) |
 | `session_start` | When a session starts | The session is not stopped |
-| `stop_review` | When Claude stops, after the checks above passed | (Runs no command; asks for one review) |
+| `stop_review` | When Claude stops, after the checks above passed | Cannot fail (it runs no command and only asks for one review) |
 
 Commands get the files concerned in the environment variable `CLAUDE_GATE_FILES` (for example `rubocop $CLAUDE_GATE_FILES`). The default timeout is 300 seconds.
 
@@ -64,7 +64,10 @@ stop_review:
 ```
 
 - **When.** On stop, after the gate and `stop_check` passed, and only if files were changed since the last review. A turn that only answered a question is not touched.
-- **What it asks for.** It blocks the stop once and returns the list of changed files and the steps: re-read the diff from the real files; check that the request is met, the logic, tests and docs that were not updated, leftover changes, and whether it was actually run; then fix, or report briefly what was checked and stop.
+- **What it asks for.** It blocks the stop once and returns the list of changed files and these steps:
+  1. Re-read the diff of the changed files from the real files, not from memory.
+  2. Check that the request is met, the logic, tests and docs that were not updated, leftover changes, and whether it was actually run.
+  3. Fix what is found. Otherwise report briefly what was checked and stop.
 - **Switching the effort.** A hook cannot change the effort itself, so the first step has Claude invoke the bundled skill [`effort-<level>`](commands-and-skills.md#feedback-gateeffort-level). It lasts for the rest of that turn. When Claude does not invoke it, or where a skill's `effort` is not honored (Codex, for example), the effort stays as it was and only the review happens.
 - **No loop.** Fixes made during a review are reviewed again at most `max_rounds` times. With the default of 1 there is one review per turn.
 - **Untrusted repositories.** `max_rounds` is capped at 5 and `prompt` at 2000 characters. `prompt` is printed under a heading that names `gate.yaml` as its source.
@@ -89,9 +92,9 @@ max_parallel: 2            # false: no limit
 rules:
   - match: ['**/*.go']
     run:
-      - { cmd: "go test ./...", name: test, files: false }   # runs the whole project whatever the file list
-      - { cmd: "bun test", name: unit, share: false }        # never shared, never waits
+      - { cmd: "go test ./...", name: test, files: false }
+      - { cmd: "bun test", name: unit, share: false }
 ```
 
-- `files: false`: shared even when the file lists differ.
-- `share: false`: never shared; always runs at once.
+- `files: false`: for a command that runs the whole project whatever the file list. It is shared even when the file lists differ.
+- `share: false`: never shared and never waits; always runs at once.

@@ -9,7 +9,7 @@
 | `language` | `auto` | メッセージの言語 |
 | `autoCount` | `true` | 違反を検出したらルールの `count` を 1 上げる |
 | `agentLaunchGuard` | `false` | サブエージェントへ指示を送る前に確認する |
-| `rulesFile` | `~/.claude/feedback-gate/feedback_rules.md` | 毎回注入する共通ルールファイル（[読み込むもの](files.md#共通ルールファイル)） |
+| `rulesFile` | `~/.claude/feedback-gate/feedback_rules.md` | 毎回注入する共通ルールファイル（[共通ルールファイル](files.md#共通ルールファイル)） |
 
 ## エージェント起動ガード
 

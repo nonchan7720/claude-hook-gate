@@ -9,7 +9,7 @@ Set them on the `/plugin` install screen, or later in `/config`.
 | `language` | `auto` | Language of the messages |
 | `autoCount` | `true` | Raise a rule's `count` by 1 when a violation is detected |
 | `agentLaunchGuard` | `false` | Ask before sending instructions to a subagent |
-| `rulesFile` | `~/.claude/feedback-gate/feedback_rules.md` | The shared rules file injected into every prompt (see [What it reads](files.md#shared-rules-file)) |
+| `rulesFile` | `~/.claude/feedback-gate/feedback_rules.md` | The shared rules file injected into every prompt (see [Shared rules file](files.md#shared-rules-file)) |
 
 ## Agent launch guard
 

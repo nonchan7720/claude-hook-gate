@@ -6,7 +6,7 @@ Claude Code に「同じ指摘を繰り返させない」「検証を通さず�
 
 - **フィードバックルール**: 一度伝えた指摘を Markdown のルールとして残し、毎回のプロンプトに注入します。違反するコマンドや編集は hook が止めます。
 - **品質ゲート**: プロジェクトの `gate.yaml` に書いた lint・テストを、ファイルの編集後と停止時に実行します。失敗している間は Claude を止めさせません。
-- **停止前の見直し**（任意）: 止まる前に、変更したファイルを Claude 自身に高い effort で見直させます。
+- **停止前の見直し**（任意）: 止まる前に、変更したファイルを Claude 自身に見直させます。そのあいだだけ effort（推論の深さ）を上げます。
 - **通知**: 確認待ちと完了をデスクトップ通知で知らせます（macOS）。
 
 Claude Code のほか、[Codex](plugins/codex/README_ja.md) と Claude Cowork でも同じルールと `gate.yaml` で動きます。
@@ -60,7 +60,7 @@ Claude に指摘したあと、こう頼みます。
 
 指摘を抽象的なルールに直し、`~/.claude/feedback/`（全プロジェクト）か `<project>/.claude/feedback/`（そのプロジェクトだけ）に保存します。ルールはこういうファイルです。
 
-```markdown
+```
 ---
 name: no_force_push
 description: force push をしない。履歴の書き換えはユーザーが明示したときだけ。
@@ -83,13 +83,27 @@ enforce:
 | 3〜4（確定） | する | 確認を求める | ブロック |
 | 5 以上 | する | 拒否 | ブロック |
 
-`enforce` は 4 つのタイミングで書けます: `pre_bash`（コマンドの実行前）、`pre_edit`（書き込む前）、`post_edit`（編集後のファイル全体）、`stop_check`（停止時の変更ファイル）。書式と例は [`skills/feedback/reference.md`](skills/feedback/reference.md) と [`examples.md`](skills/feedback/examples.md) にあります。
+`enforce` には、hook に検知させる条件を書きます。
+
+| `event` | 検査するもの |
+| --- | --- |
+| `pre_bash` | 実行しようとしているコマンド |
+| `pre_edit` | 書き込もうとしている内容 |
+| `post_edit` | 編集したあとのファイル全体 |
+| `stop_check` | 止まるときの変更ファイル |
+
+書式と例は [`skills/feedback/reference.md`](skills/feedback/reference.md) と [`examples.md`](skills/feedback/examples.md) にあります。
 
 ## 動いているときに見えるもの
 
 - ゲートのコマンドが走っている間、プロンプトの上に `[gate] 実行中:` の一覧が出ます。終わると `[gate] 完了: ✓ 5 / ✗ 1 (81.0s)` が残ります。
 - ゲートが失敗すると、Claude は失敗の内容を受け取って直し続けます（5 回連続で失敗したら打ち切り）。すべて通ると、結果の要約を受け取ってから止まります。
 - ルールに違反すると、`count` に応じて警告・確認・拒否になり、理由としてルールの `message` が Claude に返ります。
+
+  ```
+  no_force_push (count: 5): force push はしない。新しいコミットを積むか、先にユーザーに確認する。
+  ```
+
 - `stop_review` を有効にすると、止まる直前に `[stop-review]` の指示が 1 回出て、Claude が変更を見直してから止まります。
 
 ## コマンドとスキル
@@ -119,10 +133,16 @@ enforce:
 
 ## 動作環境
 
-- **Claude Code**: 追加で入れるものはありません。
-- **組織管理の Claude Code（Team / Enterprise）・Claude Cowork**: プラグインの関数 hook が動かないため、同じ検査を行う Go 製バイナリ `feedback-gate` を初回に GitHub のリリースから取得します。`bash` と `curl` か `wget` が必要です。[組織管理の環境](docs/ja/managed-environments.md)、[Cowork](docs/ja/install.md#claude-cowork)
-- **Codex**: [Codex プラグインの README](plugins/codex/README_ja.md)
-- **任意のツール**: `terminal-notifier`（macOS の通知）、`dogwood`（ゲートのコマンドを今走らせるかの判定）。[前提](docs/ja/install.md#前提)
+| 環境 | 必要なもの | 詳細 |
+| --- | --- | --- |
+| Claude Code | なし | |
+| 組織管理の Claude Code（Team / Enterprise） | `bash` と、`curl` か `wget` | [組織管理の環境](docs/ja/managed-environments.md) |
+| Claude Cowork | 同上 | [Cowork](docs/ja/install.md#claude-cowork) |
+| Codex | 同上 | [Codex プラグインの README](plugins/codex/README_ja.md) |
+
+素の Claude Code 以外では、同じ検査を行う Go 製バイナリ `feedback-gate` を、初回に GitHub のリリースから取得します。そのために上のツールが要ります。
+
+任意で、`terminal-notifier`（macOS の通知）と `dogwood`（ゲートのコマンドを今走らせるかの判定）を使えます（[前提](docs/ja/install.md#前提)）。
 
 ## セキュリティと権限
 
@@ -139,7 +159,7 @@ enforce:
 | --- | --- |
 | [フック](docs/ja/hooks.md) | イベントごとに何が動くか、Bash で書いたファイルの扱い、ファイル種別スコープのルール、サブエージェントの結果 |
 | [gate.yaml のフェーズと挙動](docs/ja/gate.md) | `session_start`、`stop_review`、エージェント間の実行共有、失敗と成功報告 |
-| [読み込むもの](docs/ja/files.md) | ルールと状態ファイルの置き場所、壊れたルールの扱い、実行中の表示 |
+| [ルールとファイル](docs/ja/files.md) | ルールと状態ファイルの置き場所、ルールの書式、壊れたルールの扱い、実行中の表示 |
 | [コマンドとスキル](docs/ja/commands-and-skills.md) | `/correct`、`/hook-list`、同梱スキル |
 | [設定](docs/ja/settings.md) | エージェント起動ガード、`count` の自動引き上げ、言語 |
 | [インストール](docs/ja/install.md) | Codex、Claude Cowork、前提 |
