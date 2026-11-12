@@ -1983,14 +1983,16 @@ var stateIdOf = (payload) => {
 var pendingPath = (io, stateId) => join(gateStatusDir(io), `review_pending.${stateId}.txt`);
 var roundsPath = (io, stateId) => join(gateStatusDir(io), `review_rounds.${stateId}.txt`);
 async function notePendingReview(io, stateId, paths) {
-  const memo = pendingPath(io, stateId);
-  const existing = await io.readFile(memo) ?? "";
-  const have = new Set(existing.split(`
+  try {
+    const memo = pendingPath(io, stateId);
+    const existing = await io.readFile(memo) ?? "";
+    const have = new Set(existing.split(`
 `));
-  const added = paths.filter((p) => p !== "" && !have.has(p));
-  if (added.length > 0)
-    await io.writeFile(memo, `${existing}${[...new Set(added)].map((p) => `${p}
+    const added = paths.filter((p) => p !== "" && !have.has(p));
+    if (added.length > 0)
+      await io.writeFile(memo, `${existing}${[...new Set(added)].map((p) => `${p}
 `).join("")}`);
+  } catch {}
 }
 async function loadConfig(io, path) {
   const text = await io.readFile(path);
@@ -2030,7 +2032,8 @@ async function main2(io, payload) {
     if (!labels.includes(label))
       labels.push(label);
   }
-  const done = Number.parseInt((await io.readFile(roundsFile) ?? "").trim(), 10) || 0;
+  const kept = payload.stop_hook_active === true ? Number.parseInt((await io.readFile(roundsFile) ?? "").trim(), 10) : 0;
+  const done = Number.isInteger(kept) && kept > 0 ? kept : 0;
   if (labels.length === 0 || done >= cfg.maxRounds) {
     await clear();
     return done > 0 ? { ...ok(), reportConsumed: true } : ok();
