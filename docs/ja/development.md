@@ -51,7 +51,7 @@ bun run validate:plugin  # claude plugin validate . --strict
 
 ## リリース
 
-バージョンは [release-please](https://github.com/googleapis/release-please) で管理します。コミットメッセージと PR タイトルは [Conventional Commits](https://www.conventionalcommits.org/ja/)（`feat:`、`fix:`、`docs:`、`chore:` など）で書いてください。
+バージョンは [release-please](https://github.com/googleapis/release-please) で管理します。コミットメッセージと PR タイトルは [Conventional Commits](https://www.conventionalcommits.org/ja/) で書いてください。接頭辞は `feat:`、`fix:`、`docs:`、`chore:` などです。
 
 1. `main` への push ごとに、リリース PR が作成・更新されます（バージョンと `CHANGELOG.md`）。
 2. それをマージすると、タグ `vX.Y.Z` と GitHub のリリースが作られます。

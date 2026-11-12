@@ -66,16 +66,4 @@ Bash の変更検出は更新時刻しか見ないので、同じ作業ツリー
 
 バックグラウンドで起動したサブエージェントの結果は渡されません。
 
-## 流れ
-
-```mermaid
-flowchart LR
-  P[UserPromptSubmit] --> I[ルールを注入]
-  T[PreToolUse] --> G[pre_bash / pre_edit を評価]
-  E[PostToolUse: 編集 / Bash] --> R[変更を記録]
-  R --> PE[post_edit を評価]
-  PE --> S[gate.yaml の rules を実行]
-  X[Stop / SubagentStop] --> C[停止時チェック]
-  C --> F[stop_check]
-  F --> V[stop_review]
-```
+全体の流れは [README のシーケンス図](../../README_ja.md#動きの流れ) にあります。

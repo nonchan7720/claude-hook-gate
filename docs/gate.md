@@ -11,6 +11,24 @@ When each phase of `gate.yaml` runs and what a failure does. Every key is listed
 | `session_start` | When a session starts | The session is not stopped |
 | `stop_review` | When Claude stops, after the checks above passed | Cannot fail (it runs no command and only asks for one review) |
 
+```mermaid
+sequenceDiagram
+    participant C as Claude
+    participant H as feedback-gate
+    C->>H: edited a file
+    H->>H: runs the rules whose match hits
+    H-->>C: the result (a failure does not stop the turn)
+    C->>H: tries to stop
+    H->>H: reruns the failed rules and runs consistency_checks
+    alt something failed
+        H-->>C: block: the failed commands and their log paths
+        C->>H: fixes it and tries to stop again
+    else everything passed
+        H-->>C: block (once): a summary of the result
+        C->>C: reports the result and stops
+    end
+```
+
 Commands get the files concerned in the environment variable `CLAUDE_GATE_FILES` (for example `rubocop $CLAUDE_GATE_FILES`). The default timeout is 300 seconds.
 
 ## When something fails
@@ -51,6 +69,28 @@ session_start:
 
 Right before stopping, Claude reviews the files it changed. Off by default.
 
+```mermaid
+sequenceDiagram
+    participant C as Claude
+    participant H as feedback-gate
+    C->>H: tries to stop
+    H->>H: runs the gate and stop_check (passed)
+    Note over H: files were changed since the last review
+    H-->>C: block: [stop-review] the changed files and the steps
+    C->>C: invokes the effort skill (the effort switches)
+    C->>C: re-reads the diff from the real files and checks it
+    alt something is wrong
+        C->>C: fixes it
+    else nothing wrong
+        C->>C: reports briefly what was checked
+    end
+    C->>H: tries to stop again
+    H->>H: reruns the gate if files were fixed
+    H-->>C: lets it stop (at most max_rounds reviews)
+```
+
+A turn that changed no file (one that only answered a question, for example) is not touched.
+
 ```yaml
 stop_review: true          # enabled with all defaults
 # or
@@ -63,8 +103,7 @@ stop_review:
     When you add a migration, check the down migration too.
 ```
 
-- **When.** On stop, after the gate and `stop_check` passed, and only if files were changed since the last review. A turn that only answered a question is not touched.
-- **What it asks for.** It blocks the stop once and returns the list of changed files and these steps:
+- **The review steps.** Claude is given three steps:
   1. Re-read the diff of the changed files from the real files, not from memory.
   2. Check that the request is met, the logic, tests and docs that were not updated, leftover changes, and whether it was actually run.
   3. Fix what is found. Otherwise report briefly what was checked and stop.

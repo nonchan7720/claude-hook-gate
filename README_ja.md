@@ -94,6 +94,35 @@ enforce:
 
 書式と例は [`skills/feedback/reference.md`](skills/feedback/reference.md) と [`examples.md`](skills/feedback/examples.md) にあります。
 
+## 動きの流れ
+
+```mermaid
+sequenceDiagram
+    actor U as あなた
+    participant C as Claude
+    participant H as feedback-gate
+    U->>C: 依頼する
+    H-->>C: 確定したルールを注入
+    C->>H: コマンドを実行・ファイルを編集しようとする
+    alt ルールに違反
+        H-->>C: 拒否・確認・警告（ルールの message）
+    else 違反なし
+        H-->>C: 通す
+    end
+    C->>H: ファイルを編集した
+    H-->>C: rules の結果（lint など）
+    loop 停止時のチェックが通るまで
+        C->>H: 止まろうとする
+        H->>H: 失敗した rules の再実行と consistency_checks
+        H-->>C: 失敗ならブロック（失敗したコマンドとログ）
+    end
+    H-->>C: すべて成功: 結果の要約（1 回だけブロック）
+    opt stop_review が有効
+        H-->>C: 変更を見直すよう指示（1 回）
+    end
+    C->>U: 結果を報告して止まる
+```
+
 ## 動いているときに見えるもの
 
 - ゲートのコマンドが走っている間、プロンプトの上に `[gate] 実行中:` の一覧が出ます。終わると `[gate] 完了: ✓ 5 / ✗ 1 (81.0s)` が残ります。

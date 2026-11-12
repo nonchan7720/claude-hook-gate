@@ -16,6 +16,8 @@ Counts the rules and the violation log (`~/.claude/feedback/.violations.jsonl`) 
 | `--min` | The smallest number of violations that produces a proposal (default `2`) |
 | `apply` | Write the `bump` proposals into the rule files. Without it nothing is changed |
 
+It makes five kinds of proposal.
+
 | Proposal | When | What |
 | --- | --- | --- |
 | `broken` | A rule file cannot be read, or an `enforce` entry is invalid | How to fix it (see [Broken rules](files.md#broken-rules)) |

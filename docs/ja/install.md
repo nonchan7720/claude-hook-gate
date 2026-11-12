@@ -14,10 +14,10 @@
 ## Codex
 
 ```
-codex plugin marketplace add nonchan7720/claude-hook-gate
+gh api repos/nonchan7720/claude-hook-gate/contents/plugins/codex/scripts/setup.sh -H "Accept: application/vnd.github.raw" | bash
 ```
 
-続けて `/plugins` から `feedback-gate` を入れ、`install-hooks.sh` を 1 回実行し、`/hooks` でフックを信頼します。手順の詳細と Claude Code との違いは [Codex プラグインの README](../../plugins/codex/README_ja.md) にあります。
+この 1 行でプラグインとフックが入ります。そのあと Codex を起動し、`/hooks` でフックを信頼します。更新の方法、うまく動かないときの対処、Claude Code との違いは [Codex プラグインの README](../../plugins/codex/README_ja.md) にあります。
 
 - ルールと `gate.yaml` は Claude Code と共通です。Codex は `.agents/` を先に、次に `.claude/` を見ます。
 - Codex のサンドボックスは `.agents/` と `.codex/` への書き込みを止めるので、Codex に育てさせるルールは `.claude/` に置きます。

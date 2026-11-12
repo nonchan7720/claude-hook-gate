@@ -94,6 +94,35 @@ Do not force-push a branch. Add commits instead.
 
 The format and examples are in [`skills/feedback/reference.md`](skills/feedback/reference.md) and [`examples.md`](skills/feedback/examples.md).
 
+## How it flows
+
+```mermaid
+sequenceDiagram
+    actor U as You
+    participant C as Claude
+    participant H as feedback-gate
+    U->>C: ask for something
+    H-->>C: injects the confirmed rules
+    C->>H: is about to run a command or edit a file
+    alt breaks a rule
+        H-->>C: deny, ask or warn (the rule's message)
+    else no violation
+        H-->>C: lets it through
+    end
+    C->>H: edited a file
+    H-->>C: the result of the rules (lint and the like)
+    loop until the stop-time checks pass
+        C->>H: tries to stop
+        H->>H: reruns the failed rules and runs consistency_checks
+        H-->>C: blocks on failure (the failed commands and logs)
+    end
+    H-->>C: all passed: a summary (blocks once)
+    opt stop_review is enabled
+        H-->>C: asks for a review of the changes (once)
+    end
+    C->>U: reports the result and stops
+```
+
 ## What you see while it runs
 
 - While gate commands run, a `[gate] running:` list appears above the prompt. When they finish, `[gate] done: ✓ 5 / ✗ 1 (81.0s)` stays in the status line.

@@ -14,10 +14,10 @@ The first line adds this repository as a marketplace and the second installs the
 ## Codex
 
 ```
-codex plugin marketplace add nonchan7720/claude-hook-gate
+gh api repos/nonchan7720/claude-hook-gate/contents/plugins/codex/scripts/setup.sh -H "Accept: application/vnd.github.raw" | bash
 ```
 
-Then install `feedback-gate` from `/plugins`, run `install-hooks.sh` once, and trust the hooks in `/hooks`. The steps and the differences from Claude Code are in the [Codex plugin README](../plugins/codex/README.md).
+This one line installs the plugin and the hooks. Then start Codex and trust the hooks in `/hooks`. Updating, what to do when the hooks do not run, and the differences from Claude Code are in the [Codex plugin README](../plugins/codex/README.md).
 
 - Rules and `gate.yaml` are shared with Claude Code. Codex looks in `.agents/` first, then `.claude/`.
 - The Codex sandbox stops writes to `.agents/` and `.codex/`, so rules that Codex should maintain go under `.claude/`.

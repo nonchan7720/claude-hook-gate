@@ -66,16 +66,4 @@ If two sessions edit at the same time, give them separate worktrees (`.claude/wo
 
 The results of a subagent started in the background are not handed over.
 
-## Flow
-
-```mermaid
-flowchart LR
-  P[UserPromptSubmit] --> I[inject rules]
-  T[PreToolUse] --> G[evaluate pre_bash / pre_edit]
-  E[PostToolUse: edit / Bash] --> R[record changes]
-  R --> PE[evaluate post_edit]
-  PE --> S[run the rules of gate.yaml]
-  X[Stop / SubagentStop] --> C[stop-time checks]
-  C --> F[stop_check]
-  F --> V[stop_review]
-```
+The overall flow is shown in the [sequence diagram in the README](../README.md#how-it-flows).
