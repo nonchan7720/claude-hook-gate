@@ -63,12 +63,14 @@
             "max_rounds": {
               "type": "integer",
               "minimum": 1,
+              "maximum": 5,
               "default": 1,
-              "description": "見直しの途中で行った修正を、続けて何回まで再度見直させるか。1 なら見直しは 1 回で、その修正は見直さずに停止を通す。"
+              "description": "見直しの途中で行った修正を、続けて何回まで再度見直させるか。1 なら見直しは 1 回で、その修正は見直さずに停止を通す。5 を超える値は 5 として扱う。"
             },
             "prompt": {
               "type": "string",
-              "description": "見直しの指示の末尾に足す、プロジェクト固有の確認事項。"
+              "maxLength": 2000,
+              "description": "見直しの指示の末尾に足す、プロジェクト固有の確認事項。2000 文字を超えた分は切り捨てる。"
             },
             "subagents": {
               "type": "boolean",

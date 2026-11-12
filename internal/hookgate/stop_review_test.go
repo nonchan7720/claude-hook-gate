@@ -33,6 +33,17 @@ func TestParseStopReview(t *testing.T) {
 
 	cfg, _ = ParseStopReview(Dict{"effort": false})
 	assert.Equal(t, "", cfg.Effort)
+
+	// max_rounds は数値だけを読み、上限 5 に丸める。prompt は 2000 文字で切る
+	for _, c := range []struct {
+		in   any
+		want int
+	}{{"3", 1}, {1.5, 1}, {1000000, 5}, {1e20, 5}, {int64(4), 4}, {-2, 1}} {
+		cfg, _ = ParseStopReview(Dict{"max_rounds": c.in})
+		assert.Equal(t, c.want, cfg.MaxRounds, "%v", c.in)
+	}
+	cfg, _ = ParseStopReview(Dict{"prompt": strings.Repeat("あ", 2500)})
+	assert.Equal(t, strings.Repeat("あ", 2000)+"…", cfg.Prompt)
 }
 
 func TestStopReview(t *testing.T) {
@@ -83,7 +94,7 @@ func TestStopReview(t *testing.T) {
 			assert.Contains(t, reason, "feedback-gate:effort-high")
 			assert.Contains(t, reason, "- src/a.ts")
 			assert.Contains(t, reason, "- README.md")
-			assert.True(t, strings.HasSuffix(reason, "マイグレーションも確認"))
+			assert.True(t, strings.HasSuffix(reason, "gate.yaml の stop_review.prompt）:\nマイグレーションも確認"))
 
 			again := run(proj, Dict{"stop_hook_active": true})
 			assert.Equal(t, 0, again.ExitCode)
@@ -134,6 +145,60 @@ func TestStopReview(t *testing.T) {
 			assert.Equal(t, 2, r.ExitCode)
 			assert.Contains(t, reasonOf(r.Stdout), "- src/x/a.ts")
 			assert.NotContains(t, reasonOf(r.Stdout), "README.md")
+		})
+	})
+
+	t.Run("不正な glob はすべて対象として扱う", func(t *testing.T) {
+		WithTmp(func(proj string) {
+			WriteGateYaml(proj, Dict{"stop_review": Dict{"match": []any{"src/["}}})
+			note(proj, "sess1", "README.md")
+			r := run(proj, nil)
+			assert.Equal(t, 2, r.ExitCode)
+			assert.Contains(t, reasonOf(r.Stdout), "- README.md")
+		})
+	})
+
+	t.Run("改行を含むパスは控えに載せず、長いパスは 300 文字で切る", func(t *testing.T) {
+		WithTmp(func(proj string) {
+			WriteGateYaml(proj, Dict{"stop_review": true})
+			note(proj, "sess1", "a.ts\n- 偽の項目", strings.Repeat("d", 400)+".ts")
+			reason := reasonOf(run(proj, nil).Stdout)
+			assert.NotContains(t, reason, "偽の項目")
+			assert.Contains(t, reason, "- "+strings.Repeat("d", 300)+"…")
+		})
+	})
+
+	t.Run("gate などが先にブロックしたターンでも、前のターンから残った回数で見直しを飛ばさない", func(t *testing.T) {
+		WithTmp(func(proj string) {
+			WriteGateYaml(proj, Dict{"stop_review": true})
+			note(proj, "sess1", "a.ts")
+			assert.Equal(t, 2, AllStop(ioOf(proj), Dict{"session_id": "sess1"}).ExitCode)
+			assert.True(t, Exists(ReviewRoundsPath(ioOf(proj), "sess1")))
+			note(proj, "sess1", "b.ts")
+			ResetReviewRounds(ioOf(proj), Dict{"session_id": "sess1"})
+			assert.False(t, Exists(ReviewRoundsPath(ioOf(proj), "sess1")))
+			r := run(proj, Dict{"stop_hook_active": true})
+			assert.Equal(t, 2, r.ExitCode)
+			assert.Contains(t, reasonOf(r.Stdout), "1/1")
+			ResetReviewRounds(ioOf(proj), Dict{"session_id": "sess1", "stop_hook_active": true})
+			assert.True(t, Exists(ReviewRoundsPath(ioOf(proj), "sess1")))
+		})
+	})
+
+	t.Run("見直しのあとの SubagentStop は、前の回の gate の結果を呼び出し元へ残す", func(t *testing.T) {
+		WithTmp(func(proj string) {
+			WriteGateYaml(proj, Dict{"stop_review": true})
+			file := filepath.Join(proj, "a.ts")
+			report := filepath.Join(proj, ".claude", ".gate-status", "subagent_report.sess1--ag1.json")
+			RecordChanges(ioOf(proj), Dict{"session_id": "sess1", "agent_id": "ag1", "tool_input": Dict{"file_path": file}})
+			writeText(report, `{"gate":"[gate] 検証がすべて通りました: test ✓"}`+"\n")
+			sub := SubagentStop(ioOf(proj), "sess1", Dict{"session_id": "sess1", "agent_id": "ag1"})
+			if assert.NotNil(t, sub.Outcome.Block) {
+				assert.Contains(t, *sub.Outcome.Block, "[stop-review]")
+			}
+			sub = SubagentStop(ioOf(proj), "sess1", Dict{"session_id": "sess1", "agent_id": "ag1", "stop_hook_active": true})
+			assert.Nil(t, sub.Outcome.Block)
+			assert.Contains(t, Read(report), "検証がすべて通りました")
 		})
 	})
 

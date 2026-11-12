@@ -3,13 +3,14 @@ import { feedbackStopCheck } from './feedback-stop-check.ts'
 import type { Io, ScriptResult } from './io.ts'
 import { notification } from './notification.ts'
 import type { Dict } from './pyutil.ts'
-import { stopReview } from './stop-review.ts'
+import { resetReviewRounds, stopReview } from './stop-review.ts'
 import { stopTestGate } from './stop-test-gate.ts'
 
 export async function allStop(io: Io, payload: Dict): Promise<ScriptResult> {
   let stdout = ''
   let stderr = ''
   let reportConsumed = false
+  await resetReviewRounds(io, payload)
   // gate が 1 つでも止めたらそこで終了し、通知は出さない
   for (const step of [() => stopTestGate(io, 'checks', payload), () => feedbackStopCheck(io, payload), () => stopReview(io, payload)]) {
     const r = await step()

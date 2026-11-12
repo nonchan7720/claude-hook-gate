@@ -6,6 +6,7 @@ package hookgate
 func AllStop(io Io, payload Dict) ScriptResult {
 	var stdout, stderr string
 	reportConsumed := false
+	ResetReviewRounds(io, payload)
 	// gate が 1 つでも止めたらそこで終了し、通知は出さない
 	steps := []func() ScriptResult{
 		func() ScriptResult { return StopTestGate(io, "checks", payload) },

@@ -281,8 +281,10 @@ func Stop(io Io, sessionID string, payload Dict) HookRun {
 // SubagentStop: gate の checks フェーズと stop_check。結果は呼び出し元の PostToolUse(Agent) へ渡すために控える（subagent_report.go）。
 func SubagentStop(io Io, sessionID string, payload Dict) HookRun {
 	var gate, feedback *ScriptResult
+	reviewed := false
 	return RunSteps(io, sessionID, "SubagentStop", []Step{
 		func(i Io) ScriptResult {
+			ResetReviewRounds(i, payload)
 			r := StopTestGate(i, "checks", payload)
 			gate = &r
 			return r
@@ -295,10 +297,22 @@ func SubagentStop(io Io, sessionID string, payload Dict) HookRun {
 		// gate と stop_check が通った回だけ、stop_review（自己確認）を行う。
 		func(i Io) ScriptResult {
 			if gate != nil && gate.ExitCode == 0 && feedback != nil && feedback.ExitCode == 0 {
-				return StopReview(i, payload)
+				r := StopReview(i, payload)
+				reviewed = r.ReportConsumed || r.ExitCode == 2
+				return r
 			}
 			return Ok("", "")
 		},
-		func(i Io) ScriptResult { return SaveSubagentReport(i, payload, gate, feedback) },
+		// 見直しでブロックした回と、そのあとの Stop で、gate が何も走らせなかったときは、前の回の gate の結果を残す
+		// （成功報告の直後の Stop と同じ扱い）。
+		func(i Io) ScriptResult {
+			g := gate
+			if g != nil && reviewed && g.Report == "" {
+				kept := *g
+				kept.ReportConsumed = true
+				g = &kept
+			}
+			return SaveSubagentReport(i, payload, g, feedback)
+		},
 	}, Outcome{})
 }

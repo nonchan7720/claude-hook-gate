@@ -43,6 +43,7 @@ stopReview:
     2. Check: does it do everything the user asked / are there logic errors, missed edge cases or missing error handling / are callers, tests and docs updated / is any debug code or change nobody asked for left in / did you actually run what can be run.
     3. Fix what you find. If there is nothing, report in 1-3 lines what you checked and stop (do not repeat the same review).
   files: "Changed files:"
+  prompt: "Project-specific checks (from stop_review.prompt in gate.yaml):"
   more: "- ... and {{count}} more"
 
 stopCheck:

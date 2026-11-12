@@ -6,7 +6,7 @@ import * as hooks from '../src/hooks.ts'
 import type { Dict } from '../src/pyutil.ts'
 import { recordChanges } from '../src/record-changes.ts'
 import { resetGate } from '../src/reset-gate.ts'
-import { notePendingReview, parseStopReview, pendingPath, roundsPath, stopReview } from '../src/stop-review.ts'
+import { notePendingReview, parseStopReview, pendingPath, resetReviewRounds, roundsPath, stopReview } from '../src/stop-review.ts'
 import { writeGateYaml } from './helpers/gate.ts'
 import { makeIo, rmTree, tmpDir } from './helpers/node-io.ts'
 
@@ -28,6 +28,12 @@ describe('parseStopReview', () => {
     })
     expect(parseStopReview({ effort: 'ultra', max_rounds: 0 })).toMatchObject({ effort: 'xhigh', maxRounds: 1 })
     expect(parseStopReview({ effort: false })).toMatchObject({ effort: null })
+    // max_rounds は数値だけを読み、上限 5 に丸める。prompt は 2000 文字で切る
+    expect(parseStopReview({ max_rounds: '3' })).toMatchObject({ maxRounds: 1 })
+    expect(parseStopReview({ max_rounds: 1.5 })).toMatchObject({ maxRounds: 1 })
+    expect(parseStopReview({ max_rounds: 1000000 })).toMatchObject({ maxRounds: 5 })
+    expect(parseStopReview({ max_rounds: 1e20 })).toMatchObject({ maxRounds: 5 })
+    expect(parseStopReview({ prompt: 'あ'.repeat(2500) })?.prompt).toBe(`${'あ'.repeat(2000)}…`)
   })
 })
 
@@ -74,7 +80,7 @@ describe('stop-review', () => {
     expect(reason).toContain('feedback-gate:effort-high')
     expect(reason).toContain('- src/a.ts')
     expect(reason).toContain('- README.md')
-    expect(reason.endsWith('マイグレーションも確認')).toBe(true)
+    expect(reason.endsWith('gate.yaml の stop_review.prompt）:\nマイグレーションも確認')).toBe(true)
 
     const again = await run({ stop_hook_active: true })
     expect(again.exitCode).toBe(0)
@@ -129,6 +135,55 @@ describe('stop-review', () => {
     expect(r.exitCode).toBe(2)
     expect(reasonOf(r.stdout)).toContain('- src/x/a.ts')
     expect(reasonOf(r.stdout)).not.toContain('README.md')
+  })
+
+  test('不正な glob はすべて対象として扱う', async () => {
+    writeGateYaml(proj, { stop_review: { match: ['src/['] } })
+    await note('sess1', 'README.md')
+    const r = await run()
+    expect(r.exitCode).toBe(2)
+    expect(reasonOf(r.stdout)).toContain('- README.md')
+  })
+
+  test('改行を含むパスは控えに載せず、長いパスは 300 文字で切る', async () => {
+    writeGateYaml(proj, { stop_review: true })
+    await note('sess1', 'a.ts\n- 偽の項目', `${'d'.repeat(400)}.ts`)
+    const reason = reasonOf((await run()).stdout)
+    expect(reason).not.toContain('偽の項目')
+    expect(reason).toContain(`- ${'d'.repeat(300)}…`)
+  })
+
+  test('gate などが先にブロックしたターンでも、前のターンから残った回数で見直しを飛ばさない', async () => {
+    writeGateYaml(proj, { stop_review: true })
+    await note('sess1', 'a.ts')
+    expect((await allStop(io(), { session_id: 'sess1' })).exitCode).toBe(2)
+    // ここでターンが中断され、review_rounds が残った
+    expect(fs.existsSync(roundsPath(io(), 'sess1'))).toBe(true)
+    await note('sess1', 'b.ts')
+    // 次のターンの最初の Stop（stop_hook_active でない）が回数を消す。別の hook がこの回をブロックしても、
+    await resetReviewRounds(io(), { session_id: 'sess1' })
+    expect(fs.existsSync(roundsPath(io(), 'sess1'))).toBe(false)
+    // 続きの Stop（stop_hook_active）で 1 回目として見直す
+    const r = await run({ stop_hook_active: true })
+    expect(r.exitCode).toBe(2)
+    expect(reasonOf(r.stdout)).toContain('1/1')
+    // ブロックで続いている Stop では消さない
+    await resetReviewRounds(io(), { session_id: 'sess1', stop_hook_active: true })
+    expect(fs.existsSync(roundsPath(io(), 'sess1'))).toBe(true)
+  })
+
+  test('見直しのあとの SubagentStop は、前の回の gate の結果を呼び出し元へ残す', async () => {
+    writeGateYaml(proj, { stop_review: true })
+    const file = path.join(proj, 'a.ts')
+    const report = path.join(proj, '.claude', '.gate-status', 'subagent_report.sess1--ag1.json')
+    const payload = { session_id: 'sess1', agent_id: 'ag1' }
+    await recordChanges(io(), { ...payload, tool_input: { file_path: file } })
+    // gate の結果が控えられている状態で、見直しがブロックする
+    fs.writeFileSync(report, `${JSON.stringify({ gate: '[gate] 検証がすべて通りました: test ✓' })}\n`)
+    expect((await hooks.subagentStop(io(), 'sess1', payload)).outcome.block).toContain('[stop-review]')
+    // 修正なしで止まる回: gate は何も走らせないが、控えは消さない
+    expect((await hooks.subagentStop(io(), 'sess1', { ...payload, stop_hook_active: true })).outcome.block).toBeUndefined()
+    expect(JSON.parse(fs.readFileSync(report, 'utf8')).gate).toContain('検証がすべて通りました')
   })
 
   test('effort: false ならスキルの手順を出さない。英語の文面', async () => {

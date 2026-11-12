@@ -22,6 +22,18 @@ import { gateStatusDir } from './running-registry.ts'
 export const EFFORT_LEVELS: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'max']
 export const DEFAULT_EFFORT = 'xhigh'
 export const DEFAULT_MAX_ROUNDS = 1
+/** max_rounds の上限。gate.yaml（リポジトリの内容）が停止を際限なくブロックできないようにする（gate の MAX_ATTEMPTS と同じ）。 */
+export const MAX_ROUNDS_LIMIT = 5
+/** prompt の上限（文字 = コードポイント）。超えた分は切り捨てる。 */
+export const MAX_PROMPT_CHARS = 2000
+/** reason に出す 1 ファイルのパスの上限（文字 = コードポイント）。 */
+export const MAX_LABEL_CHARS = 300
+
+/** コードポイント単位で max 文字に切る（Go 版の []rune と同じ数え方）。切ったときは … を付ける。 */
+const clip = (s: string, max: number): string => {
+  const cps = [...s]
+  return cps.length > max ? `${cps.slice(0, max).join('')}…` : s
+}
 /** reason に並べる変更ファイルの上限。超えた分は件数だけ出す。 */
 export const MAX_LISTED_FILES = 30
 
@@ -42,12 +54,12 @@ export function parseStopReview(raw: unknown): StopReview | undefined {
   if (raw !== true && !isDict(raw)) return undefined
   const d: Dict = isDict(raw) ? raw : {}
   if (d.enabled === false) return undefined
-  const rounds = Number(d.max_rounds)
+  const rounds = typeof d.max_rounds === 'number' ? d.max_rounds : Number.NaN
   return {
     effort: d.effort === false ? null : typeof d.effort === 'string' && EFFORT_LEVELS.includes(d.effort) ? d.effort : DEFAULT_EFFORT,
     match: asList(d.match).map(String),
-    maxRounds: Number.isInteger(rounds) && rounds >= 1 ? rounds : DEFAULT_MAX_ROUNDS,
-    prompt: typeof d.prompt === 'string' ? d.prompt.trim() : '',
+    maxRounds: Number.isInteger(rounds) && rounds >= 1 ? Math.min(rounds, MAX_ROUNDS_LIMIT) : DEFAULT_MAX_ROUNDS,
+    prompt: typeof d.prompt === 'string' ? clip(d.prompt.trim(), MAX_PROMPT_CHARS) : '',
     subagents: d.subagents !== false,
   }
 }
@@ -67,10 +79,25 @@ export async function notePendingReview(io: Io, stateId: string, paths: readonly
     const memo = pendingPath(io, stateId)
     const existing = (await io.readFile(memo)) ?? ''
     const have = new Set(existing.split('\n'))
-    const added = paths.filter((p) => p !== '' && !have.has(p))
+    // 控えは 1 行 1 パス。改行を含むパスは行が割れて別の項目に見えるので載せない。
+    const added = paths.filter((p) => p !== '' && !/[\n\r]/.test(p) && !have.has(p))
     if (added.length > 0) await io.writeFile(memo, `${existing}${[...new Set(added)].map((p) => `${p}\n`).join('')}`)
   } catch {
     // 控えに書けなくても、呼び出し元（変更ファイルの記録と gate）は止めない。その変更が見直しの対象から漏れるだけ。
+  }
+}
+
+/**
+ * ターンの最初の Stop（hook のブロックで続いているのではない Stop）で、前のターンから残った回数を消す。
+ * gate や stop_check が先にブロックすると stopReview まで届かず、次の Stop（stop_hook_active）で残った回数を
+ * 読んでしまうので、Stop の先頭で呼ぶ（all-stop.ts、hooks.ts の subagentStop）。
+ */
+export async function resetReviewRounds(io: Io, payload: Dict): Promise<void> {
+  if (payload.stop_hook_active === true) return
+  try {
+    await io.removeFiles([roundsPath(io, stateIdOf(payload))])
+  } catch {
+    // 消せなくても止めない
   }
 }
 
@@ -101,13 +128,19 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
   }
 
   const projectDir = io.projectDir || io.cwd
-  const globs = compileGlobs(cfg.match)
+  // 不正な glob は「すべて対象」として扱う（見直しを黙って無効にしない。Go 版と同じ）。
+  let globs: RegExp[] = []
+  try {
+    globs = compileGlobs(cfg.match)
+  } catch {
+    globs = []
+  }
   const labels: string[] = []
   for (const line of ((await io.readFile(pending)) ?? '').split('\n')) {
     if (line === '') continue
     const [root, rel] = splitRoot(projectDir, line)
     if (globs.length > 0 && !globs.some((rx) => rx.test(rel))) continue
-    const label = rootLabel(root, projectDir, rel)
+    const label = clip(rootLabel(root, projectDir, rel), MAX_LABEL_CHARS)
     if (!labels.includes(label)) labels.push(label)
   }
 
@@ -131,7 +164,7 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
   lines.push(t('stopReview.files'))
   for (const label of labels.slice(0, MAX_LISTED_FILES)) lines.push(`- ${label}`)
   if (labels.length > MAX_LISTED_FILES) lines.push(t('stopReview.more', { count: labels.length - MAX_LISTED_FILES }))
-  if (cfg.prompt) lines.push(cfg.prompt)
+  if (cfg.prompt) lines.push(t('stopReview.prompt'), cfg.prompt)
   const reason = lines.join('\n')
   return { exitCode: 2, stdout: `${JSON.stringify({ decision: 'block', reason })}\n`, stderr: `${reason}\n` }
 }

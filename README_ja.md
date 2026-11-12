@@ -306,7 +306,7 @@ stop_review: true          # すべて既定値で有効
 stop_review:
   effort: xhigh            # low / medium / high / xhigh / max。既定 xhigh。false で effort は変えない
   match: ['src/**', '**/*.go']   # 対象にする変更ファイル（省略時はすべて）
-  max_rounds: 1            # 見直し中の修正を続けて見直す回数の上限（既定 1）
+  max_rounds: 1            # 見直し中の修正を続けて見直す回数の上限（既定 1、最大 5）
   subagents: true          # SubagentStop でも行う（既定 true）
   prompt: |                # 指示の末尾に足すプロジェクト固有の確認事項
     マイグレーションを足したら down も確認する。
@@ -317,6 +317,7 @@ stop_review:
 - **effort の切り替え。** hook の出力にはセッションの effort を変える手段が無いので、同梱スキル（[`/feedback-gate:effort-<level>`](#feedback-gateeffort-level)）の frontmatter `effort` を使います。効くのは見直しのターンの残りだけで、セッションの設定は変わりません。スキルを呼ぶのはモデルなので、呼ばなかった場合や、スキルの `effort` を扱わない環境（Codex など）では effort は変わらず、見直しだけが行われます。
 - **変更ファイルの控え。** `changed_files` と同じタイミング（Edit / Write / MultiEdit と、Bash が書き換えたファイル）で `.claude/.gate-status/review_pending.<session>[--<agent>].txt` に足します。`changed_files` と違って gate が通っても消えず、見直しを出したときに消します。
 - **繰り返さない。** 見直しの途中の修正も控えに足されるので、次の Stop でまた見直しになります。これを `max_rounds` 回（`review_rounds.<session>[--<agent>].txt`）で打ち切ります。既定の 1 では、見直しは 1 ターンに 1 回で、その修正は（gate と `stop_check` は通したうえで）見直さずに停止を通します。回数は、見直すものが無かった Stop と打ち切った Stop で 0 に戻ります。数えるのは hook のブロックで続いている間（`stop_hook_active`）だけなので、ターンが中断されて回数が残っても、次のターンの Stop は 1 回目から見直します。
+- **上限。** `gate.yaml` はリポジトリの内容なので、信頼していないリポジトリが停止を際限なく止めたり、長い文面を流し込んだりできないようにしています: `max_rounds` は 5 まで（それを超える値は 5）、`prompt` は 2000 文字まで（超えた分は切り捨て）で、「プロジェクト固有の確認事項（gate.yaml の stop_review.prompt）」という見出しを付けて出します。変更ファイルのパスは 1 件 300 文字で切り、改行を含むパスは一覧に載せません。`match` の glob が不正なときは、すべての変更ファイルを対象にします。
 - 状態ファイルは他と同じく SessionStart の `reset-gate`（`startup` / `clear`、または 24 時間超）が消します。見直しでブロックしたあと実際に止まった回には、`stop` 通知を出します。
 
 ### エージェント間の実行共有
@@ -377,7 +378,8 @@ checks フェーズ（Stop / SubagentStop）で 1 件以上のコマンドが実
   - フィードバックルールのファイル（Claude が従う指示）の frontmatter にある `count:` の行。`autoCount` が有効なときにルール違反があると書き換えます（プラグインの設定で無効にできます）。`/correct apply` でも書き換えます。ファイルのそれ以外の部分は変えません。
   - 設定ファイル、`CLAUDE.md`、ビルドや起動のファイル、フックの設定は書きません。
 - **権限の判定**（PreToolUse）: 返すのは `deny` か `ask` だけで、`allow` は返しません。呼び出しを厳しくすることはあっても、あなた自身の権限確認を飛ばすことはありません。判定するのは、Bash / Edit / Write / MultiEdit でフィードバックルールに一致したとき（ルールの `count` / `severity` により `deny` か `ask`）と、`agentLaunchGuard` が有効なときの `Agent` / `SendMessage`（全文を見せて `ask`）だけです。それ以外はイベントをそのまま次へ渡します。権限モード、設定、エージェント、Remote Control は変えません。
-- **追加するコンテキスト**: UserPromptSubmit で、ルールファイルと確定したフィードバックルール（`count >= 3`）をコンテキストに加えます。PostToolUse・Stop・SubagentStop では、gate の結果とルール違反を Claude に返します（フィードバックかブロックの理由として）。PostToolUse(Agent) では、終わったサブエージェントの結果を呼び出し元のコンテキストに加えます。
+- **追加するコンテキスト**: UserPromptSubmit で、ルールファイルと確定したフィードバックルール（`count >= 3`）をコンテキストに加えます。PostToolUse・Stop・SubagentStop では、gate の結果とルール違反を Claude に返します（フィードバックかブロックの理由として）。PostToolUse(Agent) では、終わったサブエージェントの結果を呼び出し元のコンテキストに加えます。`gate.yaml` で [stop_review](#stop_review) を有効にしているときは、Stop / SubagentStop で見直しの指示（そのセッションが変更したファイルのパスと、`gate.yaml` の `stop_review.prompt` の文面を含む）もブロックの理由として返し、同梱スキル `effort-<level>` を呼ぶよう Claude に伝えます。`prompt` の文面は Claude への指示として届くので、信頼していないリポジトリの `gate.yaml` は、そのコマンドと同じように中身を確かめてください。
+- **同梱スキルと effort**: `effort-<level>` スキルは、呼び出したターンの残りの effort（推論の量。使用量に影響します）を切り替えるだけです。`allowed-tools`・`model`・`hooks` は宣言せず、ツールや権限は増やさず、セッションの設定も変えません。
 - **settings hook**: `hooks/hooks.json` はイベントごとに `command` hook を登録しており、`scripts/hook.sh` を経由して、イベントの JSON を stdin で渡した `feedback-gate claude <Event>`（Go 製のバイナリ）を実行します。mod のフックと同じ検査を行い、同じもの（deny / ask、block、追加する context）を返すので、上の各点はこちらにも当てはまります。セッションの mod のマーカーがあるとき、またはバイナリがキャッシュにも無くダウンロードもできないときは、何もせずに終わります。プラグイン設定は環境変数 `CLAUDE_PLUGIN_OPTION_*` から読みます。
 - **コマンド**: セッション開始時に `/correct` を登録し、`command.run` のフックはこのコマンドにだけ応答します。
 - **同梱ファイル**: `hooks/register.js` は `src/` から `scripts/build.ts` で作るもので、minify していません。メッセージの文面（`locales/<lang>.yaml`）は `hooks/vendor/locales-<lang>.js` に文字列のまま切り出しています（`register.js` の大きさを抑えるため）。`hooks/vendor/yaml.js` と `hooks/vendor/i18next.js` は npm パッケージの [`yaml`](https://www.npmjs.com/package/yaml) と [`i18next`](https://www.npmjs.com/package/i18next)（`package.json` / `bun.lock` で固定した版）で、ファイルを小さくするためだけに minify しています。検査で報告される getter、`Object.defineProperty`、Promise の判定（`typeof x.then === "function"`）は、この 2 つのライブラリ側のコードです（yaml のドキュメントのクラス、i18next の非同期読み込み）。プラグイン自身のコードは `Proxy`、`eval`、`new Function` を使っていません。

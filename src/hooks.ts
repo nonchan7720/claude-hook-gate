@@ -21,7 +21,7 @@ import { recordChanges } from './record-changes.ts'
 import { resetGate } from './reset-gate.ts'
 import { loadRules } from './rules-file.ts'
 import { loadSummary } from './running-registry.ts'
-import { stopReview } from './stop-review.ts'
+import { resetReviewRounds, stopReview } from './stop-review.ts'
 import { stopTestGate } from './stop-test-gate.ts'
 import { saveSubagentReport, subagentReport } from './subagent-report.ts'
 
@@ -160,11 +160,21 @@ export const stop = (io: Io, sessionId: string, payload: Dict): Promise<HookRun>
 export function subagentStop(io: Io, sessionId: string, payload: Dict): Promise<HookRun> {
   let gate: ScriptResult | undefined
   let feedback: ScriptResult | undefined
+  let review: ScriptResult | undefined
   return runSteps(io, sessionId, 'SubagentStop', [
-    async (i) => (gate = await stopTestGate(i, 'checks', payload)),
+    async (i) => {
+      await resetReviewRounds(i, payload)
+      gate = await stopTestGate(i, 'checks', payload)
+      return gate
+    },
     async (i) => (feedback = await feedbackStopCheck(i, payload)),
     // gate と stop_check が通った回だけ、stop_review（自己確認）を行う。
-    async (i) => (gate?.exitCode === 0 && feedback?.exitCode === 0 ? stopReview(i, payload) : ok()),
-    (i) => saveSubagentReport(i, payload, gate, feedback),
+    async (i) => (review = gate?.exitCode === 0 && feedback?.exitCode === 0 ? await stopReview(i, payload) : ok()),
+    // 見直しでブロックした回と、そのあとの Stop で、gate が何も走らせなかったときは、前の回の gate の結果を残す
+    // （成功報告の直後の Stop と同じ扱い）。
+    (i) => {
+      const keep = gate && !gate.report && (review?.reportConsumed || review?.exitCode === 2)
+      return saveSubagentReport(i, payload, gate && keep ? { ...gate, reportConsumed: true } : gate, feedback)
+    },
   ])
 }
