@@ -2,211 +2,14 @@
 
 [日本語](README_ja.md)
 
-A Claude Code plugin made of function hooks. It does three things:
+A Claude Code plugin that keeps Claude from repeating a mistake you already corrected, and from finishing before the checks pass.
 
-- Injects your feedback rules (`~/{.claude,.agents}/feedback/*.md`) into each prompt and enforces them on tool calls and when Claude stops.
-- Runs per-project quality gates (lint, tests, etc.) defined in `{.claude,.agents}/gate.yaml` after file edits and when Claude stops.
-- Sends a desktop notification when Claude waits for you or stops (macOS).
-- Ships two skills, `/feedback-gate:feedback` and `/feedback-gate:gate`, that write those two kinds of files for you: feedback rules (create, update, periodic review) and a `.claude/gate.yaml` fitted to the project (its languages, task runner and CI).
+- **Feedback rules**: a correction you gave once is kept as a Markdown rule and injected into every prompt. A hook stops the commands and edits that break it.
+- **Quality gate**: the lint and tests you list in the project's `gate.yaml` run after each edit and when Claude stops. Claude cannot stop while they fail.
+- **Review before stopping** (optional): before stopping, Claude reviews the files it changed, at a higher effort.
+- **Notifications**: a desktop notification when Claude waits for you and when it is done (macOS).
 
-## Hooks
-
-The hooks are registered in `src/register.ts` (bundled into `hooks/register.js` by CI; that bundle is what Claude Code loads) and call the TypeScript modules under `src/`. The same checks are also run by command hooks in `hooks/hooks.json` (the Go binary `feedback-gate`, see below), for environments where an organization guard skips the mod hooks; see [Settings hooks for managed environments](#settings-hooks-for-managed-environments).
-
-| Event | Module | Role | Settings hook |
-| --- | --- | --- | --- |
-| SessionStart | `src/reset-gate.ts`, then `src/gate-session-start.ts` | Clears this session's gate state on `startup` / `clear`; keeps it on resume / compact. Then runs the commands of `session_start` in `gate.yaml` and adds their stdout to the context (see [session_start](#session_start)). | Same (see below) |
-| UserPromptSubmit | `src/rules-file.ts` + `src/feedback-inject.ts` | Adds the rules file (your `rulesFile` if it exists, otherwise the bundled `rules/feedback_rules.md`, or `rules/feedback_rules.en.md` when the language is English) and the confirmed feedback rules (`count >= 3`) to the context. Rules with a `files` key are left out here and injected by `feedback-file-inject` instead (see [File-scoped rules](#file-scoped-rules)); this hook also forgets what that injected in the previous turn. | Same (see below) |
-| PostToolUse (Read) | `src/feedback-file-inject.ts` | Adds the confirmed feedback rules whose `files` globs match the file just read to the context, once per turn per rule. | Same (see below) |
-| PreToolUse (Bash / Edit / Write / MultiEdit) | `src/feedback-guard.ts` | Evaluates `pre_bash` / `pre_edit` enforce entries; denies, asks or warns by `count`. For Bash, a heredoc whose target and body are plain in the command (`cat > path <<'EOF' ... EOF`, `tee path <<EOF`; see [Files written by Bash](#files-written-by-bash)) is checked by `pre_edit` like a Write, before the command runs. When a Write or heredoc would create a rule file (`*.md`) that does not exist yet directly in a feedback directory (`~/.claude/feedback/`, `.claude/feedback/`), the first attempt per session and file is denied with the list of all existing rules, grouped by directory (in each, those with a similar name / description first, marked ★; rules with no word in common are listed by file name only), so that Claude updates the count and body of a rule for the same feedback instead of adding a duplicate (`src/feedback-new-rule.ts`). The same write is not stopped a second time. | Same (see below) |
-| PostToolUse (Write / Edit / MultiEdit) | `src/feedback-file-inject.ts`, `src/record-changes.ts`, `src/feedback-post-edit.ts`, then `src/stop-test-gate.ts` (`rules`) | Adds the `files`-scoped rules matching the edited file (if not yet shown this turn), records changed files, evaluates `post_edit` enforce entries against the edited file as a whole (blocks or warns by `count`), then runs the matching rules of `{.claude,.agents}/gate.yaml` (via `src/gate.ts`). | Same (see below) |
-| PreToolUse (Bash) | `src/bash-changes.ts` (`bashStarted`), before `feedback-guard` | Notes when the command started (`bash_started.<session>--<tool_use_id>.json`): under `.claude/.gate-status/` when the project has `{.claude,.agents}/gate.yaml`; otherwise under `~/.claude/feedback/.bash_started/` (the feedback state directory, next to `.ask_state`), and only when an active feedback rule has a `post_edit` / `pre_edit` enforce entry, so a project without `gate.yaml` gets no state files in its working tree. | Same (see below) |
-| PostToolUse (Bash) | `src/feedback-file-inject.ts` (heredoc targets), `src/bash-changes.ts`, `src/feedback-bash-edit.ts`, then `src/stop-test-gate.ts` (`rules`) | Adds the `files`-scoped rules matching the targets of plain heredoc writes (see [Files written by Bash](#files-written-by-bash)), then finds the files the command actually rewrote (git-modified or untracked files, and files of commits made during the command, whose mtime is at or after the command start; in the cwd's working tree and in each worktree under `.claude/worktrees/` whose path (`worktrees/<name>`) appears in the command; other worktrees are not looked at, so files another Claude Code session is editing there meanwhile are not taken for this command's changes), so writing with a heredoc, `python`, `sed -i` and the like does not skip the checks that Edit / Write get. Two things keep another session working in the *same* working tree apart (see [Several sessions in one working tree](#several-sessions-in-one-working-tree)): a command that only reads (`ls`, `cat`, `grep`, `rg`, `find`, `git log` / `git diff` / `git status` and the like, with no redirection to a file) is never looked at, and files another session already holds in its gate state (`changed_files` / `gate_passed` / `gate_failed` of another session) are left to that session. Each of those files is checked against the `post_edit` enforce entries as a whole file, like after Edit / Write, and against the `pre_edit` entries that can be judged afterwards (see below); the results of all files are merged into one block / warn. Then, only with `{.claude,.agents}/gate.yaml`, the files are recorded and the matching rules run if something was recorded. The feedback checks work without `gate.yaml`. Git history / working-tree operations (rebase / checkout / merge etc.) are never checked nor recorded. | Same (see below) |
-| PreToolUse (Agent / SendMessage), opt-in | `src/agent-launch-guard.ts` | Only when `agentLaunchGuard` is `true`: asks before sending instructions to a subagent, showing the full text. | Same (see below) |
-| Notification | `src/notification.ts` (`notify`) | Desktop notification when Claude waits for you (needs `terminal-notifier`, macOS). | Same (see below) |
-| Stop | `src/all-stop.ts` | Runs, in order: the gate `checks` phase (reruns the rules that failed and were not fixed, then the reserved consistency checks), `src/feedback-stop-check.ts`, `src/stop-review.ts` (the [stop_review](#stop_review) of `gate.yaml`, only when enabled), then the `stop` notification. | Same (see below) |
-| SubagentStop | gate `checks` phase, `src/feedback-stop-check.ts`, `src/stop-review.ts`, then `src/subagent-report.ts` (`saveSubagentReport`) | Same gate, `stop_check` rules and [stop_review](#stop_review) for subagents. The result is kept so it can be handed to the calling agent (see [Results of subagents](#results-of-subagents)). | Same (see below) |
-| PostToolUse (Agent) | `src/subagent-report.ts` (`subagentReport`) | Adds the gate / `stop_check` result of the subagent that just finished to the calling agent's context. | Same (see below) |
-
-### Settings hooks for managed environments
-
-Where an organization manages Claude Code (Team / Enterprise login, or managed settings), the built-in guard `cc-plugin-sec-default` runs first and passes every `classic.*` event over the plugins you install (`/plugin` shows "Its hooks on classic.SessionStart, ... do not run here"). None of the mod hooks above run there. A `command` hook in `hooks/hooks.json` (a settings hook) is not skipped by the guard, and it receives the same classic events with the same stdin JSON and the same return conventions (exit 2 blocks, `permissionDecision`, `decision: block`, `additionalContext`). So `hooks/hooks.json` registers a command hook for each of SessionStart, UserPromptSubmit, PreToolUse (`Bash|Edit|Write|MultiEdit|Agent|SendMessage`), PostToolUse (`Read|Bash|Edit|Write|MultiEdit|Agent|Task`), Notification, Stop and SubagentStop, and every row of the table above behaves the same through it.
-
-- **How it runs.** Each hook is `bash "${CLAUDE_PLUGIN_ROOT}/scripts/hook.sh" <Event>`, which runs `feedback-gate claude <Event>`: a single Go binary (`cmd/feedback-gate`; the checks are in `internal/hookgate`) published on this repository's GitHub Releases. It reads the classic JSON from stdin, runs the same checks as the mod hooks, and prints the result the way a classic command hook does. PostToolUse, Stop and SubagentStop have a 600 s `timeout`, since a gate command can take long.
-- **Where the binary comes from.** `scripts/hook.sh` looks for it in this order: `FEEDBACK_GATE_BIN` (a path to an executable; for development and tests, and a way to skip the download); then `${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate`, where `<version>` is the `version` in `.claude-plugin/plugin.json`; otherwise it downloads `https://github.com/nonchan7720/claude-hook-gate/releases/download/v<version>/feedback-gate_<os>_<arch>.tar.gz` (`os`: `linux` / `darwin`, `arch`: `amd64` / `arm64`) together with `checksums.txt`, verifies the SHA-256 (`sha256sum` or `shasum`; without either it installs nothing, since it cannot verify), unpacks it and moves the binary into the cache atomically. `FEEDBACK_GATE_RELEASE_BASE_URL` replaces the `https://github.com/nonchan7720/claude-hook-gate/releases/download` part (a `file://` directory works too, which is what the tests use; it needs `curl`, since `wget` cannot read `file://`). So the binary always matches the installed plugin version. Several plugin versions can share the cache (for example the Claude Code plugin and the Codex plugin at different versions): a version directory is touched whenever its binary is used, and after a fresh install only the other version directories not used for more than 30 days are removed (and download work directories older than 60 minutes, left by a hook that was killed).
-- **First run.** The first hook after an install or an update (SessionStart) downloads the binary (a few MB) within that hook's timeout, once per version. To avoid that, point `FEEDBACK_GATE_BIN` at a prebuilt binary.
-- **Needs `curl` or `wget` on the first run.** If the binary is not cached yet and the download is impossible (neither `curl` nor `wget`, neither `sha256sum` nor `shasum`, no network, a checksum mismatch, an unsupported OS or CPU), the command hook does nothing (exit 0) and writes one line to stderr, `feedback-gate: could not install the feedback-gate v<version> binary (<reason>); the hook did nothing`, where `<reason>` is one of `no-download-tool`, `no-sha256-tool`, `download-failed`, `checksum-mismatch`, `unsupported-platform`, `bad-version`, `extract-failed`, `cache-unwritable`, `no-cache-dir`. Only the mod hooks work then, which means nothing runs where the guard skips them. Once the binary is cached, nothing else is needed.
-- **No double runs.** Every `classic.*` mod hook writes a marker file `~/{.claude,.agents}/feedback/.classic_seen/<session>` (`CLAUDE_FEEDBACK_DIR` is respected; `classic.Notification` rewrites it each time, and anything older than 24h is swept). `scripts/hook.sh` exits 0 when the marker of the session exists, so where the mod hooks run, the command hooks stay silent. Where the guard skips them, no marker is written and the command hooks do the work. (The mod hook and the command hook of one event start at the same time, so the first event of a session, SessionStart, can run both; its reset is idempotent, and from then on the marker is there.)
-- **Plugin settings.** `language`, `agentLaunchGuard`, `autoCount` and `rulesFile` reach the command hook as the environment variables `CLAUDE_PLUGIN_OPTION_language`, `CLAUDE_PLUGIN_OPTION_agentLaunchGuard` (`true` / `false`), `CLAUDE_PLUGIN_OPTION_autoCount` and `CLAUDE_PLUGIN_OPTION_rulesFile`, and `feedback-gate` reads them.
-- **Differences.** The status line while a check is evaluated (`$.ui.status`) is a feature of the mod and is not shown by the command hook. The band above the prompt (running gate commands) is drawn by the mod's `ui.render` from the same files under `.claude/.gate-status/running/`, which the command hook writes as usual; it is redrawn when the mod next renders.
-
-### Files written by Bash
-
-A Bash command cannot in general be checked by `pre_edit` before it runs, since what it will write is unknown until then. The exception is a heredoc whose target and body are plain in the command: `src/bash-heredoc.ts` reads them out on PreToolUse and `src/feedback-guard.ts` evaluates the `pre_edit` entries on each target with the body as the content, exactly like a Write (`deny` / `ask` stop the command; an `ask` already answered for the same rule and file in this session is downgraded to `warn`, as with Edit; the reason names the file; a test file written by a heredoc in the same command satisfies `absent_sibling` / `absent_glob`). The forms it reads are `cat > path <<'EOF' ... EOF`, `cat <<EOF >> path` (`<<-`, and a quoted or `\`-escaped delimiter, are fine), `tee [-a] path <<EOF` and `cat <<EOF | tee [-a] path`; the body is taken as written (an unquoted delimiter lets bash expand `$VAR`, which the check does not do), and a relative path is resolved against the cwd of the command (a leading `cd dir &&` is not followed). A target that is only known at run time (`$OUT`, `$(mktemp)`, `~` without `HOME`), a command that transforms the body (`sed ... <<EOF > out`, `cat <<EOF | sort > out`, `python - <<EOF`) and an unterminated heredoc are not checked here. After the command, the targets checked this way are not checked by `pre_edit` again (`post_edit` still runs on them), and for every other file the command rewrote `src/feedback-bash-edit.ts` evaluates the `pre_edit` entries on each file it rewrote with the same conditions: `path` / `exclude_path`, `absent_sibling` / `absent_glob` (the test file must exist once the command is done, so writing the test in the same command is fine), and `when` / `unless` against the content the command wrote: for a file git tracks, the lines added relative to `HEAD` (or, when the command committed them, the lines added by the commits made since it started); for an untracked file (a new file, or a file outside git), the whole content, as with the `content` of Write. As the file is already written, `deny` / `ask` become a PostToolUse `block` (Claude is told to fix the file), and the message says the rule was only caught after the command. An `ask` already raised for the same rule and file in this session is downgraded to `warn`, as with Edit. Warnings and blocks carry the file path. The checks only see files git can list (tracked, or untracked and not ignored); files written outside a git working tree, or ignored by `.gitignore`, are not checked.
-
-### File-scoped rules
-
-<a id="file-scoped-rules"></a>A feedback rule about one language or kind of file (how to wrap errors in Go, what every SQL migration needs, ...) is only useful while that kind of file is being written, and on every other prompt it just costs context. Give such a rule a `files` key in its frontmatter, a glob or list of globs relative to the project root (`files: ['**/*.go']`; optional `exclude_files`, e.g. `['**/*_test.go']`; same glob rules as `when_exists` and the `enforce` `path`, and in a worktree under `.claude/worktrees/` the path is taken relative to that worktree). Then:
-
-- **It is not injected on UserPromptSubmit.** `src/feedback-inject.ts` skips it, whatever its `count`.
-- **It is injected right after the file is touched.** `src/feedback-file-inject.ts` runs on PostToolUse for `Read`, `Edit`, `Write`, `MultiEdit` and, for `Bash`, on the targets of the plain heredoc writes described below. When the file's project-relative path matches `files` (and not `exclude_files`) and the rule has `count >= 3`, the rule (title, `description`, first paragraph of the body, as on UserPromptSubmit) is returned as `additionalContext` under a header naming the file (`# Feedback rules for internal/server/handler.go`). `Read` is the main trigger: Claude almost always reads a file before editing it, so the rule is in the context before the edit is composed; `Edit` / `Write` cover files written without a prior `Read`, from the next edit on (a `pre_edit` enforce entry still stops a violating first write).
-- **Once per turn per rule.** The names already shown are kept in `~/.claude/feedback/.inject_state/<session>[--<agent>].json` (the feedback state directory, nothing in the project tree). UserPromptSubmit deletes that file (and the subagents' files of the session), and SessionStart deletes it on `startup`, `clear` and `compact` (not on `resume`), so a rule comes back once in every turn in which such a file is touched, and after a compaction. A subagent has its own state when its hook payload carries an `agent_id`; the mod hooks may run without it, in which case the subagent shares the parent's state for that turn.
-- **`enforce` inherits it.** A `pre_edit` / `post_edit` entry of such a rule may omit `path` / `exclude_path`; `files` / `exclude_files` are used instead (an entry that writes its own `path` keeps it).
-- `files` only chooses where the rule is injected; it is not one of the activity filters (`expires`, `projects`, `when_exists`), which still apply to it.
-
-Codex has no `Read` tool, so there the rules arrive on `apply_patch` and heredoc targets only.
-
-### Several sessions in one working tree
-
-<a id="several-sessions-in-one-working-tree"></a>The Bash change detection above cannot tell who wrote a file: it only sees that a git-modified file's mtime is at or after the command started. When two Claude Code sessions work in the same working tree (for example one editing, one only investigating), the editing session's writes land inside the investigating session's commands, so that session would record them as its own changes, run the matching gate rules for them, fail on the other session's half-done work, and on Stop wait for the other session's run of the same command (the single-flight and serial locks under `~/.claude/.gate-status/shared/` span sessions). To keep the sessions apart, `src/bash-changes.ts` (`isReadOnlyCommand`; `IsReadOnlyCommand` in `internal/hookgate/bash_changes.go`) skips the detection for a command that can only read, and files another session already holds in its gate state are not recorded.
-
-- **Read-only commands.** The command is split at `|`, `&&`, `||`, `;`, newlines, `&`, `$(`, backticks, `(` and `{`, and every part's first word (after leading `VAR=value` assignments and `command` / `builtin` / `time` / `exec` / `nice`) must be a reading command: `ls`, `cat`, `head`, `tail`, `grep`, `rg`, `find`, `wc`, `sort`, `uniq`, `cut`, `tr`, `awk`, `sed`, `diff`, `stat`, `du`, `tree`, `pwd`, `echo`, `printf`, `which`, `env`, `jq`, `cd`, `test` and the like; `git` with `status`, `log`, `diff`, `show`, `blame`, `ls-files`, `grep`, `rev-parse`, `describe`, `branch`, `tag`, `remote`, `fetch` and other reading subcommands; `go` with `env`, `version`, `list`, `doc`. A redirection to a file (`>` or `>>`; `2>&1` and `/dev/null` are fine), `find` with `-exec` / `-delete`, `sed` with `-i`, `sort` with `-o`, `--output`, `--in-place` or `system(` anywhere, or any other first word (`xargs`, `tee`, `python`, `bun`, `make`, `sudo`, ...) makes the command a possible writer, which is checked as before. The judgement errs on the side of checking: an unknown command is treated as a writer.
-- **Files of another session.** With `gate.yaml`, the files listed in `changed_files.<id>.txt`, `gate_passed.<id>.txt` and `gate_failed.<id>.txt` of any other session (an `<id>` that is neither this session nor one of its subagents, `<session>--<agent>`) are not recorded for this command even when their mtime moved during it; that session's gate checks them. This only covers files the other session has already recorded (a file whose gate rule passed without `run_checks` leaves the state right away), and it means a Bash command of this session that really rewrites such a file is not checked here, only by the other session's gate.
-
-A command that writes while another session also writes to the same working tree is still attributed to this session; the two sessions cannot be told apart by mtime. Use separate worktrees (`.claude/worktrees/<name>`) when two sessions edit at the same time.
-
-### Results of subagents
-
-<a id="results-of-subagents"></a>The gate and `stop_check` results of a subagent's SubagentStop only reach the subagent itself (a block reason) or you (a `systemMessage`); the calling agent sees only the subagent's final message, and had to read the gate logs to know whether the checks passed. So on every SubagentStop the result of that round is kept in `.claude/.gate-status/subagent_report.<session>--<agent>.json` in the project, next to the other state files (without `gate.yaml`, only when `stop_check` found something), and on the calling agent's PostToolUse for `Agent` the file of the `agentId` in the tool result is added to its context and removed, e.g.
-
-```
-[feedback-gate] Results of the hooks run when subagent code-implementer (a1b2c3) stopped (gate checks and feedback stop_check). Use these instead of reading the gate logs or re-running the checks:
-[gate] All checks passed: lint ✓ / typecheck ✓ / test ✓
-```
-
-What is handed over is the result of the last SubagentStop (the one that let the subagent stop): `[gate] All checks passed: ...`, the `checks` phase summary, or the give-up message with the failures after `MAX_ATTEMPTS`; and the `stop_check` warnings (or its give-up). The stop right after a success report runs no gate command, so it keeps the `All checks passed` of the round before. When nothing ran and nothing was found, nothing is added. A subagent started in the background finishes after its PostToolUse, so its result is not handed over; like the other state files, such files are removed by `reset-gate` at session start (`startup` / `clear`, or after 24 hours).
-
-### Agent launch guard (optional)
-
-`src/agent-launch-guard.ts` is active only when the `agentLaunchGuard` option (`userConfig`) is `true`. It is `false` by default. When enabled, it runs on PreToolUse for `Agent` and `SendMessage` and returns `ask`, putting the full text that would be sent into the confirmation reason so you can review it before the subagent receives it:
-
-- `Agent`: asks when `subagent_type` is `code-implementer`, showing the `prompt`.
-- `SendMessage`: asks for every recipient except `git-operator`, showing the `message`.
-
-Anything else passes through to the normal permission flow. The default agent types and allowed recipients are the `ASK_AGENT_TYPES` and `ALLOW_RECIPIENTS` arrays at the top of `src/agent-launch-guard.ts` (`AskAgentTypes` / `AllowRecipients` in `internal/hookgate/agent_launch_guard.go`). Both the mod hooks and the command hooks (the `feedback-gate` binary) can replace them with the environment variables `FEEDBACK_GATE_ASK_AGENT_TYPES` (the `subagent_type`s to ask about) and `FEEDBACK_GATE_ALLOW_RECIPIENTS` (the recipients that need no confirmation), each a list separated by `,` or `;` (spaces around the names are ignored; an unset or empty variable keeps the default), e.g. `FEEDBACK_GATE_ASK_AGENT_TYPES='code-implementer;worker'`.
-
-To enable it, turn on `agentLaunchGuard` on the settings screen shown when you install the plugin with `/plugin`, or change it later in the `/config` menu (the plugin's `agentLaunchGuard` row).
-
-### Automatic count increase
-
-When a hook (`pre_bash` / `pre_edit` on PreToolUse, `post_edit` on PostToolUse, `stop_check` on Stop / SubagentStop) detects a feedback rule violation, it raises that rule's `count` by 1 at the same time it writes the violation log. Repeating the same violation escalates enforcement from warn to ask / block to deny, instead of the rule staying at `count: 1` forever. Violations found when PostToolUse(Bash) checks files written by Bash (heredoc, `python`, `sed -i`, ...; `post_edit` and the after-the-command `pre_edit` described in "Files written by Bash" above) count too, the same as for Edit / Write.
-
-- Only the `count: N` line inside the frontmatter of the rule file actually used is rewritten (when the global and project directories both have a rule with that name, the project one). The line must be a plain number; a rule without a numeric `count` line is left alone. The new text is written to a temporary file in the same directory and moved into place with `mv`.
-- Increases are limited per session and rule name: within one session a rule is raised at most once, however often it is violated (multiple matching `enforce` entries, repeated Stop blocks). A violation in a later session raises it again. The rules already raised are recorded in `~/.claude/feedback/.count_state/<session_id>.json`; calls without a `session_id` never raise a count.
-- The cap is `5` (the count that means deny when no `severity` is given); counts at or above it are not raised.
-- The current decision still uses the count from before the increase; the new enforcement applies from the next violation. When a count is raised, a line saying `count` went from N to N+1 is added to the deny / ask / block reason (or to stderr for warn), so the model sees it too.
-- A failed write never stops the hook.
-
-To turn it off, set `autoCount` in `userConfig` to `false` (default `true`; on the settings screen shown by `/plugin` at install time, or later in `/config`).
-
-### Language of the messages
-
-Everything the hooks print (the feedback rules injected into the context, the block / warn reasons, the gate results, the band and the status line, the desktop notifications, the `/correct` report and the bundled rules file) is available in English and Japanese. The `language` option (`userConfig`, set on the `/plugin` install screen or later in `/config`) chooses it:
-
-- `auto` (default): follow the OS language. The hooks read `FEEDBACK_GATE_LANG` (a plugin-specific override, `ja` or `en`), then `LC_ALL`, `LC_MESSAGES` and `LANG`, and use the first one that has a value: Japanese when it starts with `ja` (e.g. `ja_JP.UTF-8`), English for anything else (`en_US.UTF-8`, `C`, `POSIX`, ...). When none of them is set, English.
-- `ja` / `en`: always that language, whatever the environment.
-
-The texts live in `locales/ja.yaml` and `locales/en.yaml` (one key per message, `{{name}}` for the values filled in at runtime; both files must have the same keys, which a test checks) and are looked up with [i18next](https://www.i18next.com/); the language resolution is in `src/i18n.ts`. To change a wording, edit the YAML. The examples below show the English texts; with Japanese you get the Japanese ones (e.g. `[gate] 実行中:` for `[gate] running:` and `[gate] 完了:` for `[gate] done:`). Your own `rulesFile` and the `message` of your feedback rules are shown as you wrote them, in any language.
-
-```mermaid
-flowchart LR
-  P[UserPromptSubmit] --> I[feedback-inject]
-  T[PreToolUse: Bash / Edit / Write / MultiEdit] --> G[feedback-guard]
-  T2["PreToolUse: Agent / SendMessage<br/>(agentLaunchGuard = true)"] --> AL[agent-launch-guard]
-  E[PostToolUse: Edit / Write / MultiEdit] --> R[record-changes]
-  R --> PE[feedback-post-edit]
-  PE --> S[stop-test-gate: rules]
-  EB[PostToolUse: Bash] --> BC[bash-changes]
-  BC --> BE["feedback-bash-edit<br/>(post_edit + pre_edit)"]
-  BE --> S
-  S --> SG[gate]
-  X[Stop] --> A[all-stop]
-  A --> C[stop-test-gate: checks]
-  A --> F[feedback-stop-check]
-  C --> SG
-```
-
-## Commands
-
-### `/correct`
-
-Fixes a repeated mistake at the layer that works best. It aggregates the feedback rules (`~/{.claude,.agents}/feedback/*.md` and `<project>/{.claude,.agents}/feedback/*.md`) and the violation log (`~/.claude/feedback/.violations.jsonl`), then proposes how to tighten them. The command is registered on `session.start` by `src/register.ts`; the logic is in `src/correct.ts`.
-
-```
-/correct [--window 30d] [--min 2] [apply]
-```
-
-- `--window`: how far back to count violations, `Nd` or `Nh` (default `30d`).
-- `--min`: the minimum number of violations in the window before a proposal is made (default `2`).
-- `apply`: write the `bump` proposals to the rule files (see below). Without it nothing is changed.
-
-Unknown arguments are ignored. There are five kinds of proposals, listed in this order:
-
-| Kind | When | Proposal |
-| --- | --- | --- |
-| `broken` | A rule file cannot be read, or an `enforce` entry in it is invalid (see [Broken rules](#broken-rules)). The rule name is the file name without `.md`. | Fix the file; the reason is shown. |
-| `bump` | An active rule has at least `--min` violations in the window. | `count` 1-2: raise to 3 (confirmed rule). `count` 3-4 with at least `--min` `ask` / `block` violations in the window: raise to 5 (`deny`). `count` >= 5 is never proposed. |
-| `enforce` | An active rule has `count >= 3` but no `enforce`, so no hook can detect it (and the violation log never sees it). | Add `enforce` entries; a template for the four events is shown. |
-| `stale` | An active rule has `count >= 3` and `enforce`, but has never appeared in the violation log. | Check that the `enforce` works and the rule is not out of date. |
-| `expired` | A rule file is inactive because of `expires`, `projects` or `when_exists`. | Delete or update it. |
-
-`apply` rewrites only the `count:` line inside the frontmatter of the `bump` rules, and lists the changed files. Nothing else in the files is touched. `enforce` (and `stale` / `expired`) are proposals only: Claude is told to show them to you and to ask before editing any file.
-
-With the automatic increase (`autoCount`) on, `count` goes up by 1 per session in which the rule is violated. A `bump` proposal instead jumps to 3 or 5 based on the violations in the window; it always starts from the current `count`, and `apply` only rewrites a file whose `count` still matches the proposal, so the two never add up twice.
-
-### `/hook-list`
-
-Shows, as a page in the browser, what feedback-gate runs in this project and when. It changes no rule or gate file.
-
-```
-/hook-list [--no-open]
-```
-
-The list is built by the Go binary (`feedback-gate <claude|codex> hook-list`, `internal/hookgate/hook_list.go`) and the page is `webui/hook-list.html` (embedded in the binary). The mod's `/hook-list` (`src/hook-list.ts`) only runs it through `scripts/hook-list.sh`, so the same page is available where the mod's hooks do not run (managed environments) and in Codex, through the same script (the `/feedback-gate:hook-list` skill; in Codex, `bash <plugin>/scripts/hook-list.sh codex`). The HTML is written to `~/.claude/feedback-gate/hook-list/<project path>-<hash>.html` and opened in the default browser (`open` on macOS, `xdg-open` or `wslview` elsewhere, `start` on Windows). Where no browser can be opened (a remote machine) or with `--no-open`, it returns the path of the file.
-
-The page shows:
-
-- **gate.yaml**: the path of the file found, then `rules` (PostToolUse right after an edit: `match`, the `run` commands, `parallel`, `run_checks`, `dir` / `per_file_dir` / `timeout` / `policy`), `consistency_checks` (Stop / SubagentStop; a check no rule names in `run_checks` is marked as never running) and `session_start` (SessionStart; `on` / `background`), each with when it runs. A missing or unparsable file is reported as such.
-- **feedback rules**: for each active rule of the merged global + project view, where it lives, its `count` and level (provisional / confirmed / deny), how it is injected (every prompt / when a file matching `files` is read or edited / never), each `enforce` entry (event and effective severity, `path` / `changed` / `when` / `unless` / the `check` command, ...) and the file path. Then the inactive rules (expired, `projects` / `when_exists` not matching) and the unreadable ones, with the reason.
-- **Plugin settings**: the current `agentLaunchGuard`, `autoCount` and `language`.
-
-The feedback rules are a table with one row per rule; opening a row shows the details above. Buttons filter by level, scope and event, and a text box by name, command or glob, so dozens of rules stay easy to scan. Inactive rules are collapsed to a count; unreadable ones are shown open. The page follows the light / dark setting.
-
-## Skills
-
-Three skills, plus the `effort-<level>` skills that only switch the effort ([below](#feedback-gateeffort-level)), are bundled under `skills/`. Claude Code loads them with the plugin; invoke them as `/feedback-gate:<name>` or let Claude pick them up from their descriptions. Each is a `SKILL.md` with the procedure plus reference files it reads when needed; the hooks do not depend on them.
-
-### `/feedback-gate:feedback`
-
-Creates, updates and reviews the feedback rule files (`~/.claude/feedback/*.md`, `<project>/.claude/feedback/*.md`).
-
-```
-/feedback-gate:feedback [create|update|review] [topic or rule name]
-```
-
-- `create`: when you give feedback, a correction or a preference. Confirms that you want it saved, picks global or project scope (or a scoped global rule via `projects` / `when_exists` / `expires`), turns the concrete remark into an abstract rule whose first paragraph is what the hook injects, names the file in snake_case, sets `count` (1 provisional, 3 confirmed), adds `enforce` only when a hook can detect the violation (choosing the event, testing the regular expression), and reads the file back to check the frontmatter.
-- `update`: the same feedback again (raises `count` by 1, unless the hook already did in this session), a rule that fired wrongly (narrowed with `unless` / `exclude_path` instead of deleted), a confirmed rule without `enforce`, rewording, rescoping.
-- `review`: the periodic inventory (`skills/feedback/review.md`). Runs `/correct`, counts the violations per rule from `.violations.jsonl`, and presents one table with a proposal per rule: keep, promote, fix, narrow, merge, rescope or retire (expired, obsolete, or now covered by `gate.yaml` or a linter). Nothing is deleted or merged without asking.
-
-The format reference (`skills/feedback/reference.md`) and complete examples for the four `enforce` events (`skills/feedback/examples.md`) travel with the skill. The skill edits only rule files, never the hooks' state files.
-
-### `/feedback-gate:gate`
-
-Writes or updates the project's `.claude/gate.yaml`.
-
-```
-/feedback-gate:gate [init|update|review]
-```
-
-It first reads what the project already runs instead of guessing: the manifests (language and package manager), the task runner (`Makefile`, `justfile`, `Taskfile.yml`, `mise` tasks, `package.json` scripts), the CI configuration (GitHub Actions, GitLab CI, CircleCI, ...) and pre-commit style hooks, and the repository layout (single package, workspaces, one directory per package). It then maps those to the gate: file-scoped lint / format / typecheck and package tests in `rules` (with `$CLAUDE_GATE_FILES` where the tool accepts files), whole-project tests and builds in `consistency_checks` referenced by `run_checks`, `per_file_dir` for monorepos, a `name` on every command, `parallel` groups, `timeout` from measured durations and `files: false` for whole-project commands; CI-only steps (coverage upload, deploys, steps that need services or secrets) are left out and listed in the report. Before handing over it runs every command once on the current tree (through the normal permission flow), checks the file against the schema's key set and makes sure `.claude/.gate-status/` is in `.gitignore`. `review` reports the drift between the current file and CI without editing. The field reference, the discovery checklist and per-toolchain recipes (TypeScript, workspaces, Python, Go, Rust, Ruby, JVM, Terraform, shell, Makefile-driven) are in `skills/gate/`.
-
-### `/feedback-gate:hook-list`
-
-Shows the same page as [`/hook-list`](#hook-list) by running `scripts/hook-list.sh` (argument: `--no-open`). Use it in managed environments where the mod's `/hook-list` is not available; Claude may also use it when asked which hooks, gate rules or feedback rules are registered in the project.
-
-### `/feedback-gate:effort-<level>`
-
-Five skills: `effort-low`, `effort-medium`, `effort-high`, `effort-xhigh` and `effort-max`. Their body is nearly empty; the `effort` key of the frontmatter switches the effort of the rest of the turn that invoked the skill (a Claude Code skill feature: a level the model does not support becomes the highest supported level at or below it, and the environment variable `CLAUDE_CODE_EFFORT_LEVEL` takes precedence when set). Hook output cannot change the session's effort, so [stop_review](#stop_review) has Claude invoke this skill from the block reason. You can also use it yourself, e.g. `/feedback-gate:effort-max find out why this test fails`.
+Besides Claude Code it runs in [Codex](plugins/codex/README.md) and Claude Cowork, with the same rules and the same `gate.yaml`.
 
 ## Install
 
@@ -215,207 +18,137 @@ Five skills: `effort-low`, `effort-medium`, `effort-high`, `effort-xhigh` and `e
 /plugin install feedback-gate@claude-hook-gate
 ```
 
-The first command adds this repository as the `claude-hook-gate` marketplace; the second installs the `feedback-gate` plugin from it. Then choose the scope.
+Installing it blocks nothing. It starts working once you add rules and a `gate.yaml`.
 
-### Codex
+## Getting started
 
-The same hooks are also packaged as a [Codex](https://developers.openai.com/codex) plugin in [`plugins/codex/`](plugins/codex/README.md) (catalog: `.agents/plugins/marketplace.json`). It reads the same feedback rules and the same `gate.yaml` (looking in `.agents/` first, then `.claude/`), so a project used with both tools is checked the same way:
-
-```
-codex plugin marketplace add nonchan7720/claude-hook-gate
-```
-
-then install `feedback-gate` from `/plugins`, run its `install-hooks.sh` once (below) and trust the hooks in `/hooks`. The plugin root is this repository (the Codex manifests `.codex-plugin/plugin.json` and `plugin.json` at the root point at `plugins/codex/hooks/hooks.json`), so `rules/`, `scripts/dogwood/` and `scripts/install-binary.sh` (the binary downloader) are shared, not copied. The checking logic is shared; what differs between the two hosts (Codex edits files with `apply_patch`, has `PermissionRequest` instead of `Notification`, and no `ask`) is isolated behind the `Host` interface of the Go binary (`Host` in `internal/hookgate/host.go`, implemented by `host_claude.go` and `host_codex.go` for `feedback-gate claude` / `feedback-gate codex`; `apply_patch.go` splits the patch). The TypeScript mod (`src/register.ts`) is Claude Code only and is unchanged. See the [plugin README](plugins/codex/README.md) for the differences and the environment variables that replace the plugin settings. Codex does not run plugin-bundled hooks yet (its `plugin_hooks` feature is still under development), so after installing run `plugins/codex/scripts/install-hooks.sh` once, without arguments (or the one-liner `gh api repos/nonchan7720/claude-hook-gate/contents/plugins/codex/scripts/setup.sh -H "Accept: application/vnd.github.raw" | bash`, which finds the newest installed version, runs its installer for you and installs the `feedback-gate-setup` command, which updates the plugin and refreshes the hooks in one go; see [Install](plugins/codex/README.md#install)): it writes the same hooks into `~/.codex/hooks.json`, and a marker keeps that copy silent once the plugin's own hooks run. Where an organization's `requirements.toml` sets `allow_managed_hooks_only` (the Codex counterpart of the guard described under [Settings hooks for managed environments](#settings-hooks-for-managed-environments)), only hooks in the managed layer run; on a machine you administer yourself the setup command detects the policy and installs into `/etc/codex/hooks.json` with `sudo` (`--system` when the policy comes from MDM or the workspace), otherwise `--print` / `--toml` produce the hooks for the administrator. The Codex sandbox also keeps Codex itself from writing under `.agents/` and `.codex/` in the project, so rules Codex should maintain belong in `.claude/`. See [Install](plugins/codex/README.md#install), [If the hooks still do not run](plugins/codex/README.md#if-the-hooks-still-do-not-run), [Putting the hooks in the managed layer yourself](plugins/codex/README.md#putting-the-hooks-in-the-managed-layer-yourself) and [Rules and `gate.yaml` under the Codex sandbox](plugins/codex/README.md#rules-and-gateyaml-under-the-codex-sandbox).
-
-### Claude Cowork
-
-Cowork in the Claude desktop app installs from the same marketplace. In Cowork, open **Customize → Plugins → Add marketplace**, add `nonchan7720/claude-hook-gate`, and install `feedback-gate` from the list (plugins installed in Cowork also sync to Claude Code 2.1.273 or later).
-
-Cowork loads the plugin's command hooks in `hooks/hooks.json`, but it is not documented as a place where mods (the `register.js` in `modules` of `hooks.json`) run. So in Cowork the checks run through the same path as the [settings hooks for managed environments](#settings-hooks-for-managed-environments): `scripts/hook.sh` → `feedback-gate claude <Event>` (the Go binary). The decisions (deny / ask, block, added context) are the same as the mod's. The differences:
-
-- **Commands**: `/correct` and `/hook-list` are registered by the mod, so they do not appear. Use the [skills](#skills) instead: `/feedback-gate:hook-list` for the list, `/feedback-gate:feedback` to write and review rules. The skills work in Cowork as they are.
-- **Plugin options**: Cowork does not ask for `userConfig` values. Without `CLAUDE_PLUGIN_OPTION_*` the binary uses the defaults (`language: auto`, `agentLaunchGuard: false`, `autoCount: true`, `rulesFile` at `~/{.claude,.agents}/feedback-gate/feedback_rules.md`, falling back to the bundled rules file). The language follows `FEEDBACK_GATE_LANG` or the OS language.
-- **Getting the binary**: the first time (and after each version bump) `scripts/install-binary.sh` downloads `feedback-gate_<os>_<arch>.tar.gz` and `checksums.txt` from the GitHub release. It needs `bash`, `curl` or `wget`, `tar`, `sha256sum` or `shasum`, and HTTPS to `github.com` and the host release files redirect to (`release-assets.githubusercontent.com`, formerly `objects.githubusercontent.com`). If any of these is missing the hooks do nothing and print one line with the reason on stderr (they never block your work). If your organization restricts Cowork's outbound hosts, ask for these hosts to be allowed, or point `FEEDBACK_GATE_BIN` at the binary.
-- **Windows**: without Git for Windows Cowork runs hooks in PowerShell, so `scripts/hook.sh`, which needs `bash`, does not run. `install-binary.sh` also handles only Linux and macOS (amd64 / arm64), so on Windows the hooks currently do nothing.
-- **Writing rules and `gate.yaml`**: Cowork refuses writes under the given folder's `.claude/` as a protected location, so Claude cannot create rules in `<project>/.claude/feedback/` there. The hooks also read `<project>/.agents/feedback/` (after `.claude/feedback/`; a rule of the same `name` in `.claude/` wins) and `<project>/.agents/gate.yaml` (when there is no `.claude/gate.yaml`), so in Cowork keep them there. The rules file injected into every prompt (`rules/feedback_rules.md`) and the skills `/feedback-gate:feedback` and `/feedback-gate:gate` tell Claude to switch to these paths when a write under `.claude/` is refused. The global `~/.claude/feedback/` is outside the folder Cowork works in, so copy rules meant for it there yourself.
-- **Files it reads**: feedback rules (`~/{.claude,.agents}/feedback/*.md`) and `{.claude,.agents}/gate.yaml` are read from the home directory of the machine the hook runs on and from the folder you gave Cowork. Cowork does not read the Claude Code CLI's settings and plugins in `~/.claude`, but that does not stop the hook process from reading files itself.
-
-The official docs do not list which events of `hooks.json` (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Notification, Stop, SubagentStop) Cowork fires. After installing, check by adding one confirmed rule (`count: 3`) and seeing it injected into a prompt (UserPromptSubmit), and by editing a file in a folder with a `gate.yaml` and seeing the gate run (PostToolUse / Stop). If an event does not fire, please open an issue.
-
-## Requirements
-
-Nothing to install for the mod hooks: they are plain TypeScript, bundled into one JavaScript file that Claude Code runs itself (no Python, bash or jq).
-
-- `curl` or `wget` and `bash` (optional): needed only by the settings hooks (`hooks/hooks.json`), once per plugin version, to download the `feedback-gate` binary (`tar` and `sha256sum` / `shasum` are required as well: without a hash tool nothing is installed). Without them, and while the binary is not cached, the settings hooks do nothing. `jq` is not required (used if present).
-
-- `terminal-notifier` (optional, macOS): needed only for the desktop notifications.
-- `dogwood` (optional; an AWS tool, source at <https://github.com/dogwood-policy/dogwood>). Build and install it with `cargo install --git https://github.com/dogwood-policy/dogwood amzn-dogwood-cli` (crate `amzn-dogwood-cli`, binary `dogwood`). The gate uses it to decide whether each `{.claude,.agents}/gate.yaml` command runs now or is deferred. It is looked up in `DOGWOOD_BIN`, `PATH`, `~/.cargo/bin/dogwood` and `~/.local/share/mise/shims/dogwood`, in that order. When it is not found, commands under the bundled default policy run every time, while commands under a `policy:` you set are skipped and deferred.
-
-## What it reads
-
-- `{.claude,.agents}/gate.yaml` in the project (opt-in: without it, the gate does nothing). The format is described by `scripts/gate.schema.json`; the default policy is in `scripts/dogwood/`.
-- `~/{.claude,.agents}/feedback/*.md`: feedback rules with frontmatter (`name`, `description`, `type`, `count`, optional `enforce`, `expires`, `projects`, `when_exists`, `files`, `exclude_files`). Rules with `count >= 3` are injected and enforced; those with `files` (globs relative to the project root) are injected when a matching file is read or edited instead of on every prompt (see [File-scoped rules](#file-scoped-rules)). `expires` (`YYYY-MM-DD`, valid through the end of that day in UTC, or an ISO 8601 datetime) turns a rule off after that point; `projects` (a string or list of globs matched against the project directory's absolute path, a leading `~` expands to `HOME`) limits it to matching projects; `when_exists` (a string or list of globs relative to the project root) limits it to projects where at least one exists. A rule is active only when all three that are set are satisfied; an unparsable `expires` is ignored. These filters apply only to the merged global + project lookup, and an expired project rule also hides the global rule of the same name. Override the directory with `CLAUDE_FEEDBACK_DIR`. The project's `.claude/feedback/*.md` is read as well; when a project rule has the same `name` as a global one, the project rule takes precedence.
-- <a id="broken-rules"></a>Broken rules: one broken rule file never turns off the other rules. A file whose frontmatter is not valid YAML is skipped on its own. An `enforce` that is not a list (for example a forgotten `- `) is treated as empty, and an `enforce` entry that is not a mapping (`- ` with nothing after it), or whose `when` / `unless` is not a usable regular expression, is dropped on its own; the rest of the rule still works. An entry that throws while being evaluated is skipped the same way. Regular expressions are written in Python's `re` syntax and run as JavaScript: a leading `(?i)` / `(?s)` / `(?m)`, `(?P<name>...)`, `(?P=name)`, and `\A` / `\Z` / `\z` (start / end of the whole text, also under the multiline flag used by `pre_edit` / `post_edit`) are translated; a leading `(?x)` and anything JavaScript rejects (an inline flag in the middle such as `x(?i)y`, `a*+`, `(?#...)`, `(?P>name)`) make that entry invalid. Each broken file or entry is recorded once, with the file and the reason, in `~/.claude/feedback/.errors.jsonl` (next to `.violations.jsonl`), and is listed at the top of the context injected on every prompt (`The following rule files could not be read and are disabled: ...`) until it is fixed; `/correct` reports it as a `broken` proposal. Internal errors that the feedback hooks swallow so as not to stop your work are recorded in the same file.
-- `~/.claude/feedback/.inject_state/<session>[--<agent>].json`: the `files`-scoped rules already injected in the current turn (see [File-scoped rules](#file-scoped-rules)). Removed on every prompt and at session start; entries older than 24 hours are swept.
-- The rules file, added to the context on every prompt. By default the bundled `rules/feedback_rules.md` (Japanese) or `rules/feedback_rules.en.md` (English) is used, by the language above. To replace it entirely, put your own file at the `rulesFile` path (default `~/.claude/feedback-gate/feedback_rules.md`, configurable in the plugin settings; a leading `~` is expanded). If that file exists it is used instead of the bundled one (never both, whatever the language). Avoid `~/.claude/rules/`: Claude Code loads that directory itself, so the rules would be injected twice.
-
-The configuration directory is `.claude` or `.agents`: each file above is looked up in both, `.claude` first under Claude Code and `.agents` first under Codex. State files (changed files, attempt counters, command logs) are written under `.gate-status/` in the first of the two that exists (`.claude/` when neither does; `gate.yaml` stays directly under it). Symlinking one to the other is fine: a rule found through both paths is read once, and the state has one home. Add `.gate-status/` to the project's `.gitignore`. State files left by older versions directly under `.claude/` (and `.claude/hooks/logs/`) are removed automatically at session start. `bash_started.*.json` there (or under `~/.claude/feedback/.bash_started/` in a project without `gate.yaml`) holds the start time of the Bash command in flight, used to tell which files that command rewrote. It is keyed by the `tool_use_id` of the call, which both PreToolUse and PostToolUse carry, not by the session / agent id: the engine does not pass the agent id to `classic.PreToolUse`, while `classic.PostToolUse` has `agent_id`, so a key based on them would not match inside a subagent. Files left by commands that failed (no PostToolUse) are removed at the next Bash start once they are older than 2 hours.
-
-While gate commands run, a band above the prompt shows what is running, one item per line, e.g.
+### 1. Give the project a quality gate
 
 ```
-[gate] running:
-  typecheck ✓ (0.7s)
-  lint ✗ (0.2s)
-  test $ bun run test (8s)
+/feedback-gate:gate init
 ```
 
-Finished commands stay in start order with `✓` for success or `✗` for failure and their fixed duration; a running one shows `name $ cmd` and its elapsed seconds, refreshed every second. A multi-line command is folded to its first line, and a long one is cut with ` ...` so each line stays around 80 characters. The band yields to the engine's own band while a survey is shown.
-
-The band is shared by the agents of one session (the main agent and its subagents): their running commands are merged into one list, e.g. `  lint $ bun lint (3s)` and `  test $ bun test waiting (2s)` under `[gate] running:`. `waiting` marks a command that is waiting for the same run in another agent (see below). The band disappears only when every agent of the session has finished; while another agent of the session is still running, its list stays. Other Claude Code sessions open on the same project (for example in another terminal) are not shown, and the one-line summary below is kept per session too.
-
-When everything has finished, the band goes away and the result of that round is left on the one-line status line instead, as counts only, e.g. `[gate] done: ✓ 5 / ✗ 1 (81.0s)` (`✗` is left out when nothing failed, `✓` when nothing passed; the seconds run from the first start to the last finish, not the sum, since checks run in parallel; check names are not shown, see the Stop hook output for which one failed. The status line cannot hold line breaks or long text, so it stays short). It stays until the next gate command starts running and the band appears again. Feedback checks still use the status line while they run: `[feedback-guard] evaluating: <rule>` or `[feedback-stop-check] checking: <rule> (<file>)`, cleared when the hook finishes.
-
-### session_start
-
-<a id="session_start"></a>A third phase of `gate.yaml`, `session_start`, runs commands on SessionStart (main session only; a payload with an `agent_id` is skipped) and adds their stdout to the session context (`additionalContext`), e.g. to load a code-graph summary. It runs after the reset step.
+This reads the project's language, task runner and CI, writes `.claude/gate.yaml`, and runs each command once to check it. Written by hand it looks like this:
 
 ```yaml
-session_start:
-  - name: depgraph
-    cmd: "command -v depgraph >/dev/null || exit 0; depgraph hook session-start --format text"
-    timeout: 10                        # seconds, default 10 (not 300)
-    on: [startup, resume, clear, compact]   # optional; default: every source
-    background: false                  # optional; true = start and do not wait
+# .claude/gate.yaml
+rules:                      # run right after a file is edited
+  - match: ['src/**/*.ts']
+    run:
+      - name: lint
+        cmd: bun run lint
+    run_checks: [verify]    # reserve a check for when Claude stops
+
+consistency_checks:         # run on Stop / SubagentStop; a failure blocks the stop
+  - name: verify
+    run:
+      - name: test
+        cmd: bun run test
+
+stop_review: true           # optional: review the changes before stopping
 ```
 
-- `on` filters by the `source` of the SessionStart payload; the source is passed as `CLAUDE_SESSION_SOURCE`. Unknown values never match. A plain string item is shorthand for `{cmd: ...}`.
-- Environment: `CLAUDE_PROJECT_DIR`, `CLAUDE_SESSION_ID`, `CLAUDE_SESSION_SOURCE`, `CLAUDE_GATE_FILES` (empty); `CLAUDE_AGENT_ID` is unset.
-- Commands run in parallel, bounded by `max_parallel`. The stdout of each command that exits 0 is joined in declaration order under a header `[gate] session_start: <name>`; empty output injects nothing. The output is plain text, or a SessionStart hook JSON object, from which only `hookSpecificOutput.additionalContext` is taken (a JSON object without a non-empty one injects nothing; a top-level `systemMessage` in it is shown to the user). The total is capped at 8 KiB (8192 characters), with a note when truncated.
-- A failing or timed-out command never blocks the session: it is reported with its exit status and log path (`.claude/.gate-status/logs/<session>/<name>.<id>.log`) once on stderr and as a top-level `systemMessage` of the hook output (Claude Code does not show the stderr of an exit-0 hook), the hook still exits 0, and the other commands still run. A `timeout` above 600 is capped to 600; the SessionStart hook itself waits at most 600 s (`timeout: 600` in `hooks/hooks.json`) for the whole phase.
-- `background: true` starts the command detached (output goes to the log only, nothing is injected) and the hook does not wait for it.
-- No policy and no sharing: these commands are not deferred by dogwood and not shared between agents, because their output is needed now. Only the project root's `gate.yaml` is read.
+State files are written to `.claude/.gate-status/`; add it to `.gitignore`.
 
-### stop_review
+### 2. Turn a correction into a rule
 
-<a id="stop_review"></a>Having the model check its own result improves accuracy, so this setting forces one "review what you changed" step right before stopping. It is off by default and only runs in projects whose `gate.yaml` enables it.
+After correcting Claude, ask for:
 
-```yaml
-stop_review: true          # enabled with all defaults
-# or
-stop_review:
-  effort: xhigh            # low / medium / high / xhigh / max. Default xhigh. false leaves the effort alone
-  match: ['src/**', '**/*.go']   # changed files to review (default: all)
-  max_rounds: 1            # how many times in a row the fixes made during a review are reviewed again (default 1, at most 5)
-  subagents: true          # also on SubagentStop (default true)
-  prompt: |                # project-specific things to check, appended to the instructions
-    When you add a migration, check the down migration too.
+```
+/feedback-gate:feedback create
 ```
 
-- **When.** On Stop / SubagentStop, after the gate `checks` phase and the feedback `stop_check` passed (not on a stop one of them blocked), and only when this session (or, for a subagent, that agent) changed files since the last review. A turn that changed nothing (answering a question) is not touched.
-- **What it returns.** It blocks the stop once (`decision: block`) with these steps as the reason: first invoke `feedback-gate:effort-<effort>` with the Skill tool to switch the effort of the rest of the turn; re-read the diff of the changed files and the code around it from the real files; check that the request is fully met, logic and edge cases, callers / tests / docs that were not updated, leftover changes nobody asked for, and whether what can be run was run; fix what is found, or else report in 1-3 lines what was checked and stop. The list of changed files (up to 30) and `prompt` follow.
-- **Switching the effort.** Hook output has no way to change the session's effort, so the bundled skills ([`/feedback-gate:effort-<level>`](#feedback-gateeffort-level)) do it through their `effort` frontmatter. It lasts for the rest of the review turn only; the session setting is unchanged. The model is the one that invokes the skill, so when it does not, or where a skill's `effort` is not honored (Codex, for example), the effort stays as it was and only the review happens.
-- **The list of changed files.** Files are added to `.claude/.gate-status/review_pending.<session>[--<agent>].txt` at the same moments as `changed_files` (Edit / Write / MultiEdit, and the files a Bash command rewrote). Unlike `changed_files` it is not emptied when the gate passes; it is emptied when a review is issued.
-- **No loop.** Fixes made during the review are added to the list too, so the next Stop would ask for another review. That stops after `max_rounds` rounds (`review_rounds.<session>[--<agent>].txt`). With the default of 1 there is one review per turn, and its fixes go through (still checked by the gate and `stop_check`) without another review. The counter returns to 0 on a Stop with nothing to review and on the Stop that hit the limit. It only counts while the stop is continuing from a hook block (`stop_hook_active`), so a counter left behind by an interrupted turn does not make the next turn's Stop skip its review.
-- **Limits.** `gate.yaml` is repository content, so an untrusted repository must not be able to hold the stop indefinitely or push long text into the conversation: `max_rounds` is at most 5 (a larger value counts as 5), `prompt` is at most 2000 characters (the rest is cut) and is printed under the heading "Project-specific checks (from stop_review.prompt in gate.yaml)". Each changed file path is cut at 300 characters, and a path containing a line break is left out of the list. An invalid `match` glob makes every changed file count.
-- The state files are removed by `reset-gate` on SessionStart like the others (`startup` / `clear`, or older than 24 hours). The Stop that finally goes through after a review sends the `stop` notification.
+It turns the correction into a general rule and saves it in `~/.claude/feedback/` (all projects) or `<project>/.claude/feedback/` (that project only). A rule is a file like this:
 
-### Sharing runs between agents
+```markdown
+---
+name: no_force_push
+description: Never force-push; rewrite history only when the user asks for it.
+type: feedback
+count: 3
+enforce:
+  - event: pre_bash
+    when: 'git\s+push\b.*(\s--force\b|\s-f\b)'
+    message: 'Do not force-push. Push a new commit, or ask the user first.'
+---
 
-When several agents (the main session and subagents) run the same command at the same time, the gate starts it once. A command is the same when the root, the cwd, the `cmd` and the environment passed to it all match; the variable that identifies the agent (`CLAUDE_AGENT_ID`) and the list of target files (`CLAUDE_GATE_FILES`) are ignored. The file list is handled separately because it can differ per agent. The agent that comes later looks at the runs in progress under the same conditions: if one of them targets every file of its own list (an empty list is contained in any), it does not start the command again but waits for that run and receives the same result (exit status, output, timeout). The result is then handled as if that agent had run it itself: it is recorded in its own trace and log directory, it consumes a deferred entry with the same key, and it counts for its phase result. A finished run is never reused; only overlapping runs are merged. Coordination goes through files under `.claude/.gate-status/shared/` (a lock directory per command and file list), because the hooks of different agents are not guaranteed to run in the same process.
-
-When there is no run it can receive (its files are not covered, or the environment, root or cwd differ), the same command still runs only once at a time. The unit is the `name` (or the `cmd` when there is no name): while it is running in another agent, the gate does not start it but waits for that run to end, then looks again for a run to receive or runs it itself (the band shows it as waiting meanwhile). Running a heavy command such as `go test ./...` once per agent at the same time makes every run several times slower as they fight over the CPU. Different commands given the same `name` also run one at a time. This also holds between agents working in different git worktrees of the same repository: the locks live in `~/.claude/.gate-status/shared/<project_id>/`, where the project id is derived from the repository's common git directory (results are still received only within the same worktree, since the root and cwd differ). Whether a lock is alive is decided by the command's process: if the hook is stopped (for example with ESC) and leaves its lock behind, the next agent takes it over as soon as the command has exited, and waits for the command while it is still running. A lock is also treated as dead once the command's `timeout` has passed. A command with `share: false` is neither shared nor serialized; it always starts at once.
-
-Two more things keep that waiting short when many agents stop at about the same time. First, the file lists of the agents waiting for a run with the same `name` are batched: while it waits, each agent leaves its key and file list under `<serial>.queue/`, and the next agent to start that command runs it once on the union of its own files and theirs (`CLAUDE_GATE_FILES` carries the union), so all of them receive that one result instead of running one after the other. Such a run covers files of other agents too; a failure in those files fails every agent that receives it, exactly as with a received superset run. Second, `max_parallel` at the top level of `gate.yaml` caps how many gate commands run at the same time across all agents and worktrees of the project (default `2`; `false` for no cap). An agent about to start a command first takes one of the `slot.<i>/` directories under the shared directory and waits for a free one otherwise; receiving a shared result needs no slot. The cap also applies inside a `parallel` block and to `share: false` commands. With ten subagents and whole-project tests, it keeps each run close to its standalone duration instead of all of them crawling (and timing out) together:
-
-```yaml
-max_parallel: 2   # default; false for no cap
-rules:
-  - ...
+Do not force-push a branch. Add commits instead.
 ```
 
-To opt a command out of sharing (and serializing), set `share: false` on its `run` element (`{cmd, name, timeout, share, files}`):
+`count` sets how strongly the rule is enforced. It goes up by 1 each time a violation is detected (once per session, up to 5).
 
-```yaml
-run:
-  - { cmd: "bun test", name: test, share: false }
-```
+| count | Injected into prompts | Before a command or edit | After an edit, on stop |
+| --- | --- | --- | --- |
+| 1-2 (provisional) | no | warn | warn |
+| 3-4 (confirmed) | yes | ask | block |
+| 5 or more | yes | deny | block |
 
-A command that does not use the target files (such as `go test ./...`, which runs everything regardless of the list) can set `files: false`. Its file list is then treated as empty when deciding whether to share, so it is shared even when the agents changed different files. `CLAUDE_GATE_FILES` is still passed to the command as before. When combined with `share: false`, `share: false` wins and nothing is shared.
+`enforce` has four events: `pre_bash` (before a command runs), `pre_edit` (before a write), `post_edit` (the whole file after an edit) and `stop_check` (the changed files on stop). The format and examples are in [`skills/feedback/reference.md`](skills/feedback/reference.md) and [`examples.md`](skills/feedback/examples.md).
 
-```yaml
-run:
-  - cmd: go test ./...
-    name: test
-    files: false
-```
+## What you see while it runs
 
-### Failures left unfixed
+- While gate commands run, a `[gate] running:` list appears above the prompt. When they finish, `[gate] done: ✓ 5 / ✗ 1 (81.0s)` stays in the status line.
+- When the gate fails, Claude gets the failure and keeps fixing (it gives up after 5 failures in a row). When everything passes, Claude gets a summary and then stops.
+- When a rule is broken, the call is warned about, asked about or denied according to `count`, and the rule's `message` goes back to Claude as the reason.
+- With `stop_review` enabled, a `[stop-review]` instruction appears once right before stopping, and Claude reviews its changes before it stops.
 
-A failed rule in the `rules` phase (PostToolUse) does not stop the turn: the result goes back to Claude as feedback. To keep the transcript small, that feedback does not carry the command output: it has one line per command (`[gate] ok: ...` / `[gate] fail: ...`) and, for each failed command, its heading, the timeout message if any and the log path (`[gate] log: .claude/.gate-status/logs/<state>/<name>.<id>.log`), with an instruction to open the log and fix the errors. The full output is only in that log, which is removed by the usual log cleanup (logs of the current session after 1 hour, logs of other sessions 5 minutes after their last write). The `checks` phase (Stop / SubagentStop) does the same: its block reason lists the failed commands with their log paths, not their output. The failed files are also kept in `.claude/.gate-status/gate_failed.<state>.txt`, and the next `checks` phase (Stop / SubagentStop) reruns their rules on the current contents before anything else. If a rule still fails, the stop is blocked like a failed consistency check (and no success report is given); once it passes, the file is handled as if the `rules` phase had passed. So a lint failure cannot be left behind by simply finishing the turn. After `MAX_ATTEMPTS` (5) blocked stops in a row, the gate gives up: the failures are dropped (the files stay in the changed list, so the next edit checks them again).
+## Commands and skills
 
-### Success report
+| Invoke | Use |
+| --- | --- |
+| `/feedback-gate:gate [init\|update\|review]` | Create or update `gate.yaml`, or report how it differs from CI |
+| `/feedback-gate:feedback [create\|update\|review]` | Create, update or audit rules |
+| `/correct [--window 30d] [--min 2] [apply]` | Count the violation log and propose raising `count` or adding `enforce` |
+| `/hook-list` | Show in the browser what runs in this project, and when |
+| `/feedback-gate:effort-<level>` | Switch the effort of the rest of the turn (used by `stop_review`) |
 
-When the `checks` phase (Stop / SubagentStop) actually ran at least one command and all of them passed, the gate blocks the stop once and returns a summary as the reason, e.g. `[gate] All checks passed: lint ✓ / typecheck ✓ / test ✓. Report this result to the user and finish.`, so the agent can report the result and finish instead of waiting for you to say it passed. The stop right after such a report (`stop_hook_active`) runs no gate command and passes. Nothing is reported when no command ran, when `stop_hook_active` is true (a continuation after a failure block), or when it is turned off with a top-level `report_success: false` in `{.claude,.agents}/gate.yaml` (default: on). Failures block as before.
+Details: [Commands and skills](docs/commands-and-skills.md).
+
+## Settings
+
+Set them on the `/plugin` install screen, or later in `/config`.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `language` | `auto` | Language of the messages (`ja` / `en`; `auto` follows the OS) |
+| `autoCount` | `true` | Raise a rule's `count` by 1 when a violation is detected |
+| `agentLaunchGuard` | `false` | Show the prompt and ask before sending instructions to a subagent |
+| `rulesFile` | `~/.claude/feedback-gate/feedback_rules.md` | Replace the shared rules file that is injected into every prompt |
+
+Details: [Settings](docs/settings.md).
+
+## Where it runs
+
+- **Claude Code**: nothing else to install.
+- **Managed Claude Code (Team / Enterprise) and Claude Cowork**: the plugin's function hooks do not run there, so a Go binary, `feedback-gate`, that performs the same checks is downloaded from the GitHub release on first use. It needs `bash` and `curl` or `wget`. See [Managed environments](docs/managed-environments.md) and [Cowork](docs/install.md#claude-cowork).
+- **Codex**: see the [Codex plugin README](plugins/codex/README.md).
+- **Optional tools**: `terminal-notifier` (notifications on macOS) and `dogwood` (decides whether a gate command runs now). See [Requirements](docs/install.md#requirements).
 
 ## Security and permissions
 
-What the plugin reads, runs, writes and decides, for reviewers and for anyone installing it.
+- The plugin itself sends nothing over the network. Data leaves the machine only through the commands you put in `gate.yaml` or in a rule's `check` (in a managed environment it also contacts GitHub to download the binary).
+- Its permission decisions are only `deny` and `ask`, never `allow`. It cannot skip your own permission prompts.
+- It writes only `<project>/.claude/.gate-status/`, its state files under `~/.claude/feedback/`, and the `count:` line of a rule.
+- The commands in `gate.yaml` are run as written. Read the `gate.yaml` of a repository you do not trust before you open it.
 
-- **Network**: the plugin's own code sends nothing over the network; it has no HTTP client. Data can leave your machine only through the programs it starts on your behalf (below): the commands you write in `{.claude,.agents}/gate.yaml` and in the `check` of your feedback rules, which run as you, and the macOS desktop notification.
-- **Credentials**: it reads no tokens, keys or passwords, and needs none. The only environment variables it reads are `CLAUDE_FEEDBACK_DIR`, `DOGWOOD_BIN`, `FEEDBACK_GATE_LANG`, `HOME`, `LANG`, `LC_ALL`, `LC_MESSAGES`, `PATH`, `TERM_PROGRAM` and `__CFBundleIdentifier` (to find files, programs and the message language). Commands you put in `gate.yaml` or a rule's `check` run with your environment, like any command you run yourself.
-- **What it reads from the conversation**: the tool input of Bash / Edit / Write / MultiEdit calls (the command, the file path and the new text), to check them against your feedback rules and to know which files changed; the prompt and message of `Agent` / `SendMessage` calls, only when `agentLaunchGuard` is on, to show them in the confirmation; and the text of the Notification event, to put it in the desktop notification. It does not read the transcript.
-- **What it reads from disk**: your feedback rules (`~/{.claude,.agents}/feedback/*.md`, `<project>/{.claude,.agents}/feedback/*.md`), the rules file, `{.claude,.agents}/gate.yaml`, its own state files (below), the files Claude edited, and git's view of the working tree.
-- **Programs it starts**:
-  - `sh -c` with the commands in `{.claude,.agents}/gate.yaml` and the `check` of your feedback rules (written by you; the plugin does not ship any).
-  - `git` (`rev-parse`, `ls-files`, `diff`, `log`; read-only) to find the repository root and the files a Bash command changed.
-  - `sh`, `mkdir`, `mv`, `rm`, `rmdir`, `kill -0`, `sleep` for its own state files and locks under the directories listed below.
-  - `dogwood` (optional) to decide whether a gate command runs now.
-  - On macOS, for notifications: `osascript` (reads the name of the front window, so it does not notify about the project you are looking at) and `terminal-notifier` (shows the notification; clicking it runs `open -b <terminal app>` or `code -r <project>` to bring the window forward).
-- **Files it writes**:
-  - `<project>/{.claude,.agents}/.gate-status/`: gate state, command logs and locks (only when the project has `{.claude,.agents}/gate.yaml`).
-  - `~/{.claude,.agents}/feedback/`: `.violations.jsonl`, `.errors.jsonl`, `.count_state/`, `.ask_state/`, `.new_rule_state/`, `.bash_started/`, `.classic_seen/` (one empty marker per session; written by the mod's `classic.*` hooks, read by `scripts/hook.sh`).
-  - The `count:` line in the frontmatter of your feedback rule files, which are instructions Claude follows: rewritten when a rule is violated with `autoCount` on (turn it off in the plugin settings), and by `/correct apply`. Nothing else in those files is changed.
-  - It does not write settings, `CLAUDE.md`, build or start-up files, or hook configuration.
-- **Permission decisions** (PreToolUse): the hook only ever returns `deny` or `ask`, never `allow`, so it can make a call stricter but never skip your own permission check. It decides for Bash / Edit / Write / MultiEdit when one of your feedback rules matches (`deny` or `ask` by the rule's `count` / `severity`), and for `Agent` / `SendMessage` only when `agentLaunchGuard` is on (`ask`, showing the full text). In every other case it passes the event on unchanged. It never changes the permission mode, settings, agents or Remote Control.
-- **Context it adds**: on UserPromptSubmit it adds the rules file and your confirmed feedback rules (`count >= 3`) to the context. PostToolUse, Stop and SubagentStop give Claude the gate results and rule violations (as feedback or a block reason); PostToolUse(Agent) adds a finished subagent's results to the caller's context. When [stop_review](#stop_review) is enabled in `gate.yaml`, Stop / SubagentStop also return the review instructions as a block reason (they include the paths of the files the session changed and the text of `stop_review.prompt` from `gate.yaml`) and tell Claude to invoke a bundled `effort-<level>` skill. The `prompt` text reaches Claude as instructions, so review the `gate.yaml` of a repository you do not trust the same way you review its commands.
-- **Bundled skills and effort**: the `effort-<level>` skills only switch the effort (the amount of reasoning, which affects usage) of the rest of the turn that invoked them. They declare no `allowed-tools`, `model` or `hooks`, add no tools or permissions, and leave the session setting unchanged.
-- **Settings hooks**: `hooks/hooks.json` registers a `command` hook for each event, which runs `scripts/hook.sh` and then `feedback-gate claude <Event>` (the Go binary) with the event's JSON on stdin. It runs the same checks as the mod hooks and returns the same things (deny / ask, block, added context), so the points above apply to it too. It exits without doing anything when the mod's marker for the session exists, or when the binary is neither cached nor downloadable. It reads the plugin settings from the `CLAUDE_PLUGIN_OPTION_*` environment variables.
-- **Commands**: it registers `/correct` at session start, and its `command.run` hook answers only that command.
-- **Bundled files**: `hooks/register.js` is built from `src/` by `scripts/build.ts` and is not minified. The message texts (`locales/<lang>.yaml`) are split out as plain strings into `hooks/vendor/locales-<lang>.js` to keep `register.js` small. `hooks/vendor/yaml.js` and `hooks/vendor/i18next.js` are the npm packages [`yaml`](https://www.npmjs.com/package/yaml) and [`i18next`](https://www.npmjs.com/package/i18next) at the versions pinned in `package.json` / `bun.lock`, minified only to keep each file small. The getters, `Object.defineProperty` and promise checks (`typeof x.then === "function"`) that a scan reports are in these two libraries (yaml's document classes, i18next's async loading). The plugin's own code uses no `Proxy`, `eval` or `new Function`.
+The full list of what it reads, runs and writes is in [Security and permissions](docs/security.md).
 
-## Development
+## Documentation
 
-Requires [Bun](https://bun.sh) and [Go](https://go.dev) (1.27 or newer). With [mise](https://mise.jdx.dev/), `mise install` sets up everything `mise.toml` lists (bun, node, go, golangci-lint, goreleaser) and `mise run lint|fmt|test|build` are the entry points (see below). The hook module runs inside Claude Code, which only resolves relative imports and `claude-code`; so the source in `src/` (plus the `yaml` and `i18next` packages, and the `locales/*.yaml` message files, imported as text) is bundled into `hooks/register.js`, with `yaml` and `i18next` split out, minified, into `hooks/vendor/*.js` that the bundle imports by relative path. This keeps every file well under the 256 KiB per-file limit of the Claude plugin directory, while the plugin's own code stays readable. `hooks/hooks.json` points at the bundle. All file and process access goes through the engine's `$` API (`$.fs`, `$.process`, `$.env`, `$.session`), wrapped by the `Io` interface in `src/io.ts`; the tests run the same code against Node's `fs` / `child_process`.
+| Page | Contents |
+| --- | --- |
+| [Hooks](docs/hooks.md) | What runs on each event, files written by Bash, file-scoped rules, results of subagents |
+| [gate.yaml phases and behavior](docs/gate.md) | `session_start`, `stop_review`, sharing runs between agents, failures and the success report |
+| [What it reads](docs/files.md) | Where rules and state files live, broken rules, the running display |
+| [Commands and skills](docs/commands-and-skills.md) | `/correct`, `/hook-list`, the bundled skills |
+| [Settings](docs/settings.md) | Agent launch guard, automatic count increase, language |
+| [Install](docs/install.md) | Codex, Claude Cowork, requirements |
+| [Managed environments](docs/managed-environments.md) | Settings hooks and the `feedback-gate` binary |
+| [Security and permissions](docs/security.md) | What it reads, runs, writes and decides |
+| [Development](docs/development.md) | Build, test, release |
 
-The code is layered so that the checks do not depend on the host that runs them: the core takes the classic command-hook JSON as its input and returns an `Outcome`; the mod (`src/register.ts`) and the command-hook CLI call it. The command-hook CLI is the Go binary `feedback-gate` (`cmd/feedback-gate`, one `feedback-gate claude <Event>` / `feedback-gate codex <Event>` / `feedback-gate version` command; the checks live in `internal/hookgate`, one Go file per module of `src/`, and the message files in `locales/` are embedded): a `Host` (`options` from the environment, `normalize` host JSON → core event and payloads, `render` core `Outcome` → host output) is what differs between Claude Code and Codex. A tool that edits several files at once (Codex's `apply_patch`) is normalized to one payload per file; the core offers `preToolUseEdits` / `postToolUseEdits` for that.
+Every `gate.yaml` key is in [`scripts/gate.schema.json`](scripts/gate.schema.json) and [`skills/gate/reference.md`](skills/gate/reference.md).
 
-```
-mise install         # install the toolchain of mise.toml (bun, node, go, golangci-lint, goreleaser)
-bun install          # install dev dependencies
-mise run build       # go build -o bin/feedback-gate ./cmd/feedback-gate
-mise run lint        # golangci-lint run ./... && bun run lint
-mise run fmt         # golangci-lint fmt ./... && bun run format
-mise run test        # go test ./... && bun run test
+## License
 
-go test ./...        # Go unit tests (internal/hookgate, ports of the tests/*.spec.ts files)
-bun run lint         # Biome (lint + format check); `bun run format` fixes
-bun run typecheck    # tsc --noEmit
-bun run test         # bun test (tests/*.spec.ts)
-bun run build        # bundle src/register.ts -> hooks/register.js (+ hooks/vendor/*.js)
-bun run test:plugin  # build, then run hooks/register.test.ts on the real engine
-bun run validate:plugin  # claude plugin validate . --strict
-bun scripts/ui-screenshots.ts out/  # capture the /hook-list page (sample in tests/fixtures/hook-list/)
-```
-
-The TypeScript integration tests (`tests/cli.spec.ts`, `tests/codex-cli.spec.ts`) spawn the Go binary as a child process and check its stdin / stdout / stderr / exit code; `tests/hook-script.spec.ts` and `tests/codex-hook-script.spec.ts` test `scripts/hook.sh` with a fake binary and a fake release directory (`FEEDBACK_GATE_RELEASE_BASE_URL=file://...`). The binary is `FEEDBACK_GATE_BIN` when set (CI builds it once), otherwise the tests run `go build` into `node_modules/.cache/feedback-gate/feedback-gate`.
-
-The bundle (`hooks/register.js` and `hooks/vendor/`) is generated and committed by CI on the pull request; contributors do not commit it (it is not in the repository until CI adds it). The "Build bundle" workflow builds it on every pull request (same-repo branches) and pushes a `chore: build bundle` commit to the branch, adding the file or updating it if it changed. Run `bun run build` to produce it locally (e.g. for `bun run test:plugin`) and leave it uncommitted. Do not edit it by hand. `scripts/build.ts` fails the build if the bundle imports anything but relative paths and `claude-code`, or if any output file is 200 KiB or larger. It also writes invisible characters in the output as `\uXXXX` escapes, and fails if a parameter name of the `classic.PreToolUse` hook appears anywhere else in `hooks/register.js` (the plugin directory refuses a permission hook whose `next` it cannot trace). The CI workflow then runs `claude plugin validate . --strict` and `claude plugin test .` on the built bundle, using the Claude Code CLI from `devDependencies` (`@anthropic-ai/claude-code`, pinned by `bun.lock` and updated by Dependabot).
-
-The "UI screenshots" workflow captures the `/hook-list` page (`webui/hook-list.html`) on every pull request (same-repository branches) from the sample in `tests/fixtures/hook-list/` (`bun scripts/ui-screenshots.ts <out dir>`, which also works locally) and posts the images in a pull request comment (the same comment is updated on every push). The images go to `pr-<number>/` on the `ui-screenshots` branch and are referenced by URLs that contain the commit SHA. Capturing fails on a JS error, data that was not embedded, an image that did not load, horizontal overflow or a blank capture, and before the comment is written each image URL is checked to serve exactly what was captured, so no broken image is posted.
-
-Dependencies have a 7-day freeze period: `bunfig.toml` sets `minimumReleaseAge` so `bun install` only resolves versions published at least 7 days ago, and Dependabot (`.github/dependabot.yml`) waits 7 days (`cooldown`) before proposing npm or GitHub Actions updates. Actions are pinned to commit SHAs.
-
-### Releases
-
-Versions are managed by [release-please](https://github.com/googleapis/release-please). Write commit messages (and PR titles) as [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `refactor:`, `chore:`, ...): on every push to `main` the "Release Please" workflow opens or updates a release PR that bumps the version in `package.json`, `.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`, `.codex-plugin/plugin.json` and `plugin.json` and updates `CHANGELOG.md`; merging it tags the release (`vX.Y.Z`) and creates the GitHub release. The same workflow then runs [GoReleaser](https://goreleaser.com/) (`.goreleaser.yaml`) on the tag, which builds `feedback-gate` for linux / darwin / windows × amd64 / arm64 and attaches `feedback-gate_<os>_<arch>.tar.gz` (`.zip` for windows) and `checksums.txt` to that release (`release.mode: keep-existing`, since release-please owns the release notes). `scripts/hook.sh` downloads exactly those files for the plugin version, so a plugin version is usable only after its release has the binaries. The release-please job only builds them for releases it creates, so the version `plugin.json` already carries when the Go port is merged (`v0.9.1`) has none yet: after merging the Go port, run the "Release Please" workflow once by hand (Actions → Release Please → Run workflow, from `main`, with `tag` = `v0.9.1`, or `gh workflow run release-please.yml -f tag=v0.9.1`). That `workflow_dispatch` run skips release-please, builds the HEAD of the branch it was started from (the old tag has no Go code) with GoReleaser as that tag, and attaches the binaries to the existing release, so existing installs get a binary. The same can be used to re-attach binaries to any release. Both workflows use the default `GITHUB_TOKEN` (no personal access token), so commits made by the bot and the release-please PR do not trigger CI on their own. If you have required status checks, re-run them or push an empty commit by hand.
+[MIT](LICENSE)

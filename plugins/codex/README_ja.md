@@ -8,7 +8,7 @@
 - `{.claude,.agents}/gate.yaml` のプロジェクト別の品質ゲートを、ファイル編集後と Codex の停止時に走らせる。
 - Codex が承認待ちになったときと停止したときにデスクトップ通知を出す（macOS、`terminal-notifier`）。
 
-Codex は `.agents/` を先に、次に `.claude/` を見ます（Claude Code は逆順）。状態ファイルは両者のうち先に存在する方の `.gate-status/` に置きます。一方を他方へのシンボリックリンクにしても構いません。[読み込むもの](../../README_ja.md#読み込むもの)を参照。
+Codex は `.agents/` を先に、次に `.claude/` を見ます（Claude Code は逆順）。状態ファイルは両者のうち先に存在する方の `.gate-status/` に置きます。一方を他方へのシンボリックリンクにしても構いません。[読み込むもの](../../docs/ja/files.md)を参照。
 
 ## インストール
 
@@ -65,7 +65,7 @@ bash plugins/codex/scripts/install-hooks.sh --remove [...]   # 写しからプ�
 2. **フックが無効。** `codex features list` で `hooks` が false（どこかの `config.toml` に `[features] hooks = false`）: 有効にするか、その行を消してください。
 3. **写しが無い、または古い。** `~/.codex/hooks.json` に `plugins/codex/scripts/hook.sh` のエントリが無い、または既に無いパス（消えたバージョンのディレクトリ、移したチェックアウト）を指している: 現在の場所から `install-hooks.sh` を再実行してください。
 4. **バイナリを入れられなかった。** フックは exit 0 で、標準エラーに 1 行 `feedback-gate: could not install the feedback-gate v<version> binary (<reason>); the hook did nothing`（`no-download-tool`、`no-sha256-tool`、`download-failed` など）を出します: [前提](#前提)を参照。`install-hooks.sh` も同じ行を出して exit 1 するので、上の手順 2 の時点で分かります。
-5. **管理層のフックだけが動く。** `/hooks` でユーザー（とプラグイン）のフックがポリシーで飛ばされていると出る、または管理者の `requirements.toml`（Linux / macOS は `/etc/codex/requirements.toml`、Windows は `%ProgramData%\OpenAI\Codex\requirements.toml`。MDM のプロファイルや ChatGPT ワークスペースのクラウド配布の requirements でも同じ設定ができます）に `allow_managed_hooks_only = true` がある。このとき Codex はユーザー・プロジェクト・セッション・*プラグイン*のフックをすべて飛ばし、管理層のフック、つまり `requirements.toml` の `[hooks]`（スクリプトは `managed_dir` の下）かシステム層の `hooks.json`（`/etc/codex/hooks.json`）だけを走らせます。Claude Code 版で組織のガードが mod のフックを飛ばす状況（[組織管理の環境向けの settings hook](../../README_ja.md#組織管理の環境向けの-settings-hook)）の Codex 版ですが、違いが 1 つあります。Claude Code のプラグインはガードが飛ばさない settings hook を同梱できるのに対し、Codex のプラグインに同梱できるものはこのポリシーを越えられません。`~/.codex/` やプロジェクトに書いたものも動かないので、フックは管理者が配る必要があります（管理層のフックは `/hooks` での信頼が要りません）。自分がマシンの管理者権限を持っているなら、手順 2 のセットアップコマンドをもう一度実行してください。ポリシーを判定して `/etc/codex/hooks.json` に入れます（[管理層に自分でフックを置く](#管理層に自分でフックを置く)）。そうでなければ、管理者に渡すものは用意してあります。
+5. **管理層のフックだけが動く。** `/hooks` でユーザー（とプラグイン）のフックがポリシーで飛ばされていると出る、または管理者の `requirements.toml`（Linux / macOS は `/etc/codex/requirements.toml`、Windows は `%ProgramData%\OpenAI\Codex\requirements.toml`。MDM のプロファイルや ChatGPT ワークスペースのクラウド配布の requirements でも同じ設定ができます）に `allow_managed_hooks_only = true` がある。このとき Codex はユーザー・プロジェクト・セッション・*プラグイン*のフックをすべて飛ばし、管理層のフック、つまり `requirements.toml` の `[hooks]`（スクリプトは `managed_dir` の下）かシステム層の `hooks.json`（`/etc/codex/hooks.json`）だけを走らせます。Claude Code 版で組織のガードが mod のフックを飛ばす状況（[組織管理の環境向けの settings hook](../../docs/ja/managed-environments.md)）の Codex 版ですが、違いが 1 つあります。Claude Code のプラグインはガードが飛ばさない settings hook を同梱できるのに対し、Codex のプラグインに同梱できるものはこのポリシーを越えられません。`~/.codex/` やプロジェクトに書いたものも動かないので、フックは管理者が配る必要があります（管理層のフックは `/hooks` での信頼が要りません）。自分がマシンの管理者権限を持っているなら、手順 2 のセットアップコマンドをもう一度実行してください。ポリシーを判定して `/etc/codex/hooks.json` に入れます（[管理層に自分でフックを置く](#管理層に自分でフックを置く)）。そうでなければ、管理者に渡すものは用意してあります。
 
    - `bash plugins/codex/scripts/install-hooks.sh --print > hooks.json` を `/etc/codex/hooks.json` として置いてもらう（既にあるなら `--print --to /etc/codex/hooks.json` で、そこのフックを残したまま）。または
    - `bash plugins/codex/scripts/install-hooks.sh --toml` の出力を `requirements.toml` に貼ってもらう（ユーザーがフックを切れないよう `[features] hooks = true` も一緒に）。
@@ -96,11 +96,11 @@ Codex は一致したフックを全ファイル分すべて走らせるので�
 
 - `bash`、および初回は `curl` または `wget`: フックは Go 製のバイナリ `feedback-gate` を動かします。`scripts/hook.sh` が、このリポジトリの GitHub Releases からプラグインのバージョンの `feedback-gate_<os>_<arch>.tar.gz` をダウンロードし（SHA-256 を `checksums.txt` で照合します。`tar` と `sha256sum` / `shasum` も必要で、ハッシュのコマンドが無ければ何も入れません）、`${FEEDBACK_GATE_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/feedback-gate}/<version>/feedback-gate` に置きます。ダウンロード（数 MB）は、インストールや更新のあとの最初のフック（SessionStart）で、そのフックの `timeout` の中で、バージョンごとに 1 回だけ行い、その後は何も要りません。バイナリがキャッシュに無く、ダウンロードもできなければ、フックは何もせず（exit 0）、標準エラーに 1 行だけ出します（`feedback-gate: could not install the feedback-gate v<version> binary (<reason>); the hook did nothing`）。`FEEDBACK_GATE_BIN`（実行ファイルのパス。ビルド済みのバイナリを指定すればダウンロードを避けられます）を指定すると探索を省き、`FEEDBACK_GATE_RELEASE_BASE_URL` でダウンロード先を差し替えられます（`file://` のディレクトリも使えますが `curl` が必要です。`wget` は `file://` を読めません）。ほかのバージョンのキャッシュのディレクトリは、30 日使われなかった場合にだけ削除します。対応は Linux と macOS の amd64 と arm64 です。
 - `terminal-notifier`（任意、macOS）: デスクトップ通知。
-- `dogwood`（任意）: gate のポリシーエンジン。[メインの README](../../README_ja.md#前提) を参照。
+- `dogwood`（任意）: gate のポリシーエンジン。[メインの README](../../docs/ja/install.md#前提) を参照。
 
 ## フック
 
-すべてのイベントが `hooks/hooks.json` の command hook `bash "${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh" <Event>` で、`feedback-gate codex <Event>`（`cmd/feedback-gate` から作る Go 製のバイナリ。検査は `internal/hookgate`）を走らせます。Codex は Claude Code の command hook と同じイベント名・同じ stdin の JSON を送り、同じ出力（`permissionDecision`、`decision: block`、`additionalContext`、終了コード 2）を読むので、[メインの README の表](../../README_ja.md#フック) がそのまま当てはまります。違いは次のとおりです。
+すべてのイベントが `hooks/hooks.json` の command hook `bash "${PLUGIN_ROOT}/plugins/codex/scripts/hook.sh" <Event>` で、`feedback-gate codex <Event>`（`cmd/feedback-gate` から作る Go 製のバイナリ。検査は `internal/hookgate`）を走らせます。Codex は Claude Code の command hook と同じイベント名・同じ stdin の JSON を送り、同じ出力（`permissionDecision`、`decision: block`、`additionalContext`、終了コード 2）を読むので、[メインの README の表](../../docs/ja/hooks.md) がそのまま当てはまります。違いは次のとおりです。
 
 | Codex のイベント | 走るもの | Claude Code との違い |
 | --- | --- | --- |
