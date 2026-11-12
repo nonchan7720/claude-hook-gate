@@ -1959,6 +1959,13 @@ async function notification(io, type, payload) {
 var EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 var DEFAULT_EFFORT = "xhigh";
 var DEFAULT_MAX_ROUNDS = 1;
+var MAX_ROUNDS_LIMIT = 5;
+var MAX_PROMPT_CHARS = 2000;
+var MAX_LABEL_CHARS = 300;
+var clip = (s, max) => {
+  const cps = [...s];
+  return cps.length > max ? `${cps.slice(0, max).join("")}…` : s;
+};
 var MAX_LISTED_FILES = 30;
 function parseStopReview(raw) {
   if (raw !== true && !isDict(raw))
@@ -1966,12 +1973,12 @@ function parseStopReview(raw) {
   const d = isDict(raw) ? raw : {};
   if (d.enabled === false)
     return;
-  const rounds = Number(d.max_rounds);
+  const rounds = typeof d.max_rounds === "number" ? d.max_rounds : Number.NaN;
   return {
     effort: d.effort === false ? null : typeof d.effort === "string" && EFFORT_LEVELS.includes(d.effort) ? d.effort : DEFAULT_EFFORT,
     match: asList(d.match).map(String),
-    maxRounds: Number.isInteger(rounds) && rounds >= 1 ? rounds : DEFAULT_MAX_ROUNDS,
-    prompt: typeof d.prompt === "string" ? d.prompt.trim() : "",
+    maxRounds: Number.isInteger(rounds) && rounds >= 1 ? Math.min(rounds, MAX_ROUNDS_LIMIT) : DEFAULT_MAX_ROUNDS,
+    prompt: typeof d.prompt === "string" ? clip(d.prompt.trim(), MAX_PROMPT_CHARS) : "",
     subagents: d.subagents !== false
   };
 }
@@ -1988,10 +1995,17 @@ async function notePendingReview(io, stateId, paths) {
     const existing = await io.readFile(memo) ?? "";
     const have = new Set(existing.split(`
 `));
-    const added = paths.filter((p) => p !== "" && !have.has(p));
+    const added = paths.filter((p) => p !== "" && !/[\n\r]/.test(p) && !have.has(p));
     if (added.length > 0)
       await io.writeFile(memo, `${existing}${[...new Set(added)].map((p) => `${p}
 `).join("")}`);
+  } catch {}
+}
+async function resetReviewRounds(io, payload) {
+  if (payload.stop_hook_active === true)
+    return;
+  try {
+    await io.removeFiles([roundsPath(io, stateIdOf(payload))]);
   } catch {}
 }
 async function loadConfig(io, path) {
@@ -2019,7 +2033,12 @@ async function main2(io, payload) {
     return ok();
   }
   const projectDir = io.projectDir || io.cwd;
-  const globs = compileGlobs(cfg.match);
+  let globs = [];
+  try {
+    globs = compileGlobs(cfg.match);
+  } catch {
+    globs = [];
+  }
   const labels = [];
   for (const line of (await io.readFile(pending) ?? "").split(`
 `)) {
@@ -2028,7 +2047,7 @@ async function main2(io, payload) {
     const [root, rel] = splitRoot(projectDir, line);
     if (globs.length > 0 && !globs.some((rx) => rx.test(rel)))
       continue;
-    const label = rootLabel(root, projectDir, rel);
+    const label = clip(rootLabel(root, projectDir, rel), MAX_LABEL_CHARS);
     if (!labels.includes(label))
       labels.push(label);
   }
@@ -2051,7 +2070,7 @@ async function main2(io, payload) {
   if (labels.length > MAX_LISTED_FILES)
     lines.push(t("stopReview.more", { count: labels.length - MAX_LISTED_FILES }));
   if (cfg.prompt)
-    lines.push(cfg.prompt);
+    lines.push(t("stopReview.prompt"), cfg.prompt);
   const reason = lines.join(`
 `);
   return { exitCode: 2, stdout: `${JSON.stringify({ decision: "block", reason })}
@@ -3715,6 +3734,7 @@ async function allStop(io, payload) {
   let stdout = "";
   let stderr = "";
   let reportConsumed = false;
+  await resetReviewRounds(io, payload);
   for (const step of [() => stopTestGate(io, "checks", payload), () => feedbackStopCheck(io, payload), () => stopReview(io, payload)]) {
     const r = await step();
     stdout += r.stdout;
@@ -5269,11 +5289,19 @@ var stop = (io, sessionId, payload) => runSteps(io, sessionId, "Stop", [(i) => a
 function subagentStop(io, sessionId, payload) {
   let gate;
   let feedback;
+  let review;
   return runSteps(io, sessionId, "SubagentStop", [
-    async (i) => gate = await stopTestGate(i, "checks", payload),
+    async (i) => {
+      await resetReviewRounds(i, payload);
+      gate = await stopTestGate(i, "checks", payload);
+      return gate;
+    },
     async (i) => feedback = await feedbackStopCheck(i, payload),
-    async (i) => gate?.exitCode === 0 && feedback?.exitCode === 0 ? stopReview(i, payload) : ok(),
-    (i) => saveSubagentReport(i, payload, gate, feedback)
+    async (i) => review = gate?.exitCode === 0 && feedback?.exitCode === 0 ? await stopReview(i, payload) : ok(),
+    (i) => {
+      const keep = gate && !gate.report && (review?.reportConsumed || review?.exitCode === 2);
+      return saveSubagentReport(i, payload, gate && keep ? { ...gate, reportConsumed: true } : gate, feedback);
+    }
   ]);
 }
 
