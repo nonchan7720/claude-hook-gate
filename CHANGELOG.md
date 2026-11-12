@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.21.0...v0.22.0) (2026-11-12)
+
+
+### Features
+
+* **gate:** add stop_review, a self-review step at Stop / SubagentStop that switches the effort ([#107](https://github.com/nonchan7720/claude-hook-gate/issues/107)) ([8ea054e](https://github.com/nonchan7720/claude-hook-gate/commit/8ea054e0f779d301a313475858dcef107bcee4e5))
+
 ## [0.21.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.20.0...v0.21.0) (2026-11-09)
 
 
