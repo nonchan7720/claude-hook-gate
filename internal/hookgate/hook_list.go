@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -268,6 +269,21 @@ func HookListGateModel(cfg any, path, errMsg string) HookListGate {
 		if v, ok := c[key]; ok && v != nil {
 			g.Settings = append(g.Settings, HookListPair{key, Str(v)})
 		}
+	}
+	// stop_review は gate と同じ読み方（ParseStopReview）で、有効なときだけ実効値を 1 行にして出す。
+	if sr, ok := ParseStopReview(c["stop_review"]); ok {
+		effort := sr.Effort
+		if effort == "" {
+			effort = "(unchanged)"
+		}
+		parts := []string{"effort " + effort, "max_rounds " + strconv.Itoa(sr.MaxRounds)}
+		if len(sr.Match) > 0 {
+			parts = append(parts, "match "+strings.Join(sr.Match, ", "))
+		}
+		if !sr.Subagents {
+			parts = append(parts, "subagents false")
+		}
+		g.Settings = append(g.Settings, HookListPair{"stop_review", strings.Join(parts, " / ")})
 	}
 	return g
 }

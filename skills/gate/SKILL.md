@@ -22,6 +22,11 @@ runs the project's own checks in two phases:
   10 s, never blocks the session; not part of the lint / test setup, add it only when
   the user asks (see reference.md).
 
+- **`stop_review`** (Stop / SubagentStop, optional): after the checks passed, block the
+  stop once and have the model review the files it changed, at a different effort
+  (`stop_review: true`, or `effort` / `match` / `max_rounds` / `prompt`). It costs an
+  extra model turn per turn that edits files; add it only when the user asks.
+
 Field semantics are in [reference.md](reference.md) (the authoritative schema is
 `${CLAUDE_PLUGIN_ROOT}/scripts/gate.schema.json`; read it when a detail matters). How to
 find what the project runs is in [discovery.md](discovery.md). Ready-made blocks per

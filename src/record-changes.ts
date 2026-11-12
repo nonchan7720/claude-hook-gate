@@ -5,6 +5,7 @@ import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, isDict, jqStr } from './pyutil.ts'
 import { gateStatusDir } from './running-registry.ts'
+import { notePendingReview } from './stop-review.ts'
 
 export async function recordChanges(io: Io, payload: Dict): Promise<ScriptResult> {
   if (!(await findGateYaml(io))) return ok()
@@ -18,6 +19,8 @@ export async function recordChanges(io: Io, payload: Dict): Promise<ScriptResult
   if (filePath) {
     const existing = (await io.readFile(memo)) ?? ''
     if (!existing.split('\n').includes(filePath)) await io.writeFile(memo, `${existing}${filePath}\n`)
+    // stop_review 用（gate が通っても消えない一覧）
+    await notePendingReview(io, stateId, [filePath])
   }
   return ok()
 }

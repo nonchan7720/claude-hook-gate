@@ -39,6 +39,8 @@ func RecordChanges(io Io, payload Dict) ScriptResult {
 		if !found {
 			_ = io.WriteFile(memo, existing+filePath+"\n")
 		}
+		// stop_review 用（gate が通っても消えない一覧）
+		NotePendingReview(io, stateID, []string{filePath})
 	}
 	return Ok("", "")
 }

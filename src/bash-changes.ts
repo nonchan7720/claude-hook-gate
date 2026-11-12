@@ -27,6 +27,7 @@ import { type Io, ok, type ScriptResult } from './io.ts'
 import { join } from './path.ts'
 import { type Dict, isDict, jqStr } from './pyutil.ts'
 import { gateStatusDir } from './running-registry.ts'
+import { notePendingReview } from './stop-review.ts'
 import { stopTestGate } from './stop-test-gate.ts'
 
 /**
@@ -359,6 +360,8 @@ async function detect(io: Io, projectDir: string, gate: boolean, startedDirPath:
   const have = new Set(existing.split('\n'))
   const recorded = changed.filter((p) => !have.has(p))
   if (recorded.length > 0) await io.writeFile(memo, `${existing}${recorded.map((p) => `${p}\n`).join('')}`)
+  // stop_review 用（gate が通っても消えない一覧）
+  await notePendingReview(io, stateIdOf(payload), changed)
   return { changed, recorded, threshold, gate }
 }
 
