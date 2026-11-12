@@ -10,6 +10,7 @@ package hookgate
 //
 // 見直しの途中の修正も review_pending に足されるので、次の Stop でまた見直しになる。それを max_rounds（既定 1）回で
 // 打ち切る: 回数は review_rounds.<state_id>.txt に持ち、見直すものが無い Stop と、打ち切った Stop で消す。
+// 回数を数えるのは hook のブロックで続いている間（stop_hook_active）だけで、新しいターンの Stop は 0 から数える。
 
 import (
 	"math"
@@ -184,10 +185,14 @@ func StopReview(io Io, payload Dict) ScriptResult {
 		}
 	}
 
+	// 回数を引き継ぐのは、hook のブロックで続いている Stop（stop_hook_active）だけ。新しいターンの Stop では、中断などで
+	// 残った回数を使わない（残っていると、そのターンの見直しが 1 回飛ぶ）。
 	done := 0
-	if s, ok := io.ReadFile(roundsFile); ok {
-		if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && n > 0 {
-			done = n
+	if payload["stop_hook_active"] == true {
+		if s, ok := io.ReadFile(roundsFile); ok {
+			if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil && n > 0 {
+				done = n
+			}
 		}
 	}
 	if len(labels) == 0 || done >= cfg.MaxRounds {

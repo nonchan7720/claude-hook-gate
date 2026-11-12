@@ -8,6 +8,7 @@
 //
 // 見直しの途中の修正も review_pending に足されるので、次の Stop でまた見直しになる。それを max_rounds（既定 1）回で
 // 打ち切る: 回数は review_rounds.<state_id>.txt に持ち、見直すものが無い Stop と、打ち切った Stop で消す。
+// 回数を数えるのは hook のブロックで続いている間（stop_hook_active）だけで、新しいターンの Stop は 0 から数える。
 import { findGateYaml } from './config-dir.ts'
 import { asList, compileGlobs } from './glob.ts'
 import { tr } from './i18n.ts'
@@ -62,11 +63,15 @@ export const roundsPath = (io: Io, stateId: string): string => join(gateStatusDi
 
 /** 変更ファイル（絶対パス）を「まだ見直していない」一覧へ足す。changed_files と違い、gate が通っても消えない。 */
 export async function notePendingReview(io: Io, stateId: string, paths: readonly string[]): Promise<void> {
-  const memo = pendingPath(io, stateId)
-  const existing = (await io.readFile(memo)) ?? ''
-  const have = new Set(existing.split('\n'))
-  const added = paths.filter((p) => p !== '' && !have.has(p))
-  if (added.length > 0) await io.writeFile(memo, `${existing}${[...new Set(added)].map((p) => `${p}\n`).join('')}`)
+  try {
+    const memo = pendingPath(io, stateId)
+    const existing = (await io.readFile(memo)) ?? ''
+    const have = new Set(existing.split('\n'))
+    const added = paths.filter((p) => p !== '' && !have.has(p))
+    if (added.length > 0) await io.writeFile(memo, `${existing}${[...new Set(added)].map((p) => `${p}\n`).join('')}`)
+  } catch {
+    // 控えに書けなくても、呼び出し元（変更ファイルの記録と gate）は止めない。その変更が見直しの対象から漏れるだけ。
+  }
 }
 
 async function loadConfig(io: Io, path: string): Promise<StopReview | undefined> {
@@ -106,7 +111,10 @@ async function main(io: Io, payload: Dict): Promise<ScriptResult> {
     if (!labels.includes(label)) labels.push(label)
   }
 
-  const done = Number.parseInt(((await io.readFile(roundsFile)) ?? '').trim(), 10) || 0
+  // 回数を引き継ぐのは、hook のブロックで続いている Stop（stop_hook_active）だけ。新しいターンの Stop では、中断などで
+  // 残った回数を使わない（残っていると、そのターンの見直しが 1 回飛ぶ）。
+  const kept = payload.stop_hook_active === true ? Number.parseInt(((await io.readFile(roundsFile)) ?? '').trim(), 10) : 0
+  const done = Number.isInteger(kept) && kept > 0 ? kept : 0
   if (labels.length === 0 || done >= cfg.maxRounds) {
     await clear()
     // 見直しでブロックした後の Stop は stop_hook_active なので、完了通知を出させるために印を返す（all-stop.ts）。

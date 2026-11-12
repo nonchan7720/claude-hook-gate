@@ -81,7 +81,7 @@ describe('stop-review', () => {
     expect(again.reportConsumed).toBe(true)
     expect(fs.existsSync(roundsPath(io(), 'sess1'))).toBe(false)
     // 状態が消えたあとの Stop は印を返さない
-    expect((await run()).reportConsumed).toBeUndefined()
+    expect((await run({ stop_hook_active: true })).reportConsumed).toBeUndefined()
   })
 
   test('見直し中の修正は max_rounds 回まで再度見直させる', async () => {
@@ -89,15 +89,35 @@ describe('stop-review', () => {
     await note('sess1', 'a.ts')
     expect((await run()).exitCode).toBe(2)
     await note('sess1', 'b.ts')
-    const second = await run()
+    const second = await run({ stop_hook_active: true })
     expect(second.exitCode).toBe(2)
     expect(reasonOf(second.stdout)).toContain('2/2')
     expect(reasonOf(second.stdout)).not.toContain('- a.ts')
     await note('sess1', 'c.ts')
-    expect((await run()).exitCode).toBe(0)
+    expect((await run({ stop_hook_active: true })).exitCode).toBe(0)
     // 打ち切りで状態が消え、次のターンの変更はまた見直す
     await note('sess1', 'd.ts')
     expect((await run()).exitCode).toBe(2)
+  })
+
+  test('中断などで回数が残っていても、新しいターンの Stop（stop_hook_active でない）は 1 回目から見直す', async () => {
+    writeGateYaml(proj, { stop_review: true })
+    await note('sess1', 'a.ts')
+    expect((await run()).exitCode).toBe(2)
+    // ここでターンが中断され、review_rounds が残ったまま次のターンで編集した
+    await note('sess1', 'b.ts')
+    const next = await run()
+    expect(next.exitCode).toBe(2)
+    expect(reasonOf(next.stdout)).toContain('1/1')
+    // 同じターンの続き（ブロック後）の修正は、max_rounds: 1 なので見直さずに通す
+    await note('sess1', 'c.ts')
+    expect((await run({ stop_hook_active: true })).exitCode).toBe(0)
+  })
+
+  test('控えに書けなくても notePendingReview は例外を投げない', async () => {
+    const base = io()
+    const broken = { ...base, writeFile: () => Promise.reject(new Error('read-only')) }
+    await notePendingReview(broken, 'sess1', [path.join(proj, 'a.ts')])
   })
 
   test('match に合う変更だけを対象にする', async () => {

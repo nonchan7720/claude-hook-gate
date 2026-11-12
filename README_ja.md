@@ -316,7 +316,7 @@ stop_review:
 - **何を返すか。** 停止を 1 回ブロックし（`decision: block`）、理由として手順を返します: まず Skill ツールで `feedback-gate:effort-<effort>` を呼んでそのターンの残りの effort を切り替え、変更ファイルの差分と周辺を実物で読み直し、依頼を満たしているか・ロジックや境界条件・呼び出し側やテスト、ドキュメントの更新漏れ・不要な変更の残り・実際に動かしたかを確かめ、問題があれば直し、無ければ確かめた内容を 1〜3 行で報告して止まる、というものです。末尾に変更ファイルの一覧（30 件まで）と `prompt` が付きます。
 - **effort の切り替え。** hook の出力にはセッションの effort を変える手段が無いので、同梱スキル（[`/feedback-gate:effort-<level>`](#feedback-gateeffort-level)）の frontmatter `effort` を使います。効くのは見直しのターンの残りだけで、セッションの設定は変わりません。スキルを呼ぶのはモデルなので、呼ばなかった場合や、スキルの `effort` を扱わない環境（Codex など）では effort は変わらず、見直しだけが行われます。
 - **変更ファイルの控え。** `changed_files` と同じタイミング（Edit / Write / MultiEdit と、Bash が書き換えたファイル）で `.claude/.gate-status/review_pending.<session>[--<agent>].txt` に足します。`changed_files` と違って gate が通っても消えず、見直しを出したときに消します。
-- **繰り返さない。** 見直しの途中の修正も控えに足されるので、次の Stop でまた見直しになります。これを `max_rounds` 回（`review_rounds.<session>[--<agent>].txt`）で打ち切ります。既定の 1 では、見直しは 1 ターンに 1 回で、その修正は（gate と `stop_check` は通したうえで）見直さずに停止を通します。回数は、見直すものが無かった Stop と打ち切った Stop で 0 に戻ります。
+- **繰り返さない。** 見直しの途中の修正も控えに足されるので、次の Stop でまた見直しになります。これを `max_rounds` 回（`review_rounds.<session>[--<agent>].txt`）で打ち切ります。既定の 1 では、見直しは 1 ターンに 1 回で、その修正は（gate と `stop_check` は通したうえで）見直さずに停止を通します。回数は、見直すものが無かった Stop と打ち切った Stop で 0 に戻ります。数えるのは hook のブロックで続いている間（`stop_hook_active`）だけなので、ターンが中断されて回数が残っても、次のターンの Stop は 1 回目から見直します。
 - 状態ファイルは他と同じく SessionStart の `reset-gate`（`startup` / `clear`、または 24 時間超）が消します。見直しでブロックしたあと実際に止まった回には、`stop` 通知を出します。
 
 ### エージェント間の実行共有
