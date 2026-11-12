@@ -30,9 +30,9 @@ rules:
     run_checks:
       - verify
 
-# 停止の前に、今回変更したファイルを同じモデルに見直させる（effort は同梱スキル effort-xhigh で切り替える）。
+# 停止の前に、今回変更したファイルを同じモデルに見直させる（effort は同梱スキル effort-high で切り替える）。
 stop_review:
-  effort: xhigh
+  effort: high
 
 consistency_checks:
   - name: verify
