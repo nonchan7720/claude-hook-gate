@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.22.1](https://github.com/nonchan7720/claude-hook-gate/compare/v0.22.0...v0.22.1) (2026-11-12)
+
+
+### Documentation
+
+* shorten the README, move the reference into docs/, and enable stop_review in this repository ([#109](https://github.com/nonchan7720/claude-hook-gate/issues/109)) ([6da31a9](https://github.com/nonchan7720/claude-hook-gate/commit/6da31a966468bf156064fb13094fe9a282f0574c))
+
 ## [0.22.0](https://github.com/nonchan7720/claude-hook-gate/compare/v0.21.0...v0.22.0) (2026-11-12)
 
 
