@@ -1,0 +1,37 @@
+[
+  {
+    "file": "1-overview.png",
+    "title": "全体（先頭）",
+    "description": "件数のまとめと、gate.yaml の rules。"
+  },
+  {
+    "file": "2-gate.png",
+    "title": "gate.yaml",
+    "description": "rules / consistency_checks / session_start と、それぞれが動くタイミング。"
+  },
+  {
+    "file": "3-feedback.png",
+    "title": "feedback ルールの一覧",
+    "description": "1 ルール 1 行。段階・置き場所・イベントで絞り込める。"
+  },
+  {
+    "file": "4-feedback-filtered.png",
+    "title": "絞り込みと詳細",
+    "description": "「deny」で絞り込み、1 行を開いた状態（enforce の when / check / message）。"
+  },
+  {
+    "file": "5-dark.png",
+    "title": "ダークテーマ",
+    "description": "OS の設定がダークのとき。"
+  },
+  {
+    "file": "6-mobile.png",
+    "title": "スマホ幅（390px）",
+    "description": "表は 1 行を折り返して表示する。"
+  },
+  {
+    "file": "7-english.png",
+    "title": "英語",
+    "description": "language が en のとき。"
+  }
+]
